@@ -1,8 +1,9 @@
-//! Design tokens (colors, type, spacing), the egui style built from them, and the form helpers
-//! every dialog uses. Shared components (buttons, tabs, pills, empty states) are in `kit.rs`.
+//! Design tokens (colors, type, spacing, radii), the egui style built from them, and the form
+//! helpers every dialog uses. Shared components (buttons, menus, badges, cards) are in `kit.rs`.
 //!
-//! Every screen draws with these tokens: [`Palette`] for colors (light and dark), [`medium`],
-//! [`semibold`] and [`icon_font`] for type. The accent is the indigo of the app icon.
+//! The tokens are those of the design book in `design/` (`design/css/tokens.css`): two themes,
+//! Graphite (dark) and Paper (light). Every screen draws with [`Palette`] and the type helpers
+//! [`medium`], [`semibold`], [`mono`] and [`icon_font`].
 
 use eframe::egui::{
     self, Align, Color32, CornerRadius, FontFamily, FontId, Layout, Margin, Shadow, Stroke, Theme,
@@ -15,89 +16,224 @@ use crate::settings::ThemeMode;
 /// Colors of one theme.
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
-    /// Content area: the terminal's surroundings, file lists, the welcome screen.
+    pub dark: bool,
+    /// Content: the canvas card around the terminal, file lists, the start page.
     pub canvas: Color32,
-    /// Window chrome: sidebar, tab strip, status bar.
+    /// Window frame: sidebar and the title row.
     pub chrome: Color32,
-    /// Raised surfaces: inputs, cards, dialogs, menus.
+    /// Raised surfaces on the canvas: in-pane connection cards.
     pub surface: Color32,
-    /// Hovered rows and quiet button fills.
+    /// Dialogs.
+    pub dialog: Color32,
+    /// Cards inside dialogs and pages.
+    pub card: Color32,
+    /// Menus, popovers, toasts, tooltips.
+    pub raised: Color32,
+    /// The command palette.
+    pub sheet: Color32,
+    /// Inputs (inset in the dark theme).
+    pub field: Color32,
+    pub field_border: Color32,
+    /// Hovered rows and quiet button fills (translucent, works on any surface).
     pub hover: Color32,
-    /// Pressed state and subtle fills (segmented control track, count pills).
+    /// Pressed state and quiet tracks (translucent).
     pub subtle: Color32,
+    /// Hairlines.
     pub border: Color32,
     pub border_strong: Color32,
+    /// The faintest dividers (inside lists).
+    pub line_soft: Color32,
     pub text: Color32,
     pub text_muted: Color32,
     pub text_faint: Color32,
     pub accent: Color32,
     pub accent_hover: Color32,
+    pub accent_press: Color32,
     /// Text on an accent fill.
     pub on_accent: Color32,
     /// Background of selected rows and "on" toggles.
     pub accent_soft: Color32,
-    /// Accent-colored text (readable on both the canvas and `accent_soft`).
+    /// Even quieter accent wash (drop targets, the active editor line).
+    pub accent_softer: Color32,
+    /// Accent borders (focus rings, drop targets).
+    pub accent_line: Color32,
+    /// Accent-colored text (readable on the canvas and on `accent_soft`).
     pub accent_text: Color32,
     pub ok: Color32,
     pub warn: Color32,
     pub err: Color32,
     pub info: Color32,
-    /// Folder icons in file lists and the sidebar.
+    /// Browsing as root (sudo) in SFTP.
+    pub root: Color32,
+    /// Folder icons.
     pub folder: Color32,
+    /// Behind dialogs.
+    pub scrim: Color32,
+    /// The ring around the canvas card and the active tab.
+    pub card_ring: Color32,
+    /// The active tab's fill.
+    pub tab_on: Color32,
+    /// A secondary button at rest.
+    pub button: Color32,
+    pub button_border: Color32,
+    /// The raised segment of a segmented control.
+    pub segment_on: Color32,
+    /// The side navigation of two-pane dialogs.
+    pub nav: Color32,
+    /// The footer band of dialogs.
+    pub footer: Color32,
 }
 
-const LIGHT: Palette = Palette {
-    // The background of the "TernaryShell Light" terminal scheme, so the terminal blends in.
-    canvas: Color32::from_rgb(0xfb, 0xfb, 0xfc),
-    chrome: Color32::from_rgb(0xf5, 0xf5, 0xf7),
-    surface: Color32::from_rgb(0xff, 0xff, 0xff),
-    hover: Color32::from_rgb(0xef, 0xef, 0xf3),
-    subtle: Color32::from_rgb(0xe8, 0xe8, 0xee),
-    border: Color32::from_rgb(0xe3, 0xe3, 0xe9),
-    border_strong: Color32::from_rgb(0xcf, 0xcf, 0xd8),
-    text: Color32::from_rgb(0x1a, 0x1a, 0x20),
-    text_muted: Color32::from_rgb(0x68, 0x68, 0x74),
-    text_faint: Color32::from_rgb(0x96, 0x96, 0xa2),
-    accent: Color32::from_rgb(0x6d, 0x5a, 0xe6),
-    accent_hover: Color32::from_rgb(0x5b, 0x48, 0xd6),
-    on_accent: Color32::WHITE,
-    accent_soft: Color32::from_rgb(0xee, 0xeb, 0xfd),
-    accent_text: Color32::from_rgb(0x56, 0x41, 0xd0),
-    ok: Color32::from_rgb(0x16, 0x8c, 0x4e),
-    warn: Color32::from_rgb(0xb4, 0x70, 0x00),
-    err: Color32::from_rgb(0xd6, 0x30, 0x31),
-    info: Color32::from_rgb(0x25, 0x63, 0xdc),
-    folder: Color32::from_rgb(0x5b, 0x6e, 0xe8),
-};
+/// Unmultiplied RGBA, for the translucent tokens.
+const fn rgba(r: u8, g: u8, b: u8, a: f32) -> Color32 {
+    Color32::from_rgba_unmultiplied_const(r, g, b, (a * 255.0) as u8)
+}
+
+const fn rgb(hex: u32) -> Color32 {
+    Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+}
 
 const DARK: Palette = Palette {
-    // The background of the "TernaryShell Dark" terminal scheme, so the terminal blends in.
-    canvas: Color32::from_rgb(0x17, 0x19, 0x1e),
-    chrome: Color32::from_rgb(0x12, 0x13, 0x17),
-    surface: Color32::from_rgb(0x1f, 0x20, 0x26),
-    hover: Color32::from_rgb(0x26, 0x27, 0x2e),
-    subtle: Color32::from_rgb(0x2c, 0x2d, 0x35),
-    border: Color32::from_rgb(0x2b, 0x2c, 0x33),
-    border_strong: Color32::from_rgb(0x3d, 0x3f, 0x48),
-    text: Color32::from_rgb(0xe8, 0xe8, 0xec),
-    text_muted: Color32::from_rgb(0x9e, 0x9f, 0xa8),
-    text_faint: Color32::from_rgb(0x6e, 0x6f, 0x78),
-    accent: Color32::from_rgb(0x8b, 0x7c, 0xf6),
-    accent_hover: Color32::from_rgb(0xa0, 0x94, 0xf8),
+    dark: true,
+    canvas: rgb(0x16171c),
+    chrome: rgb(0x0f1014),
+    surface: rgb(0x1c1d23),
+    dialog: rgb(0x1b1c22),
+    card: rgb(0x1a1b21),
+    raised: rgb(0x23242b),
+    sheet: rgb(0x1f2026),
+    field: rgb(0x121318),
+    field_border: rgb(0x2c2d35),
+    hover: rgba(255, 255, 255, 0.045),
+    subtle: rgba(255, 255, 255, 0.085),
+    border: rgb(0x25262d),
+    border_strong: rgb(0x34353e),
+    line_soft: rgba(255, 255, 255, 0.06),
+    text: rgb(0xececf1),
+    text_muted: rgb(0xa2a3ad),
+    text_faint: rgb(0x6d6e78),
+    accent: rgb(0x7b6ef6),
+    accent_hover: rgb(0x8d82f8),
+    accent_press: rgb(0x6a5cee),
     on_accent: Color32::WHITE,
-    accent_soft: Color32::from_rgb(0x2a, 0x25, 0x47),
-    accent_text: Color32::from_rgb(0xb4, 0xaa, 0xff),
-    ok: Color32::from_rgb(0x4a, 0xcd, 0x80),
-    warn: Color32::from_rgb(0xf0, 0xb4, 0x48),
-    err: Color32::from_rgb(0xf8, 0x68, 0x64),
-    info: Color32::from_rgb(0x6e, 0xa0, 0xff),
-    folder: Color32::from_rgb(0x8b, 0x9c, 0xf8),
+    accent_soft: rgba(123, 110, 246, 0.16),
+    accent_softer: rgba(123, 110, 246, 0.09),
+    accent_line: rgba(123, 110, 246, 0.50),
+    accent_text: rgb(0xb4abff),
+    ok: rgb(0x3ccf8e),
+    warn: rgb(0xf2b84b),
+    err: rgb(0xf26d6d),
+    info: rgb(0x64a8ff),
+    root: rgb(0xf59e4c),
+    folder: rgb(0x8d9df9),
+    scrim: rgba(6, 7, 10, 0.58),
+    card_ring: rgb(0x24252c),
+    tab_on: rgb(0x1d1e24),
+    button: rgb(0x24252c),
+    button_border: rgb(0x33343c),
+    segment_on: rgb(0x2a2b33),
+    nav: rgb(0x17181d),
+    footer: rgba(255, 255, 255, 0.015),
 };
+
+const LIGHT: Palette = Palette {
+    dark: false,
+    canvas: rgb(0xffffff),
+    chrome: rgb(0xf1f1f4),
+    surface: rgb(0xffffff),
+    dialog: rgb(0xffffff),
+    card: rgb(0xffffff),
+    raised: rgb(0xffffff),
+    sheet: rgb(0xffffff),
+    field: rgb(0xffffff),
+    field_border: rgb(0xd1d1da),
+    hover: rgba(22, 22, 48, 0.045),
+    subtle: rgba(22, 22, 48, 0.085),
+    border: rgb(0xe4e4ea),
+    border_strong: rgb(0xd1d1da),
+    line_soft: rgba(22, 22, 48, 0.06),
+    text: rgb(0x17171c),
+    text_muted: rgb(0x5e5e6a),
+    text_faint: rgb(0x9898a4),
+    accent: rgb(0x5b4ee6),
+    accent_hover: rgb(0x4c3fd7),
+    accent_press: rgb(0x4234c7),
+    on_accent: Color32::WHITE,
+    accent_soft: rgba(91, 78, 230, 0.10),
+    accent_softer: rgba(91, 78, 230, 0.06),
+    accent_line: rgba(91, 78, 230, 0.42),
+    accent_text: rgb(0x4a3dcc),
+    ok: rgb(0x12895a),
+    warn: rgb(0xad6a00),
+    err: rgb(0xd33b3b),
+    info: rgb(0x2463d9),
+    root: rgb(0xc25e0a),
+    folder: rgb(0x5b6ee8),
+    scrim: rgba(24, 24, 36, 0.28),
+    card_ring: rgb(0xe4e4ea),
+    tab_on: rgb(0xffffff),
+    button: rgb(0xffffff),
+    button_border: rgb(0xd1d1da),
+    segment_on: rgb(0xffffff),
+    nav: rgb(0xf1f1f4),
+    footer: rgba(91, 78, 230, 0.06),
+};
+
+/// The tint behind a status color (badges, callouts, icon tiles).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Neutral,
+    Accent,
+    Ok,
+    Warn,
+    Err,
+    Info,
+    Root,
+}
 
 impl Palette {
     /// Barely visible fill for hovered list rows.
     pub fn faint_row(&self) -> Color32 {
-        soft(self.hover, 0.6)
+        self.hover
+    }
+
+    /// The foreground color of a tone.
+    pub fn tone(&self, tone: Tone) -> Color32 {
+        match tone {
+            Tone::Neutral => self.text_muted,
+            Tone::Accent => self.accent_text,
+            Tone::Ok => self.ok,
+            Tone::Warn => self.warn,
+            Tone::Err => self.err,
+            Tone::Info => self.info,
+            Tone::Root => self.root,
+        }
+    }
+
+    /// The soft fill behind a tone.
+    pub fn tone_soft(&self, tone: Tone) -> Color32 {
+        let d = self.dark;
+        match tone {
+            Tone::Neutral => self.hover,
+            Tone::Accent => self.accent_soft,
+            Tone::Ok => soft(self.ok, if d { 0.14 } else { 0.10 }),
+            Tone::Warn => {
+                if d {
+                    soft(self.warn, 0.14)
+                } else {
+                    rgba(214, 140, 0, 0.12)
+                }
+            }
+            Tone::Err => soft(self.err, if d { 0.14 } else { 0.09 }),
+            Tone::Info => soft(self.info, if d { 0.14 } else { 0.09 }),
+            Tone::Root => {
+                if d {
+                    soft(self.root, 0.13)
+                } else {
+                    rgba(230, 120, 20, 0.10)
+                }
+            }
+        }
     }
 }
 
@@ -112,17 +248,26 @@ pub fn pal(ui: &Ui) -> Palette {
 
 /// A color at `alpha` (0–1) opacity, for soft fills behind colored text and icons.
 pub fn soft(c: Color32, alpha: f32) -> Color32 {
-    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (alpha.clamp(0.0, 1.0) * 255.0) as u8)
+    let [r, g, b, a] = c.to_srgba_unmultiplied();
+    Color32::from_rgba_unmultiplied(r, g, b, ((alpha.clamp(0.0, 1.0) * a as f32).round()) as u8)
 }
 
 // ---------------------------------------------------------------------------------------------
 // Type
 // ---------------------------------------------------------------------------------------------
 
-/// Body text size of the UI.
-pub const BODY: f32 = 13.5;
-/// Small text: details, hints, the status bar.
-pub const SMALL: f32 = 11.5;
+/// Body text: rows, buttons, inputs.
+pub const BODY: f32 = 13.0;
+/// Small text: hints, secondary lines, table details.
+pub const SMALL: f32 = 12.0;
+/// Extra small: section labels, the status strip.
+pub const XS: f32 = 11.0;
+/// Micro: count pills.
+pub const MICRO: f32 = 10.5;
+/// Dialog titles.
+pub const TITLE: f32 = 15.0;
+/// UI monospace: addresses, paths, fingerprints.
+pub const MONO: f32 = 12.5;
 
 /// Inter Medium: labels that need a little weight (tabs, buttons, row titles).
 pub fn medium(size: f32) -> FontId {
@@ -134,17 +279,50 @@ pub fn semibold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(fonts::SEMIBOLD.into()))
 }
 
+/// Inter Regular.
+pub fn regular(size: f32) -> FontId {
+    FontId::proportional(size)
+}
+
+/// The monospace font (the terminal's) for addresses, paths and commands.
+pub fn mono(size: f32) -> FontId {
+    FontId::monospace(size)
+}
+
 /// The icon font alone (icons also render inside ordinary text).
 pub fn icon_font(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(fonts::ICONS.into()))
 }
 
+/// An uppercase section label (`CONNECTIONS`): 11 px semibold, faint, tracked out.
+pub fn section_label(text: &str, color: Color32) -> egui::RichText {
+    egui::RichText::new(text.to_uppercase())
+        .font(semibold(XS))
+        .color(color)
+        .extra_letter_spacing(0.66)
+}
+
 // ---------------------------------------------------------------------------------------------
-// Style
+// Sizes
 // ---------------------------------------------------------------------------------------------
 
+/// Buttons, inputs, rows.
 pub const RADIUS: u8 = 6;
-pub const RADIUS_LG: u8 = 10;
+/// Menus, popovers, tabs.
+pub const RADIUS_MD: u8 = 8;
+/// The canvas card, cards.
+pub const RADIUS_LG: u8 = 12;
+/// Dialogs.
+pub const RADIUS_XL: u8 = 14;
+
+/// Height of a form control (text field, button, select).
+pub const CONTROL_H: f32 = 30.0;
+/// Height of a toolbar control (small buttons, icon buttons).
+pub const TOOLBAR_H: f32 = 26.0;
+/// Height of a large input (dialogs, the start page search).
+pub const CONTROL_LG: f32 = 36.0;
+/// Width of the label column in forms.
+pub const LABEL_W: f32 = 140.0;
 
 pub fn apply(ctx: &egui::Context, mode: ThemeMode) {
     ctx.set_theme(match mode {
@@ -158,17 +336,18 @@ pub fn apply(ctx: &egui::Context, mode: ThemeMode) {
             let p = palette(dark);
             let s = &mut style.spacing;
             s.item_spacing = vec2(8.0, 6.0);
-            s.button_padding = vec2(10.0, 4.0);
-            s.interact_size = vec2(24.0, 26.0);
+            s.button_padding = vec2(12.0, 4.0);
+            s.interact_size = vec2(24.0, CONTROL_H);
             s.window_margin = Margin::same(20);
-            s.menu_margin = Margin::same(6);
+            s.menu_margin = Margin::same(5);
             s.indent = 16.0;
-            s.icon_width = 15.0;
-            s.icon_width_inner = 9.0;
-            s.icon_spacing = 6.0;
+            s.icon_width = 16.0;
+            s.icon_width_inner = 10.0;
+            s.icon_spacing = 8.0;
             s.combo_height = 320.0;
             s.tooltip_width = 360.0;
             s.menu_width = 220.0;
+            s.menu_spacing = 2.0;
             s.scroll = egui::style::ScrollStyle::floating();
             s.scroll.bar_width = 8.0;
             s.scroll.floating_width = 3.0;
@@ -180,39 +359,41 @@ pub fn apply(ctx: &egui::Context, mode: ThemeMode) {
             let v = &mut style.visuals;
             v.text_cursor.blink = false; // a blinking caret would repaint twice a second
             v.text_cursor.stroke = Stroke::new(1.5, p.accent);
-            v.panel_fill = p.canvas;
-            v.window_fill = p.surface;
-            v.extreme_bg_color = p.surface;
-            v.text_edit_bg_color = Some(p.surface);
-            v.faint_bg_color = if dark {
-                Color32::from_rgb(0x1b, 0x1c, 0x21)
-            } else {
-                Color32::from_rgb(0xf7, 0xf7, 0xf9)
-            };
-            v.code_bg_color = p.subtle;
+            v.panel_fill = p.chrome;
+            v.window_fill = p.raised;
+            v.extreme_bg_color = p.field;
+            v.text_edit_bg_color = Some(p.field);
+            v.faint_bg_color = p.hover;
+            v.code_bg_color = p.hover;
             v.hyperlink_color = p.accent_text;
             v.warn_fg_color = p.warn;
             v.error_fg_color = p.err;
             v.override_text_color = None;
             v.weak_text_color = Some(p.text_muted);
-            v.selection.bg_fill = soft(p.accent, if dark { 0.30 } else { 0.18 });
-            // The text color of selected rows and items, and egui's ring around a focused text
-            // field (`Field` paints a softer accent ring over it).
-            v.selection.stroke = Stroke::new(1.0, p.accent_text);
-            v.window_corner_radius = CornerRadius::same(RADIUS_LG);
-            v.menu_corner_radius = CornerRadius::same(8);
-            v.window_stroke = Stroke::new(1.0, p.border);
+            v.selection.bg_fill = soft(p.accent, if dark { 0.32 } else { 0.18 });
+            // egui's ring around a focused text field (`Field` adds the soft halo).
+            v.selection.stroke = Stroke::new(1.0, p.accent);
+            v.window_corner_radius = CornerRadius::same(RADIUS_XL);
+            v.menu_corner_radius = CornerRadius::same(RADIUS_MD);
+            v.window_stroke = Stroke::new(
+                1.0,
+                if dark {
+                    rgba(255, 255, 255, 0.05)
+                } else {
+                    rgba(20, 20, 40, 0.07)
+                },
+            );
             v.window_shadow = Shadow {
-                offset: [0, 10],
-                blur: 30,
+                offset: [0, 28],
+                blur: 70,
                 spread: 0,
-                color: Color32::from_black_alpha(if dark { 120 } else { 38 }),
+                color: Color32::from_black_alpha(if dark { 153 } else { 56 }),
             };
             v.popup_shadow = Shadow {
-                offset: [0, 4],
-                blur: 14,
+                offset: [0, 10],
+                blur: 28,
                 spread: 0,
-                color: Color32::from_black_alpha(if dark { 100 } else { 28 }),
+                color: Color32::from_black_alpha(if dark { 115 } else { 36 }),
             };
             v.window_highlight_topmost = false;
             v.collapsing_header_frame = false;
@@ -230,43 +411,36 @@ pub fn apply(ctx: &egui::Context, mode: ThemeMode) {
             w.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
             w.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
             w.noninteractive.corner_radius = radius;
-            // Buttons, inputs, checkboxes at rest: an outlined surface.
+            // Inputs and selects at rest: the field look.
             w.inactive.bg_fill = p.subtle;
-            w.inactive.weak_bg_fill = p.surface;
-            w.inactive.bg_stroke = Stroke::new(1.0, p.border_strong);
+            w.inactive.weak_bg_fill = p.field;
+            w.inactive.bg_stroke = Stroke::new(1.0, p.field_border);
             w.inactive.fg_stroke = Stroke::new(1.0, p.text);
             w.inactive.corner_radius = radius;
             w.inactive.expansion = 0.0;
             w.hovered.bg_fill = p.subtle;
-            w.hovered.weak_bg_fill = p.hover;
-            w.hovered.bg_stroke = Stroke::new(
-                1.0,
-                if dark {
-                    p.border_strong
-                } else {
-                    Color32::from_rgb(0xbe, 0xbe, 0xc8)
-                },
-            );
+            w.hovered.weak_bg_fill = p.field;
+            w.hovered.bg_stroke = Stroke::new(1.0, p.border_strong);
             w.hovered.fg_stroke = Stroke::new(1.0, p.text);
             w.hovered.corner_radius = radius;
             w.hovered.expansion = 0.0;
             w.active.bg_fill = p.subtle;
-            w.active.weak_bg_fill = p.subtle;
+            w.active.weak_bg_fill = p.field;
             w.active.bg_stroke = Stroke::new(1.0, p.accent);
             w.active.fg_stroke = Stroke::new(1.0, p.text);
             w.active.corner_radius = radius;
             w.active.expansion = 0.0;
             w.open.bg_fill = p.subtle;
-            w.open.weak_bg_fill = p.hover;
-            w.open.bg_stroke = Stroke::new(1.0, p.border_strong);
+            w.open.weak_bg_fill = p.field;
+            w.open.bg_stroke = Stroke::new(1.0, p.accent);
             w.open.fg_stroke = Stroke::new(1.0, p.text);
             w.open.corner_radius = radius;
 
             for (ts, font) in style.text_styles.iter_mut() {
                 *font = match ts {
-                    egui::TextStyle::Heading => semibold(18.0),
+                    egui::TextStyle::Heading => semibold(TITLE),
                     egui::TextStyle::Small => FontId::proportional(SMALL),
-                    egui::TextStyle::Monospace => FontId::monospace(12.5),
+                    egui::TextStyle::Monospace => FontId::monospace(MONO),
                     _ => FontId::proportional(BODY),
                 };
             }
@@ -279,21 +453,19 @@ pub fn warn_text(v: &egui::Visuals) -> Color32 {
     palette(v.dark_mode).warn
 }
 
-/// The accent ring around a focused checkbox.
+/// The accent ring around a focused control.
 pub fn focus_ring(v: &egui::Visuals) -> Stroke {
     Stroke::new(1.5, palette(v.dark_mode).accent)
 }
 
-/// Focus of an input drawn by hand: a 1 px accent border and a soft accent halo just outside it
-/// (calmer than a thick ring, which reads like an error).
+/// Focus of an input: a 1 px accent border and a 3 px soft accent halo just outside it.
 pub fn focus_halo(ui: &Ui, rect: egui::Rect, radius: u8) {
     let p = pal(ui);
-    let halo = soft(p.accent, if ui.visuals().dark_mode { 0.30 } else { 0.22 });
     let painter = ui.painter();
     painter.rect_stroke(
         rect,
         CornerRadius::same(radius),
-        Stroke::new(3.0, halo),
+        Stroke::new(3.0, p.accent_soft),
         egui::StrokeKind::Outside,
     );
     painter.rect_stroke(
@@ -304,10 +476,51 @@ pub fn focus_halo(ui: &Ui, rect: egui::Rect, radius: u8) {
     );
 }
 
-/// Width of the label column in forms.
-pub const LABEL_W: f32 = 128.0;
-/// Height of a form control (text field, button, menu).
-pub const CONTROL_H: f32 = 28.0;
+/// An input in the error state: a red border and a soft red halo.
+pub fn error_halo(ui: &Ui, rect: egui::Rect, radius: u8) {
+    let p = pal(ui);
+    let painter = ui.painter();
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(radius),
+        Stroke::new(3.0, p.tone_soft(Tone::Err)),
+        egui::StrokeKind::Outside,
+    );
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(radius),
+        Stroke::new(1.0, p.err),
+        egui::StrokeKind::Inside,
+    );
+}
+
+/// The frame of a dialog: the dialog fill, 14 px corners, the dialog shadow.
+pub fn dialog_frame(ctx: &egui::Context) -> egui::Frame {
+    let dark = ctx.global_style().visuals.dark_mode;
+    let p = palette(dark);
+    let v = &ctx.global_style().visuals;
+    egui::Frame::NONE
+        .fill(p.dialog)
+        .corner_radius(CornerRadius::same(RADIUS_XL))
+        .shadow(v.window_shadow)
+        .stroke(Stroke::new(
+            1.0,
+            if dark {
+                rgba(255, 255, 255, 0.06)
+            } else {
+                rgba(20, 20, 40, 0.08)
+            },
+        ))
+        .inner_margin(Margin::ZERO)
+}
+
+/// A modal dialog with the design's scrim and frame (content draws its own padding).
+pub fn modal(ctx: &egui::Context, id: egui::Id) -> egui::Modal {
+    let dark = ctx.global_style().visuals.dark_mode;
+    egui::Modal::new(id)
+        .backdrop_color(palette(dark).scrim)
+        .frame(dialog_frame(ctx))
+}
 
 /// Roomier spacing for the content of a dialog or form.
 pub fn form_spacing(ui: &mut Ui) {
@@ -317,56 +530,102 @@ pub fn form_spacing(ui: &mut Ui) {
     s.button_padding = vec2(12.0, 5.0);
 }
 
-/// A one-line text field with comfortable padding, as wide as there is room.
+/// A one-line text field (30 px), as wide as there is room.
 pub fn input(text: &mut dyn egui::TextBuffer) -> Field<'_> {
-    Field(
-        egui::TextEdit::singleline(text)
-            .margin(Margin::symmetric(8, 6))
+    Field {
+        edit: egui::TextEdit::singleline(text)
+            .margin(Margin::symmetric(10, 7))
             .desired_width(f32::INFINITY),
-    )
+        error: false,
+    }
 }
 
 /// A multi-line text field with the same padding.
 pub fn input_multiline(text: &mut dyn egui::TextBuffer) -> Field<'_> {
-    Field(
-        egui::TextEdit::multiline(text)
-            .margin(Margin::symmetric(8, 6))
+    Field {
+        edit: egui::TextEdit::multiline(text)
+            .margin(Margin::symmetric(10, 8))
             .desired_width(f32::INFINITY),
-    )
+        error: false,
+    }
 }
 
-/// A text field with a soft accent focus ring painted over egui's own.
-pub struct Field<'t>(pub egui::TextEdit<'t>);
+/// A text field with the soft focus halo (or the error look).
+pub struct Field<'t> {
+    pub edit: egui::TextEdit<'t>,
+    pub error: bool,
+}
 
 impl Field<'_> {
     pub fn hint_text(self, text: impl Into<egui::WidgetText>) -> Self {
-        Self(self.0.hint_text(text))
+        Self {
+            edit: self.edit.hint_text(text),
+            ..self
+        }
     }
 
     pub fn password(self, password: bool) -> Self {
-        Self(self.0.password(password))
+        Self {
+            edit: self.edit.password(password),
+            ..self
+        }
     }
 
     pub fn desired_width(self, width: f32) -> Self {
-        Self(self.0.desired_width(width))
+        Self {
+            edit: self.edit.desired_width(width),
+            ..self
+        }
     }
 
     pub fn desired_rows(self, rows: usize) -> Self {
-        Self(self.0.desired_rows(rows))
+        Self {
+            edit: self.edit.desired_rows(rows),
+            ..self
+        }
     }
 
     pub fn font(self, font: impl Into<egui::FontSelection>) -> Self {
-        Self(self.0.font(font))
+        Self {
+            edit: self.edit.font(font),
+            ..self
+        }
+    }
+
+    pub fn id(self, id: egui::Id) -> Self {
+        Self {
+            edit: self.edit.id(id),
+            ..self
+        }
+    }
+
+    pub fn margin(self, margin: impl Into<Margin>) -> Self {
+        Self {
+            edit: self.edit.margin(margin),
+            ..self
+        }
+    }
+
+    /// Draws the field in the error state (red border and halo).
+    pub fn error(self, error: bool) -> Self {
+        Self { error, ..self }
+    }
+
+    pub fn mono(self) -> Self {
+        Self {
+            edit: self.edit.font(mono(MONO)),
+            ..self
+        }
     }
 }
 
 impl egui::Widget for Field<'_> {
     fn ui(self, ui: &mut Ui) -> egui::Response {
-        let response = ui.add(self.0);
-        if response.has_focus() {
-            // Where egui drew its ring: a focused field is drawn as active.
-            let active = ui.visuals().widgets.active;
-            focus_halo(ui, response.rect.expand(active.expansion), RADIUS);
+        let response = ui.add(self.edit);
+        if self.error {
+            error_halo(ui, response.rect, RADIUS);
+        } else if response.has_focus() {
+            focus_halo(ui, response.rect, RADIUS);
         }
         response
     }
@@ -386,28 +645,32 @@ impl egui::Widget for Primary {
     }
 }
 
-/// A section title in a form.
+/// A section label in a form (`SERVER`), with room above.
 pub fn section(ui: &mut Ui, title: &str) {
-    ui.add_space(12.0);
-    ui.label(
-        egui::RichText::new(title)
-            .font(semibold(13.0))
-            .color(pal(ui).text),
-    );
+    ui.add_space(4.0);
+    ui.label(section_label(title, pal(ui).text_faint));
+    ui.add_space(2.0);
 }
 
-/// A form row: the label on the left, lined up with the first control on the right.
+/// A form row: the label on the left (140 px, aligned with the first control), the controls on
+/// the right with 12 px between.
 pub fn row<R>(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
     ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 12.0;
         ui.allocate_ui_with_layout(
             vec2(LABEL_W, CONTROL_H),
             Layout::left_to_right(Align::Center),
             |ui| {
                 ui.set_min_size(vec2(LABEL_W, CONTROL_H));
-                ui.label(egui::RichText::new(label).color(pal(ui).text_muted));
+                ui.label(
+                    egui::RichText::new(label)
+                        .font(medium(SMALL))
+                        .color(pal(ui).text_muted),
+                );
             },
         );
         ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 6.0;
             ui.set_width(ui.available_width());
             add(ui)
         })
@@ -423,57 +686,7 @@ pub fn segmented<T: PartialEq + Copy>(
     value: &mut T,
     options: &[(T, &str)],
 ) -> Vec<egui::Response> {
-    let p = pal(ui);
-    let font = medium(SMALL + 1.0);
-    let galleys: Vec<_> = options
-        .iter()
-        .map(|(_, label)| {
-            ui.painter()
-                .layout_no_wrap(label.to_string(), font.clone(), Color32::PLACEHOLDER)
-        })
-        .collect();
-    let seg_w: Vec<f32> = galleys.iter().map(|g| g.size().x + 24.0).collect();
-    let total = seg_w.iter().sum::<f32>() + 4.0;
-    let (rect, base) = ui.allocate_exact_size(vec2(total, CONTROL_H), egui::Sense::hover());
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same(RADIUS + 1), p.subtle);
-    let mut x = rect.left() + 2.0;
-    let mut responses = Vec::with_capacity(options.len());
-    for (i, ((option, label), galley)) in options.iter().zip(galleys).enumerate() {
-        let seg = egui::Rect::from_min_size(
-            egui::pos2(x, rect.top() + 2.0),
-            vec2(seg_w[i], rect.height() - 4.0),
-        );
-        x += seg_w[i];
-        let resp = ui.interact(seg, base.id.with(("segment", i)), egui::Sense::click());
-        let selected = *value == *option;
-        resp.widget_info(|| {
-            egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, selected, *label)
-        });
-        if resp.clicked() {
-            *value = *option;
-        }
-        let painter = ui.painter();
-        if selected {
-            painter.rect(
-                seg,
-                CornerRadius::same(RADIUS - 1),
-                p.surface,
-                Stroke::new(1.0, p.border),
-                egui::StrokeKind::Inside,
-            );
-        } else if resp.hovered() {
-            painter.rect_filled(seg, CornerRadius::same(RADIUS - 1), p.hover);
-        }
-        let color = if selected || resp.hovered() {
-            p.text
-        } else {
-            p.text_muted
-        };
-        painter.galley(seg.center() - galley.size() / 2.0, galley, color);
-        responses.push(resp);
-    }
-    responses
+    super::kit::segmented(ui, value, options, false)
 }
 
 /// Lays widgets out from the right, in a band one control high (a plain right-to-left layout
@@ -488,7 +701,7 @@ pub fn right_to_left<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     .inner
 }
 
-/// A checkbox: an accent box with a white check when on.
+/// A checkbox: a 16 px box, accent with a white check when on.
 pub fn checkbox(
     ui: &mut Ui,
     checked: &mut bool,
@@ -496,18 +709,24 @@ pub fn checkbox(
 ) -> egui::Response {
     const BOX: f32 = 16.0;
     const GAP: f32 = 8.0;
-    let galley = text.into().into_galley(
+    let text: egui::WidgetText = text.into();
+    let empty = text.is_empty();
+    let galley = text.into_galley(
         ui,
         Some(egui::TextWrapMode::Wrap),
         (ui.available_width() - BOX - GAP).max(40.0),
         egui::TextStyle::Body,
     );
     // As tall as the other controls in the row, so labels beside it line up.
-    let line = ui.spacing().interact_size.y.max(22.0);
-    let size = vec2(
-        BOX + GAP + galley.size().x,
-        galley.size().y.max(BOX).max(line),
-    );
+    let line = ui.spacing().interact_size.y.clamp(20.0, CONTROL_H);
+    let size = if empty {
+        vec2(BOX, line)
+    } else {
+        vec2(
+            BOX + GAP + galley.size().x,
+            galley.size().y.max(BOX).max(line),
+        )
+    };
     let (rect, mut response) = ui.allocate_exact_size(size, egui::Sense::click());
     if response.clicked() {
         *checked = !*checked;
@@ -540,14 +759,14 @@ pub fn checkbox(
                 box_rect.center(),
                 egui::Align2::CENTER_CENTER,
                 super::icons::CHECK,
-                icon_font(12.0),
+                icon_font(11.0),
                 p.on_accent,
             );
         } else {
             painter.rect(
                 box_rect,
                 4.0,
-                p.surface,
+                p.field,
                 Stroke::new(
                     1.0,
                     if response.hovered() {
@@ -567,16 +786,19 @@ pub fn checkbox(
                 egui::StrokeKind::Outside,
             );
         }
-        let text_pos = egui::pos2(
-            box_rect.right() + GAP,
-            box_rect.center().y - galley.rows.first().map_or(galley.size().y, |r| r.height()) / 2.0,
-        );
-        let text_color = if ui.is_enabled() {
-            p.text
-        } else {
-            p.text_faint
-        };
-        painter.galley(text_pos, galley, text_color);
+        if !empty {
+            let text_pos = egui::pos2(
+                box_rect.right() + GAP,
+                box_rect.center().y
+                    - galley.rows.first().map_or(galley.size().y, |r| r.height()) / 2.0,
+            );
+            let text_color = if ui.is_enabled() {
+                p.text
+            } else {
+                p.text_faint
+            };
+            painter.galley(text_pos, galley, text_color);
+        }
     }
     response
 }
@@ -590,16 +812,32 @@ pub fn text_width(ui: &Ui, text: &str) -> f32 {
         .x
 }
 
-/// A small explanation under a control.
+/// A small explanation under a control (12 px, faint).
 pub fn hint(ui: &mut Ui, text: impl Into<String>) {
-    ui.label(
-        egui::RichText::new(text.into())
-            .small()
-            .color(pal(ui).text_muted),
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(text.into())
+                .font(regular(SMALL))
+                .color(pal(ui).text_faint),
+        )
+        .wrap(),
     );
 }
 
-/// A small ring that fills clockwise with `fraction`.
+/// A small explanation in a tone (errors under fields).
+pub fn hint_tone(ui: &mut Ui, text: impl Into<String>, tone: Tone) {
+    let color = pal(ui).tone(tone);
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(text.into())
+                .font(regular(SMALL))
+                .color(color),
+        )
+        .wrap(),
+    );
+}
+
+/// A ring that fills clockwise with `fraction`: the 14 px progress ring of tabs and strips.
 pub fn progress_ring(
     painter: &egui::Painter,
     center: egui::Pos2,
@@ -608,16 +846,19 @@ pub fn progress_ring(
     dark: bool,
 ) {
     let p = palette(dark);
-    painter.circle_stroke(center, radius, Stroke::new(2.0, p.border_strong));
-    let steps = (fraction.clamp(0.0, 1.0) * 32.0).ceil() as usize;
+    let width = (radius * 0.36).clamp(2.0, 3.0);
+    let r = radius - width / 2.0;
+    painter.circle_stroke(center, r, Stroke::new(width, p.border_strong));
+    let fraction = fraction.clamp(0.0, 1.0);
+    let steps = (fraction * 40.0).ceil() as usize;
     if steps > 0 {
         let points: Vec<egui::Pos2> = (0..=steps)
             .map(|i| {
                 let a = -std::f32::consts::FRAC_PI_2
-                    + std::f32::consts::TAU * fraction.clamp(0.0, 1.0) * i as f32 / steps as f32;
-                center + vec2(a.cos(), a.sin()) * radius
+                    + std::f32::consts::TAU * fraction * i as f32 / steps as f32;
+                center + vec2(a.cos(), a.sin()) * r
             })
             .collect();
-        painter.add(egui::Shape::line(points, Stroke::new(2.0, p.accent)));
+        painter.add(egui::Shape::line(points, Stroke::new(width, p.accent)));
     }
 }

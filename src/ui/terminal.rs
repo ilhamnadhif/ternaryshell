@@ -101,6 +101,10 @@ pub struct TermResponse {
     pub activated: bool,
     /// Enter pressed in a pane whose session ended.
     pub reconnect: bool,
+    /// Split Right / Split Down chosen in the pane's menu.
+    pub split: Option<super::layout::SplitDir>,
+    /// Where the cursor's cell is, when it is on screen (an ended session's hint goes there).
+    pub cursor_cell: Option<Rect>,
 }
 
 pub fn cell_size(ctx: &egui::Context, font_size: f32) -> Vec2 {
@@ -1072,7 +1076,10 @@ pub fn show(
     if let Some((row, col, text, fg, bg, wide)) = cursor_cell {
         let r = cell_rect(col, row, if wide { 2 } else { 1 });
         cursor_rect = Some(r);
-        if !view.preedit.is_empty() {
+        out.cursor_cell = Some(r);
+        if !alive {
+            // An ended session has no cursor: the pane draws its hint there instead.
+        } else if !view.preedit.is_empty() {
             // Drawn below.
         } else if !has_focus_now {
             painter.rect_stroke(
@@ -1162,11 +1169,23 @@ pub fn show(
         return out;
     }
     let menu = response.context_menu(|ui| {
+        use super::keys::Shortcut as S;
+        use super::{icons, kit};
+        kit::menu_body(ui);
+        ui.set_min_width(230.0);
         let term = shared.term.lock();
         let has_sel = term.selection.as_ref().is_some_and(|s| !s.is_empty());
         drop(term);
         if ui
-            .add_enabled(has_sel, egui::Button::new(crate::i18n::t("Copy")))
+            .add_enabled_ui(has_sel, |ui| {
+                kit::menu_item(
+                    ui,
+                    Some(icons::COPY),
+                    crate::i18n::t("Copy"),
+                    Some(&S::Copy.label()),
+                )
+            })
+            .inner
             .clicked()
         {
             if let Some(text) = shared.term.lock().selection_to_string() {
@@ -1175,7 +1194,15 @@ pub fn show(
             ui.close();
         }
         if ui
-            .add_enabled(alive, egui::Button::new(crate::i18n::t("Paste")))
+            .add_enabled_ui(alive, |ui| {
+                kit::menu_item(
+                    ui,
+                    Some(icons::CLIPBOARD),
+                    crate::i18n::t("Paste"),
+                    Some(&S::Paste.label()),
+                )
+            })
+            .inner
             .clicked()
         {
             ui.ctx()
@@ -1183,12 +1210,42 @@ pub fn show(
             ui.memory_mut(|m| m.request_focus(id));
             ui.close();
         }
-        if ui.button(crate::i18n::t("Select All")).clicked() {
+        if kit::menu_item(ui, Some(icons::LIST), crate::i18n::t("Select All"), None).clicked() {
             select_all(shared);
             ui.close();
         }
-        ui.separator();
-        if ui.button(crate::i18n::t("Clear Scrollback")).clicked() {
+        kit::menu_sep(ui);
+        if kit::menu_item(
+            ui,
+            Some(icons::SQUARE_SPLIT_HORIZONTAL),
+            crate::i18n::t("Split Right"),
+            Some(&S::SplitRight.label()),
+        )
+        .clicked()
+        {
+            out.split = Some(super::layout::SplitDir::Horizontal);
+            ui.close();
+        }
+        if kit::menu_item(
+            ui,
+            Some(icons::SQUARE_SPLIT_VERTICAL),
+            crate::i18n::t("Split Down"),
+            Some(&S::SplitDown.label()),
+        )
+        .clicked()
+        {
+            out.split = Some(super::layout::SplitDir::Vertical);
+            ui.close();
+        }
+        kit::menu_sep(ui);
+        if kit::menu_item(
+            ui,
+            Some(icons::BROOM),
+            crate::i18n::t("Clear Scrollback"),
+            Some(&S::ClearScrollback.label()),
+        )
+        .clicked()
+        {
             clear_scrollback(shared);
             ui.close();
         }

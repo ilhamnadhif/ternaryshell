@@ -1941,22 +1941,14 @@ async fn run_shell(handle: Arc<SshHandle>, pane: PaneStart, ctx: Context) {
     if !current() {
         return;
     }
-    let keys = crate::ui::keys::Shortcut::Reconnect.label();
-    let message = match (&exit_signal, exit_status) {
-        (Some(sig), _) => tf(
-            "[Session ended by signal {}. Press Enter or {} to reconnect.]",
-            &[sig, &keys],
-        ),
-        (None, Some(code)) => tf(
-            "[Session ended, exit code {}. Press Enter or {} to reconnect.]",
-            &[&code.to_string(), &keys],
-        ),
-        (None, None) => tf(
-            "[Connection closed. Press Enter or {} to reconnect.]",
-            &[&keys],
-        ),
+    // The UI shows why under the last output (or the connection's own bar when it dropped).
+    let hint = match (&exit_signal, exit_status) {
+        (Some(sig), _) => tf("Session ended by signal {}.", &[sig]),
+        (None, Some(0)) => t("Session ended.").to_string(),
+        (None, Some(code)) => tf("Session ended, exit code {}.", &[&code.to_string()]),
+        (None, None) => t("Session closed.").to_string(),
     };
-    tcore::end_session(&mut feeder.lock(), &message);
+    tcore::end_session_hint(&mut feeder.lock(), hint);
     *status.lock() = PaneStatus::Exited(exit_status);
     ctx.request_repaint();
 }

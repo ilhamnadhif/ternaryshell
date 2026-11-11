@@ -99,6 +99,37 @@ pub fn rect_of(name: &str) -> Option<Rect> {
     rects().lock().unwrap().get(name).copied()
 }
 
+// ----- egui events ------------------------------------------------------------------------------
+// For what AppKit can't synthesize: a right click made with `NSEvent` arrives as a left one
+// (its button number is 0), so `rclick` goes in as egui events, through `raw_input_hook`.
+
+fn egui_events() -> &'static Mutex<Vec<egui::Event>> {
+    static EVENTS: OnceLock<Mutex<Vec<egui::Event>>> = OnceLock::new();
+    EVENTS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Queues events for the next frame's input.
+pub fn push_egui_events(events: impl IntoIterator<Item = egui::Event>) {
+    egui_events().lock().unwrap().extend(events);
+}
+
+pub fn take_egui_events() -> Vec<egui::Event> {
+    std::mem::take(&mut *egui_events().lock().unwrap())
+}
+
+/// The press (`down`) or release of the secondary button at `pos`.
+pub fn secondary_button(pos: egui::Pos2, down: bool) -> Vec<egui::Event> {
+    vec![
+        egui::Event::PointerMoved(pos),
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed: down,
+            modifiers: egui::Modifiers::NONE,
+        },
+    ]
+}
+
 // ----- event injection --------------------------------------------------------------------------
 // Real AppKit events on macOS. Elsewhere the steps that inject input only report that they
 // were skipped; the rest of the script (actions, checks) runs everywhere.
@@ -124,6 +155,12 @@ mod native {
                 let (ra, rb) = (a.contentLayoutRect(), b.contentLayoutRect());
                 (ra.size.width * ra.size.height).total_cmp(&(rb.size.width * rb.size.height))
             })
+    }
+
+    /// Height of the window's content in points: the whole window, since the content runs under
+    /// the transparent title bar (egui's y = 0 is the window's top edge).
+    fn content_height(w: &NSWindow) -> f64 {
+        w.contentRectForFrameRect(w.frame()).size.height
     }
 
     fn key_event(
@@ -230,6 +267,7 @@ mod native {
             "pageup" => arrow(116, 0xF72C),
             "pagedown" => arrow(121, 0xF72D),
             "delete" => arrow(117, 0xF728),
+            "f2" => arrow(120, 0xF705),
             n if n.chars().count() == 1 => {
                 let c = n.chars().next().unwrap();
                 (key_code(c).0, n.to_string())
@@ -251,7 +289,7 @@ mod native {
     /// Clicks at a point in egui coordinates (points from the content's top-left).
     pub fn click(pos: egui::Pos2, count: isize, right: bool) {
         let Some(w) = window() else { return };
-        let height = w.contentLayoutRect().size.height;
+        let height = content_height(&w);
         let loc = NSPoint::new(pos.x as f64, height - pos.y as f64);
         let wn = w.windowNumber();
         let mk = |ty, clicks| {
@@ -287,7 +325,7 @@ mod native {
     /// is a series of these in separate frames, as with a real mouse.
     pub fn mouse(kind: &str, pos: egui::Pos2) {
         let Some(w) = window() else { return };
-        let height = w.contentLayoutRect().size.height;
+        let height = content_height(&w);
         let ty = match kind {
             "down" => NSEventType::LeftMouseDown,
             "drag" => NSEventType::LeftMouseDragged,
@@ -346,5 +384,51 @@ mod tests {
         assert_eq!(super::native::key_code('\n'), (36, false));
         assert_eq!(super::native::key_code('L'), (37, true));
         assert_eq!(super::native::key_code('~'), (50, true));
+    }
+}
+
+/// Writes the screenshots asked for with `screenshot <path>` as 24-bit BMP files.
+pub fn save_screenshots(ctx: &egui::Context) {
+    let shots: Vec<(std::sync::Arc<egui::ColorImage>, std::path::PathBuf)> = ctx.input(|i| {
+        i.events
+            .iter()
+            .filter_map(|e| match e {
+                egui::Event::Screenshot {
+                    image, user_data, ..
+                } => user_data
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.downcast_ref::<std::path::PathBuf>())
+                    .map(|p| (image.clone(), p.clone())),
+                _ => None,
+            })
+            .collect()
+    });
+    for (image, path) in shots {
+        let [w, h] = image.size;
+        let row = (w * 3).div_ceil(4) * 4;
+        let size = 54 + row * h;
+        let mut out = Vec::with_capacity(size);
+        out.extend_from_slice(b"BM");
+        out.extend_from_slice(&(size as u32).to_le_bytes());
+        out.extend_from_slice(&[0; 4]);
+        out.extend_from_slice(&54u32.to_le_bytes());
+        out.extend_from_slice(&40u32.to_le_bytes());
+        out.extend_from_slice(&(w as i32).to_le_bytes());
+        out.extend_from_slice(&(h as i32).to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes());
+        out.extend_from_slice(&24u16.to_le_bytes());
+        out.extend_from_slice(&[0; 24]);
+        for y in (0..h).rev() {
+            for x in 0..w {
+                let c = image.pixels[y * w + x];
+                out.extend_from_slice(&[c.b(), c.g(), c.r()]);
+            }
+            out.extend(std::iter::repeat_n(0u8, row - w * 3));
+        }
+        match std::fs::write(&path, out) {
+            Ok(()) => eprintln!("DEVTEST LOG: screenshot {}", path.display()),
+            Err(e) => eprintln!("DEVTEST FAIL: screenshot {}: {e}", path.display()),
+        }
     }
 }

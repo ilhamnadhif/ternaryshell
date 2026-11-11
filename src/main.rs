@@ -77,6 +77,14 @@ fn native_options(saved: Option<[f32; 4]>, renderer: eframe::Renderer) -> eframe
     if let Some([x, y, w, h]) = saved {
         viewport = viewport.with_position([x, y]).with_inner_size([w, h]);
     }
+    // The content runs under a transparent title bar: the tabs sit in the title row, and the
+    // traffic lights are moved to its middle (see ternaryshell::ui::macos).
+    if cfg!(target_os = "macos") {
+        viewport = viewport
+            .with_fullsize_content_view(true)
+            .with_titlebar_shown(false)
+            .with_title_shown(false);
+    }
     eframe::NativeOptions {
         viewport,
         // The app installs its own menu bar on macOS.

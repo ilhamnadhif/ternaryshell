@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Id, RichText};
 use parking_lot::Mutex;
 
-use super::style;
+use super::style::{self, Tone};
+use super::{icons, kit};
 use crate::i18n::{t, tf};
 use crate::settings::Settings;
 use crate::sftp::entry::human_size;
@@ -287,27 +288,50 @@ impl Updater {
         toast
     }
 
-    /// The toolbar button, while an update is available. Returns true when clicked.
+    /// The toolbar pill, while an update is available. Returns true when clicked.
     pub fn toolbar_button(&mut self, ui: &mut egui::Ui) -> bool {
         let label = match &self.state {
-            State::Available(r) => format!("{} {}", t("Update"), r.version),
+            State::Available(r) => tf("Update {}", &[&r.version]),
             State::Downloading(_) => match *self.stage.lock() {
-                Stage::Downloading { done, total } if total > 0 => {
-                    format!("{}%", (done as f64 / total as f64 * 100.0).floor())
-                }
-                _ => t("Update").to_string(),
+                Stage::Downloading { done, total } if total > 0 => tf(
+                    "Updating {}%",
+                    &[&format!("{}", (done as f64 / total as f64 * 100.0).floor())],
+                ),
+                _ => t("Updating…").to_string(),
             },
             State::Ready(..) => t("Restart to Update").to_string(),
             _ => return false,
         };
-        let resp = super::kit::button_ex(
-            ui,
-            super::kit::Kind::Primary,
-            Some(super::icons::ARROW_CIRCLE_UP),
-            &label,
-            true,
-        )
-        .on_hover_text(t("A new version of TernaryShell is available"));
+        let p = style::pal(ui);
+        let g =
+            ui.painter()
+                .layout_no_wrap(label.clone(), style::medium(style::SMALL), p.accent_text);
+        let w = 10.0 + 14.0 + 6.0 + g.size().x + 10.0;
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 26.0), egui::Sense::click());
+        let painter = ui.painter();
+        let fill = if resp.hovered() {
+            style::soft(p.accent, if p.dark { 0.24 } else { 0.16 })
+        } else {
+            p.accent_soft
+        };
+        painter.rect_filled(rect, egui::CornerRadius::same(13), fill);
+        painter.text(
+            egui::pos2(rect.left() + 10.0 + 7.0, rect.center().y),
+            egui::Align2::CENTER_CENTER,
+            super::icons::ARROW_CIRCLE_UP,
+            style::icon_font(14.0),
+            p.accent_text,
+        );
+        painter.galley(
+            egui::pos2(
+                rect.left() + 10.0 + 14.0 + 6.0,
+                rect.center().y - g.size().y / 2.0,
+            ),
+            g,
+            p.accent_text,
+        );
+        let resp = resp.on_hover_text(t("A new version of TernaryShell is available"));
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &label));
         #[cfg(debug_assertions)]
         crate::devtest::record("update-button", resp.rect);
         let clicked = resp.clicked();
@@ -356,152 +380,163 @@ impl Updater {
         let mut close = false;
         let mut install_release = None;
         let screen = ctx.content_rect();
-        let width = if matches!(self.state, State::Available(_)) {
-            (screen.width() - 60.0).clamp(380.0, 640.0)
-        } else {
-            460.0
-        };
-        let modal = egui::Modal::new(Id::new("update-dialog")).show(ctx, |ui| {
-            ui.set_width(width);
+        let modal = style::modal(ctx, Id::new("update-dialog")).show(ctx, |ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let p = style::pal(ui);
             match &self.state {
                 State::Idle | State::Checking => {
-                    ui.heading(t("Software Update"));
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(t("Checking for updates…"));
+                    ui.set_width(420.0);
+                    kit::dialog_header(ui, Some((icons::ARROW_CIRCLE_UP, Tone::Neutral)), t("Software Update"), None, false);
+                    kit::dialog_body(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 10.0;
+                            kit::spinner(ui, 14.0);
+                            ui.label(t("Checking for updates…"));
+                        });
                     });
-                    ui.add_space(8.0);
-                    if ui.button(t("Cancel")).clicked() {
-                        close = true;
-                    }
-                }
-                State::UpToDate => {
-                    ui.heading(t("TernaryShell is up to date"));
-                    ui.label(tf("Version {} is the latest version.", &[CURRENT]));
-                    ui.add_space(8.0);
-                    if ui.add(style::primary(t("OK"))).clicked() {
-                        close = true;
-                    }
-                }
-                State::Error(e) => {
-                    ui.heading(t("Software Update"));
-                    ui.colored_label(ui.visuals().error_fg_color, e.as_str());
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui.add(style::primary(t("OK"))).clicked() {
+                    kit::dialog_footer(ui, |_| {}, |ui| {
+                        if kit::secondary(ui, None, t("Cancel")).clicked() {
                             close = true;
                         }
-                        if ui.button(t("Open Releases Page")).clicked() {
-                            update::open_page(&format!(
-                                "https://github.com/{}/releases/latest",
-                                update::REPO
-                            ));
+                    });
+                }
+                State::UpToDate => {
+                    ui.set_width(380.0);
+                    kit::dialog_header(ui, Some((icons::SEAL_CHECK, Tone::Ok)), t("TernaryShell is up to date"), Some(&tf("Version {} is the latest.", &[CURRENT])), false);
+                    ui.add_space(12.0);
+                    kit::dialog_footer(ui, |_| {}, |ui| {
+                        if kit::primary(ui, t("OK")).clicked() {
+                            close = true;
+                        }
+                    });
+                }
+                State::Error(e) => {
+                    let e = e.clone();
+                    ui.set_width(420.0);
+                    kit::dialog_header(ui, Some((icons::WARNING_CIRCLE, Tone::Err)), t("Software Update"), None, false);
+                    kit::dialog_body(ui, |ui| {
+                        ui.add(egui::Label::new(RichText::new(e).color(p.err)).wrap());
+                    });
+                    kit::dialog_footer(ui, |_| {}, |ui| {
+                        if kit::primary(ui, t("OK")).clicked() {
+                            close = true;
+                        }
+                        if kit::secondary(ui, None, t("Open Releases Page")).clicked() {
+                            update::open_page(&format!("https://github.com/{}/releases/latest", update::REPO));
                         }
                     });
                 }
                 State::Available(release) => {
-                    ui.heading(t("Software Update"));
-                    ui.label(RichText::new(t("A new version of TernaryShell is available.")).strong());
-                    ui.add_space(6.0);
-                    egui::Grid::new("update-versions")
-                        .num_columns(2)
-                        .spacing([16.0, 4.0])
-                        .show(ui, |ui| {
-                            ui.label(t("Current version:"));
-                            ui.label(CURRENT);
-                            ui.end_row();
-                            ui.label(t("New version:"));
-                            let new = match &release.date {
-                                Some(date) => format!("{}   ({date})", release.version),
-                                None => release.version.clone(),
-                            };
-                            ui.label(RichText::new(new).strong());
-                            ui.end_row();
+                    let release = release.clone();
+                    ui.set_width(560.0f32.min(screen.width() - 60.0));
+                    // The app's icon, the new version, and what it is.
+                    egui::Frame::NONE.inner_margin(egui::Margin { left: 20, right: 20, top: 22, bottom: 6 }).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 12.0;
+                            let (r, _) = ui.allocate_exact_size(egui::vec2(48.0, 48.0), egui::Sense::hover());
+                            super::icons::paint_logo(ui.painter(), r);
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                ui.add_space(6.0);
+                                ui.label(RichText::new(tf("TernaryShell {} is available", &[&release.version])).font(style::semibold(style::TITLE)).color(p.text));
+                                let mut sub = vec![tf("You have {}", &[CURRENT])];
+                                if let Some(d) = &release.date {
+                                    sub.push(tf("released {}", &[d]));
+                                }
+                                if let Some(a) = &release.download {
+                                    sub.push(human_size(a.size));
+                                }
+                                ui.label(RichText::new(sub.join(" · ")).font(style::regular(style::SMALL)).color(p.text_muted));
+                            });
                         });
-                    ui.add_space(8.0);
-                    ui.label(RichText::new(t("What's new:")).weak());
-                    let notes_h = (screen.height() - 380.0).clamp(140.0, 360.0);
-                    release_notes(ui, &release.notes, notes_h);
-                    let installable = update::installable(release);
-                    if !installable {
-                        ui.add_space(6.0);
-                        ui.label(RichText::new(update::manual_reason()).weak().small());
-                    }
-                    ui.add_space(10.0);
-                    ui.horizontal(|ui| {
-                        let skip = style::checkbox(ui,
-                            &mut self.skip_ticked,
-                            tf("Don't show again for version {}", &[&release.version]),
-                        );
+                    });
+                    let notes_h = (screen.height() - 420.0).clamp(120.0, 190.0);
+                    let installable = update::installable(&release);
+                    kit::dialog_body(ui, |ui| {
+                        ui.add_space(2.0);
+                        release_notes(ui, &release.notes, notes_h);
+                        if !installable {
+                            ui.add_space(8.0);
+                            style::hint(ui, update::manual_reason());
+                        }
+                        ui.add_space(12.0);
+                        let skip = style::checkbox(ui, &mut self.skip_ticked, RichText::new(tf("Don't show again for {}", &[&release.version])).color(p.text));
                         #[cfg(debug_assertions)]
                         crate::devtest::record("update-skip", skip.rect);
                         let _ = skip;
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if installable {
-                                let install = ui.add(style::primary(t("Install Update")));
-                                #[cfg(debug_assertions)]
-                                crate::devtest::record("update-install", install.rect);
-                                if install.clicked() {
-                                    install_release = Some(release.clone());
-                                }
-                            } else if ui.add(style::primary(t("Download…"))).clicked() {
-                                update::open_page(&release.page);
-                                close = true;
-                            }
-                            let close_button = ui.button(t("Close"));
+                    });
+                    kit::dialog_footer(ui, |ui| {
+                        if kit::button_ex(ui, kit::Kind::Ghost, Some(icons::ARROW_SQUARE_OUT), t("View on GitHub"), false).clicked() {
+                            update::open_page(&release.page);
+                        }
+                    }, |ui| {
+                        if installable {
+                            let install = kit::primary(ui, t("Install Update"));
                             #[cfg(debug_assertions)]
-                            crate::devtest::record("update-close", close_button.rect);
-                            if close_button.clicked() {
-                                close = true;
+                            crate::devtest::record("update-install", install.rect);
+                            if install.clicked() {
+                                install_release = Some(release.clone());
                             }
-                            if ui.button(t("View on GitHub")).clicked() {
-                                update::open_page(&release.page);
-                            }
-                        });
+                        } else if kit::primary(ui, t("Download…")).clicked() {
+                            update::open_page(&release.page);
+                            close = true;
+                        }
+                        let later = kit::secondary(ui, None, t("Later"));
+                        #[cfg(debug_assertions)]
+                        crate::devtest::record("update-close", later.rect);
+                        if later.clicked() {
+                            close = true;
+                        }
                     });
                 }
                 State::Downloading(release) => {
-                    ui.heading(tf("Updating to TernaryShell {}", &[&release.version]));
-                    ui.add_space(6.0);
+                    let version = release.version.clone();
+                    ui.set_width(380.0);
+                    kit::dialog_header(ui, None, &tf("Updating to {}", &[&version]), None, false);
                     let stage = self.stage.lock().clone();
                     let (fraction, text) = match stage {
                         Stage::Starting => (0.0, t("Starting…").to_string()),
                         Stage::Downloading { done, total } => (
                             if total > 0 { done as f32 / total as f32 } else { 0.0 },
-                            tf(
-                                "Downloading… {} of {}",
-                                &[&human_size(done), &human_size(total)],
-                            ),
+                            tf("Downloading… {} of {}", &[&human_size(done), &human_size(total)]),
                         ),
                         Stage::Verifying => (1.0, t("Verifying…").to_string()),
                     };
-                    ui.add(
-                        egui::ProgressBar::new(fraction)
-                            .desired_height(6.0)
-                            .fill(style::pal(ui).accent),
-                    );
-                    ui.label(RichText::new(text).color(style::pal(ui).text_muted));
-                    ui.add_space(8.0);
-                    if ui.button(t("Hide")).clicked() {
-                        close = true;
-                    }
+                    kit::dialog_body(ui, |ui| {
+                        ui.add_space(4.0);
+                        let w = ui.available_width();
+                        kit::progress_bar(ui, fraction, w, Tone::Accent);
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(text).font(style::regular(style::SMALL)).color(p.text));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(RichText::new(format!("{}%", (fraction * 100.0).floor())).font(style::regular(style::SMALL)).color(p.text_faint));
+                            });
+                        });
+                    });
+                    kit::dialog_footer(ui, |_| {}, |ui| {
+                        if kit::secondary(ui, None, t("Hide")).clicked() {
+                            close = true;
+                        }
+                    });
                 }
                 State::Ready(release, _) => {
-                    ui.heading(tf("TernaryShell {} is ready to install", &[&release.version]));
-                    ui.label(t(
-                        "TernaryShell will quit, install the new version and open again. Open sessions are closed.",
-                    ));
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        let restart = ui.add(style::primary(t("Restart Now")));
+                    let version = release.version.clone();
+                    ui.set_width(380.0);
+                    kit::dialog_header(ui, Some((icons::CHECK_CIRCLE, Tone::Ok)), &tf("{} is ready to install", &[&version]), Some(t("Verified (size and SHA-256).")), false);
+                    kit::dialog_body(ui, |ui| {
+                        ui.add(egui::Label::new(t("TernaryShell quits, installs the new version and opens again. Open sessions are closed.")).wrap());
+                    });
+                    kit::dialog_footer(ui, |_| {}, |ui| {
+                        let restart = kit::primary(ui, t("Restart Now"));
                         #[cfg(debug_assertions)]
                         crate::devtest::record("update-restart", restart.rect);
                         if restart.clicked() {
                             event = UpdateEvent::Restart;
                             close = true;
                         }
-                        if ui.button(t("Later")).clicked() {
+                        if kit::secondary(ui, None, t("Later")).clicked() {
                             close = true;
                         }
                     });
@@ -650,12 +685,18 @@ fn inline(ui: &egui::Ui, text: &str) -> egui::text::LayoutJob {
 /// Release notes from GitHub (Markdown), in a scrolling box.
 fn release_notes(ui: &mut egui::Ui, notes: &str, max_height: f32) {
     let blocks = parse_notes(notes);
+    let p = style::pal(ui);
     egui::Frame::NONE
-        .fill(ui.visuals().extreme_bg_color)
-        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-        .inner_margin(egui::Margin::same(10))
-        .corner_radius(6)
+        .fill(p.card)
+        .stroke(egui::Stroke::new(1.0, p.border))
+        .inner_margin(egui::Margin::symmetric(14, 12))
+        .corner_radius(style::RADIUS_LG)
         .show(ui, |ui| {
+            ui.style_mut().visuals.override_text_color = Some(p.text_muted);
+            ui.style_mut()
+                .text_styles
+                .insert(egui::TextStyle::Body, style::regular(12.5));
+            ui.spacing_mut().item_spacing.y = 4.0;
             egui::ScrollArea::vertical()
                 .max_height(max_height)
                 .min_scrolled_height(max_height.min(140.0))
@@ -670,7 +711,11 @@ fn release_notes(ui: &mut egui::Ui, notes: &str, max_height: f32) {
                                 if i > 0 {
                                     ui.add_space(6.0);
                                 }
-                                ui.label(RichText::new(text).font(style::semibold(13.5)));
+                                ui.label(
+                                    RichText::new(text)
+                                        .font(style::semibold(12.5))
+                                        .color(p.text),
+                                );
                             }
                             Block::Item(level, text) => {
                                 ui.horizontal_top(|ui| {

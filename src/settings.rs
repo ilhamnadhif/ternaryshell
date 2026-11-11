@@ -96,6 +96,15 @@ pub struct Settings {
     pub skipped_version: Option<String>,
     /// When updates were last checked (Unix time).
     pub last_update_check: Option<i64>,
+    /// Saved connections opened lately, newest first (for Start and the command palette).
+    pub recent: Vec<RecentConnection>,
+}
+
+/// A saved connection and when it was last opened (Unix time).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecentConnection {
+    pub id: Uuid,
+    pub at: i64,
 }
 
 impl Default for Settings {
@@ -124,7 +133,7 @@ impl Default for Settings {
             confirm_close_connected: true,
             load_cjk_font: true,
             sidebar_visible: true,
-            sidebar_width: 260.0,
+            sidebar_width: 248.0,
             quick_commands: vec![
                 QuickCommand::new("Disk usage", "df -h"),
                 QuickCommand::new("Memory", "free -h"),
@@ -135,6 +144,7 @@ impl Default for Settings {
             check_updates: true,
             skipped_version: None,
             last_update_check: None,
+            recent: Vec::new(),
         }
     }
 }
@@ -173,6 +183,17 @@ impl Settings {
                 && (640.0..=16384.0).contains(w)
                 && (400.0..=16384.0).contains(h)
         })
+    }
+
+    /// Most recent connections kept.
+    pub const MAX_RECENT: usize = 12;
+
+    /// Notes that a saved connection was just opened.
+    pub fn touch_recent(&mut self, id: Uuid) {
+        let at = chrono::Utc::now().timestamp();
+        self.recent.retain(|r| r.id != id);
+        self.recent.insert(0, RecentConnection { id, at });
+        self.recent.truncate(Self::MAX_RECENT);
     }
 
     pub fn clamp(&mut self) {

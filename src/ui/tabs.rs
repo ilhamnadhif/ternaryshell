@@ -274,6 +274,7 @@ impl Tab {
             &self.bookmark.start_dir,
             local.as_deref(),
         )
+        .with_labels(self.title(), self.bookmark.username.clone())
     }
 
     pub fn state(&self) -> ConnState {

@@ -20,12 +20,20 @@ pub enum Action {
     RenameGroup(Uuid),
     DeleteGroup(Uuid),
     QuickConnect,
+    /// Opens the connection editor for an address typed in the palette.
+    SaveAddress(String),
+    CollapseAllGroups,
+    /// Puts the keyboard in the sidebar's filter field.
+    FocusSidebarSearch,
     // tabs and panes
     NewTab,
     /// Tabs are referred to by their id: indices shift when tabs close or move.
     DuplicateTab(u64),
     CloseTabOrPane,
     CloseTab(u64),
+    CloseOtherTabs(u64),
+    /// Stops a connection that is still being made.
+    CancelConnect(u64),
     SelectTab(usize),
     NextTab,
     PrevTab,
@@ -44,6 +52,8 @@ pub enum Action {
     // view
     ToggleSidebar,
     ToggleSftp,
+    /// Light ⇄ dark.
+    ToggleTheme,
     FontBigger,
     FontSmaller,
     FontReset,
@@ -56,6 +66,8 @@ pub enum Action {
     SelectAll,
     ClearScrollback,
     SendQuickCommand(Uuid),
+    /// The n-th quick command (⌃1–⌃9).
+    SendQuickCommandAt(usize),
     // import / export
     Import,
     ImportSshConfig,

@@ -41,6 +41,8 @@ pub struct Loaded {
     pub crlf: bool,
     pub bom: bool,
     pub stamp: Stamp,
+    /// The file's permission bits, for the editor's status bar.
+    pub mode: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,6 +149,7 @@ pub async fn load(sftp: &SftpSession, path: &str) -> Result<Loaded, LoadError> {
         crlf,
         bom,
         stamp: Stamp::of(&attrs),
+        mode: attrs.permissions,
     })
 }
 

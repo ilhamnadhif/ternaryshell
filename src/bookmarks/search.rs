@@ -80,6 +80,37 @@ fn term_score(term: &str, b: &Bookmark, group_path: &str) -> Option<i32> {
     best
 }
 
+/// The characters of `text` (by char index) that the terms of `query` match, for highlighting:
+/// each term is matched left to right, preferring the earliest run.
+pub fn match_positions(query: &str, text: &str) -> Vec<usize> {
+    let t: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
+    let mut out = Vec::new();
+    for term in query.split_whitespace() {
+        let p: Vec<char> = term.chars().flat_map(char::to_lowercase).collect();
+        // A contiguous match first, then any subsequence.
+        let contiguous = (0..t.len()).find(|&s| t[s..].starts_with(&p));
+        match contiguous {
+            Some(s) => out.extend(s..s + p.len()),
+            None => {
+                let mut found = Vec::new();
+                let mut j = 0;
+                for (i, c) in t.iter().enumerate() {
+                    if j < p.len() && *c == p[j] {
+                        found.push(i);
+                        j += 1;
+                    }
+                }
+                if j == p.len() {
+                    out.extend(found);
+                }
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 /// Bookmarks matching every whitespace-separated term in `query`, best first. An empty query
 /// returns all bookmarks in store order.
 pub fn search(store: &BookmarkStore, query: &str) -> Vec<Uuid> {

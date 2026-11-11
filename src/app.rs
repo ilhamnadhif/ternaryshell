@@ -6,9 +6,7 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use eframe::egui::{
-    self, Color32, CornerRadius, Key, KeyboardShortcut, RichText, Sense, Stroke, Theme, Ui, vec2,
-};
+use eframe::egui::{self, Key, KeyboardShortcut, Theme, Ui, vec2};
 #[cfg(target_os = "macos")]
 use muda::MenuEvent;
 use uuid::Uuid;
@@ -20,7 +18,7 @@ use crate::i18n::{self, Language, t, tf};
 use crate::paths;
 use crate::secrets::{self, SecretKind};
 use crate::settings::{FontChoice, Settings, ThemeMode};
-use crate::ssh::types::{ConnState, HostKeyStatus, Prompt, SecretAnswer, SecretPromptKind};
+use crate::ssh::types::ConnState;
 use crate::term::core::GridSize;
 use crate::term::scheme::{self, Scheme};
 use crate::ui::actions::Action;
@@ -29,13 +27,13 @@ use crate::ui::dialogs::{
     PaletteResult, SettingsDialog, Toasts,
 };
 use crate::ui::editor::{Editor, EditorResult};
-use crate::ui::layout::{self, SplitDir};
+use crate::ui::layout::SplitDir;
 #[cfg(target_os = "macos")]
 use crate::ui::menu::{self, AppMenu};
-use crate::ui::sftp_panel::{PanelOutput, SftpPanel};
+use crate::ui::sftp_panel::SftpPanel;
 use crate::ui::sidebar::{Live, Sidebar, TreeMove};
 use crate::ui::tabs::{Env, Tab};
-use crate::ui::{fonts, icons, keys, kit, style, terminal};
+use crate::ui::{fonts, icons, keys, style, terminal};
 
 /// Settings that need work when they change.
 #[derive(Clone, PartialEq)]
@@ -63,25 +61,6 @@ impl Applied {
             ),
         }
     }
-}
-
-/// Snapshot of a pending prompt, copied out of the connection lock for drawing.
-enum PromptView {
-    HostKey {
-        host: String,
-        port: u16,
-        algorithm: String,
-        fingerprint: String,
-        changed: bool,
-        known: Vec<String>,
-    },
-    Secret {
-        kind: SecretPromptKind,
-        message: String,
-        echo: bool,
-        can_save: bool,
-        retry: bool,
-    },
 }
 
 pub struct TernaryShellApp {
@@ -136,6 +115,19 @@ pub struct TernaryShellApp {
     focus_target: Option<(u64, crate::ui::layout::PaneId)>,
     /// Modification time of bookmarks.json as last loaded or saved by this window.
     store_mtime: Option<std::time::SystemTime>,
+    /// Settings opens on this page next time (quick commands from ⚡, shortcuts from Help).
+    settings_page: Option<crate::ui::dialogs::SettingsTab>,
+    /// The connection editor opens on this section next time (forwards from the status strip).
+    editor_section: Option<crate::ui::editor::Section>,
+    /// The window is full screen (no room for the traffic lights).
+    fullscreen: bool,
+    /// Hosts in ~/.ssh/config, counted once for the welcome page.
+    ssh_config_hosts: Option<usize>,
+    /// The steps each connection went through, for its progress card.
+    conn_steps: HashMap<u64, canvas::StepTrack>,
+    /// The window size the traffic lights were last placed for (macOS).
+    #[cfg(target_os = "macos")]
+    traffic_placed: Option<(f32, f32)>,
     #[cfg(debug_assertions)]
     dev: crate::devtest::Script,
 }
@@ -179,8 +171,14 @@ fn adhoc_bookmark(target: &str) -> Option<Bookmark> {
     })
 }
 
-const TAB_H: f32 = 38.0;
-/// Height of the status bar along the bottom of the window.
+mod canvas;
+mod chrome;
+
+pub use chrome::{address_with_port, forward_rule};
+
+/// Height of the title row (traffic lights, tabs, the session toolbar).
+const TITLE_H: f32 = 44.0;
+/// Height of the status strip along the bottom of the canvas card.
 const STATUS_H: f32 = 26.0;
 
 impl TernaryShellApp {
@@ -291,6 +289,13 @@ impl TernaryShellApp {
             #[cfg(target_os = "macos")]
             option_as_alt: None,
             focus_target: None,
+            settings_page: None,
+            editor_section: None,
+            fullscreen: false,
+            ssh_config_hosts: None,
+            conn_steps: HashMap::new(),
+            #[cfg(target_os = "macos")]
+            traffic_placed: None,
             #[cfg(debug_assertions)]
             dev: crate::devtest::Script::from_env(),
         }
@@ -337,10 +342,24 @@ impl TernaryShellApp {
             // Real keyboard and mouse events.
             "keys" => devtest::type_text(&devtest::unescape(arg)),
             "key" => devtest::key(arg),
-            "click" | "dclick" | "rclick" => match target(arg) {
+            // A right click: pressed in this frame, released in a later one (see `devtest`).
+            "rclick" => match target(arg) {
                 Some(pos) => {
-                    devtest::click(pos, if cmd == "dclick" { 2 } else { 1 }, cmd == "rclick")
+                    devtest::push_egui_events(devtest::secondary_button(pos, true));
+                    self.dev
+                        .push_front(vec![format!("rclick-release {},{}", pos.x, pos.y)]);
                 }
+                None => self
+                    .dev
+                    .check(false, &format!("{cmd} {arg}: target not found")),
+            },
+            "rclick-release" => {
+                if let Some(pos) = target(arg) {
+                    devtest::push_egui_events(devtest::secondary_button(pos, false));
+                }
+            }
+            "click" | "dclick" => match target(arg) {
+                Some(pos) => devtest::click(pos, if cmd == "dclick" { 2 } else { 1 }, false),
                 None => self
                     .dev
                     .check(false, &format!("{cmd} {arg}: target not found")),
@@ -365,6 +384,15 @@ impl TernaryShellApp {
                 let action = match arg {
                     "quick" => Some(Action::QuickConnect),
                     "settings" => Some(Action::Settings),
+                    "settings-appearance" | "settings-terminal" | "settings-quick" => {
+                        use crate::ui::dialogs::SettingsTab;
+                        self.settings_page = Some(match arg {
+                            "settings-appearance" => SettingsTab::Appearance,
+                            "settings-terminal" => SettingsTab::Terminal,
+                            _ => SettingsTab::QuickCommands,
+                        });
+                        Some(Action::Settings)
+                    }
                     "sftp" => Some(Action::ToggleSftp),
                     "split-right" => Some(Action::SplitRight),
                     "split-down" => Some(Action::SplitDown),
@@ -481,6 +509,10 @@ impl TernaryShellApp {
                 );
             }
             "log" => eprintln!("DEVTEST LOG: {arg}"),
+            // `screenshot <path.bmp>`: the window as it is drawn (written when it arrives).
+            "screenshot" => ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
+                egui::UserData::new(PathBuf::from(arg)),
+            )),
             // Checks that a panic while drawing is contained.
             "panic" => panic!("devtest: deliberate panic"),
             // Focus on a widget that is never drawn (what crashed the app with VoiceOver on).
@@ -623,10 +655,10 @@ impl TernaryShellApp {
             || self.palette.is_some()
             || self.dialog.is_some()
             || self.updater.dialog_open
-            || self.tabs.get(self.active).is_some_and(|t| {
-                t.sftp.as_ref().is_some_and(SftpPanel::dialog_open)
-                    || t.conn.shared.lock().prompt.is_some()
-            })
+            || self
+                .tabs
+                .get(self.active)
+                .is_some_and(|t| t.sftp.as_ref().is_some_and(SftpPanel::dialog_open))
     }
 
     /// Whether the keyboard is in the active tab's focused terminal pane.
@@ -710,6 +742,25 @@ impl TernaryShellApp {
                 }
             }
         }
+        // ⌘F: the sidebar's filter; ⌃1–⌃9: quick commands (macOS, where Control+digit sends
+        // nothing a shell uses).
+        if cfg!(target_os = "macos") {
+            if ctx.input_mut(|i| {
+                i.consume_shortcut(&KeyboardShortcut::new(egui::Modifiers::COMMAND, Key::F))
+            }) {
+                self.actions.push(Action::FocusSidebarSearch);
+            }
+            for (i, key) in digits.iter().enumerate() {
+                if i < self.settings.quick_commands.len()
+                    && !self.tabs.is_empty()
+                    && ctx.input_mut(|inp| {
+                        inp.consume_shortcut(&KeyboardShortcut::new(egui::Modifiers::CTRL, *key))
+                    })
+                {
+                    self.actions.push(Action::SendQuickCommandAt(i));
+                }
+            }
+        }
         let tab_mods = keys::tab_number_modifiers();
         for (i, key) in digits.iter().enumerate() {
             if ctx.input_mut(|inp| inp.consume_shortcut(&KeyboardShortcut::new(tab_mods, *key))) {
@@ -726,40 +777,49 @@ impl TernaryShellApp {
     fn handle_close_request(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.viewport().close_requested())
             && !self.allow_close
-            && let Some(message) = self.quit_warning()
+            && let Some(details) = self.quit_warning()
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.dialog = Some(dialogs::confirm(
+            self.dialog = Some(dialogs::confirm_details(
                 t("Quit TernaryShell?"),
-                message,
+                String::new(),
+                details,
                 t("Quit"),
                 ConfirmAction::Quit,
             ));
         }
     }
 
-    /// What quitting would interrupt, if the user should be asked first. Running file
-    /// transfers always ask; open sessions only when the setting says so.
-    fn quit_warning(&self) -> Option<String> {
+    /// What quitting would interrupt, if the user should be asked first (one line each, with
+    /// its icon). Running file transfers always ask; open sessions only when the setting says so.
+    fn quit_warning(&self) -> Option<Vec<(&'static str, String)>> {
         let live = self.tabs.iter().filter(|t| t.is_active()).count();
         let transfers: usize = self.tabs.iter().map(Tab::running_transfers).sum();
         let mut lines = Vec::new();
         if live > 0 && (self.settings.confirm_close_connected || transfers > 0) {
-            lines.push(tf(
-                "{} connection(s) are open and will be closed.",
-                &[&live.to_string()],
+            lines.push((
+                icons::TERMINAL_WINDOW,
+                tf("{} open session(s)", &[&live.to_string()]),
             ));
         }
         if transfers > 0 {
-            lines.push(tf(
-                "{} file transfer(s) are still running and will be cancelled.",
-                &[&transfers.to_string()],
+            lines.push((
+                icons::ARROWS_DOWN_UP,
+                tf(
+                    "{} transfer(s) will be cancelled",
+                    &[&transfers.to_string()],
+                ),
             ));
         }
-        for file in self.tabs.iter().filter_map(Tab::unsaved_file) {
-            lines.push(tf("Unsaved changes to {} will be lost.", &[&file]));
+        for tab in &self.tabs {
+            if let Some(file) = tab.unsaved_file() {
+                lines.push((
+                    icons::PENCIL_SIMPLE,
+                    tf("{} on {} has unsaved changes", &[&file, &tab.title()]),
+                ));
+            }
         }
-        (!lines.is_empty()).then(|| lines.join("\n"))
+        (!lines.is_empty()).then_some(lines)
     }
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
@@ -911,32 +971,37 @@ impl TernaryShellApp {
             || transfers > 0
             || unsaved.is_some()
         {
-            let mut message = tf(
-                "The connection to {} will be closed.",
-                &[&tab.bookmark.address()],
-            );
-            if transfers > 0 {
-                message.push('\n');
-                message.push_str(&tf(
-                    "{} file transfer(s) are still running and will be cancelled.",
-                    &[&transfers.to_string()],
+            let mut details = Vec::new();
+            if tab.is_active() {
+                details.push((
+                    icons::TERMINAL,
+                    t("The session is still running").to_string(),
                 ));
+            }
+            if transfers > 0 {
+                details.push((
+                    icons::ARROWS_DOWN_UP,
+                    tf(
+                        "{} transfer(s) will be cancelled",
+                        &[&transfers.to_string()],
+                    ),
+                ));
+            }
+            if let Some(file) = &unsaved {
+                details.push((icons::PENCIL_SIMPLE, tf("{} has unsaved changes", &[file])));
             }
             // Only the plain "it's connected" question can be turned off; lost transfers and
             // edits are always asked about.
             let ask = if transfers == 0 && unsaved.is_none() {
                 dialogs::confirm_close
             } else {
-                dialogs::confirm
+                dialogs::confirm_details
             };
-            if let Some(file) = unsaved {
-                message.push('\n');
-                message.push_str(&tf("Unsaved changes to {} will be lost.", &[&file]));
-            }
             self.dialog = Some(ask(
-                t("Close this tab?"),
-                message,
-                t("Close"),
+                &tf("Close {}?", &[&tab.title()]),
+                String::new(),
+                details,
+                t("Close Tab"),
                 ConfirmAction::CloseTab(tab.id),
             ));
         } else {
@@ -1012,8 +1077,9 @@ impl TernaryShellApp {
                 ));
             }
             Action::EditBookmark(id) => {
+                let section = self.editor_section.take();
                 if let Some(b) = self.store.bookmark(id).cloned() {
-                    self.editor = Some(Editor::new(b, false));
+                    self.editor = Some(Editor::new(b, false).with_section(section));
                 } else if let Some(tab) = self.tabs.iter().find(|t| t.bookmark.id == id) {
                     // An ad-hoc connection (command line): offer to save it as a bookmark.
                     self.editor = Some(Editor::new(tab.bookmark.clone(), true));
@@ -1029,10 +1095,10 @@ impl TernaryShellApp {
             Action::DeleteBookmark(id) => {
                 if let Some(b) = self.store.bookmark(id) {
                     self.dialog = Some(dialogs::confirm(
-                        t("Delete connection?"),
+                        &tf("Delete “{}”?", &[&b.display_name()]),
                         tf(
-                            "\"{}\" and its saved password will be removed.",
-                            &[&b.display_name()],
+                            "The connection and its saved password are removed from {}. The server isn't touched.",
+                            &[crate::platform::this_computer()],
                         ),
                         t("Delete"),
                         ConfirmAction::DeleteBookmark(id),
@@ -1042,12 +1108,18 @@ impl TernaryShellApp {
             Action::Connect(id) => {
                 if let Some(b) = self.store.bookmark(id).cloned() {
                     self.sidebar.selected = Some(id);
+                    self.settings.touch_recent(id);
                     self.open_tab(ctx, b);
                 }
             }
             Action::NewGroup { parent } => {
+                let context = match parent {
+                    Some(g) => tf("in {}", &[&self.store.group_path(Some(g))]),
+                    None => String::new(),
+                };
                 self.dialog = Some(Dialog::GroupName {
                     target: GroupTarget::New { parent },
+                    context,
                     name: String::new(),
                     focus: true,
                 });
@@ -1060,24 +1132,65 @@ impl TernaryShellApp {
                     .unwrap_or_default();
                 self.dialog = Some(Dialog::GroupName {
                     target: GroupTarget::Rename(id),
+                    context: name.clone(),
                     name,
                     focus: true,
                 });
             }
             Action::DeleteGroup(id) => {
                 if let Some(g) = self.store.group(id) {
+                    let count = self.store.bookmarks_in(Some(id)).count();
                     self.dialog = Some(dialogs::confirm(
-                        t("Delete group?"),
+                        &tf("Delete group “{}”?", &[&g.name]),
                         tf(
-                            "The group \"{}\" will be removed. Its connections and sub-groups move up one level.",
-                            &[&g.name],
+                            "Its {} connection(s) and subgroups move up one level. Nothing else is deleted.",
+                            &[&count.to_string()],
                         ),
-                        t("Delete"),
+                        t("Delete Group"),
                         ConfirmAction::DeleteGroup(id),
                     ));
                 }
             }
             Action::QuickConnect => self.palette = Some(Palette::default()),
+            Action::SaveAddress(address) => {
+                if let Some(b) = adhoc_bookmark(&address) {
+                    self.editor = Some(Editor::new(b, true));
+                }
+            }
+            Action::CollapseAllGroups => self.sidebar.collapse_all(),
+            Action::FocusSidebarSearch => {
+                self.settings.sidebar_visible = true;
+                self.sidebar.focus_search = true;
+            }
+            Action::CloseOtherTabs(id) => {
+                let others: Vec<u64> = self
+                    .tabs
+                    .iter()
+                    .map(|t| t.id)
+                    .filter(|t| *t != id)
+                    .collect();
+                for other in others {
+                    if let Some(i) = self.tab_index(other) {
+                        self.request_close_tab(i);
+                        // A question about one tab stops the rest (it would replace it).
+                        if self.dialog.is_some() {
+                            break;
+                        }
+                    }
+                }
+            }
+            Action::CancelConnect(id) => {
+                if let Some(tab) = self.tabs.iter().find(|t| t.id == id) {
+                    tab.disconnect();
+                }
+            }
+            Action::ToggleTheme => self.toggle_theme(ctx),
+            Action::SendQuickCommandAt(i) => {
+                if let Some(qc) = self.settings.quick_commands.get(i) {
+                    let id = qc.id;
+                    self.run_action(ctx, Action::SendQuickCommand(id));
+                }
+            }
             Action::NewTab => match self.tabs.get(self.active) {
                 Some(tab) => {
                     let b = self
@@ -1143,20 +1256,20 @@ impl TernaryShellApp {
                     let transfers = tab.running_transfers();
                     if tab.is_active() || transfers > 0 {
                         // Running programs would be cut off: ask first.
-                        let mut message = tf(
-                            "The running sessions on {} will be closed and opened again.",
-                            &[&tab.bookmark.address()],
-                        );
+                        let mut details = Vec::new();
                         if transfers > 0 {
-                            message.push('\n');
-                            message.push_str(&tf(
-                                "{} file transfer(s) are still running and will be cancelled.",
-                                &[&transfers.to_string()],
+                            details.push((
+                                icons::ARROWS_DOWN_UP,
+                                tf(
+                                    "{} transfer(s) will be cancelled",
+                                    &[&transfers.to_string()],
+                                ),
                             ));
                         }
-                        self.dialog = Some(dialogs::confirm(
-                            t("Reconnect this tab?"),
-                            message,
+                        self.dialog = Some(dialogs::confirm_details(
+                            &tf("Reconnect {}?", &[&tab.title()]),
+                            t("The running sessions are closed and opened again. Scrollback is kept.").to_string(),
+                            details,
                             t("Reconnect"),
                             ConfirmAction::Reconnect(tab.id),
                         ));
@@ -1297,10 +1410,17 @@ impl TernaryShellApp {
                     self.dialog = Some(Dialog::Export(ExportDialog::new(scope)));
                 }
             }
-            Action::Settings => self.dialog = Some(Dialog::Settings(SettingsDialog::default())),
+            Action::Settings => {
+                let page = self.settings_page.take();
+                self.dialog = Some(Dialog::Settings(SettingsDialog::new(page)));
+            }
             Action::About => {}
             Action::CheckForUpdates => self.updater.check_now(ctx),
-            Action::Shortcuts => self.dialog = Some(Dialog::Shortcuts),
+            Action::Shortcuts => {
+                self.dialog = Some(Dialog::Settings(SettingsDialog::new(Some(
+                    crate::ui::dialogs::SettingsTab::Shortcuts,
+                ))))
+            }
             Action::Quit => {
                 if matches!(
                     self.dialog,
@@ -1311,13 +1431,14 @@ impl TernaryShellApp {
                 ) {
                     return;
                 }
-                if let Some(message) = self.quit_warning() {
+                if let Some(details) = self.quit_warning() {
                     if self.dialog.is_some() {
                         self.dialog_below = self.dialog.take();
                     }
-                    self.dialog = Some(dialogs::confirm(
+                    self.dialog = Some(dialogs::confirm_details(
                         t("Quit TernaryShell?"),
-                        message,
+                        String::new(),
+                        details,
                         t("Quit"),
                         ConfirmAction::Quit,
                     ));
@@ -1395,9 +1516,14 @@ impl TernaryShellApp {
         .and_then(|file| Ok(serde_json::to_vec_pretty(&file)?))
         .and_then(|json| Ok(paths::write_private(path, &json)?));
         match result {
-            Ok(()) if unreadable.is_empty() => self
-                .toasts
-                .info(tf("Exported to {}", &[&path.display().to_string()])),
+            Ok(()) if unreadable.is_empty() => {
+                let name = path
+                    .file_name()
+                    .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+                let folder = path.parent().map(paths::contract_tilde);
+                self.toasts
+                    .push(tf("Exported to {}", &[&name]), folder, false, None);
+            }
             Ok(()) => self.toasts.error(tf(
                 "Exported to {}, but the key file of {} could not be read: copy it to the other Mac yourself.",
                 &[&path.display().to_string(), &unreadable.join(", ")],
@@ -1447,1440 +1573,6 @@ impl TernaryShellApp {
             }
         }
         self.save_store();
-    }
-
-    // ----- drawing ----------------------------------------------------------------------------
-
-    /// The status of a tab: its dot color and a word for it.
-    fn tab_status(tab: &Tab, p: &style::Palette) -> (Color32, &'static str) {
-        match tab.state() {
-            ConnState::Connected if tab.panes.iter().any(|p| p.is_live()) => (p.ok, t("Connected")),
-            ConnState::Connected => (p.text_faint, t("Session ended")),
-            ConnState::Connecting | ConnState::Authenticating => (p.warn, t("Connecting…")),
-            ConnState::Closed(Some(_)) => (p.err, t("Disconnected")),
-            ConnState::Closed(None) => (p.text_faint, t("Disconnected")),
-        }
-    }
-
-    fn tab_bar(&mut self, ui: &mut Ui) {
-        let p = style::pal(ui);
-        let dark = ui.visuals().dark_mode;
-        let bar = ui.max_rect();
-        ui.painter().hline(
-            bar.x_range(),
-            bar.bottom() - 0.5,
-            Stroke::new(1.0, p.border),
-        );
-
-        // The actions on the right first, so the tabs know how much room is left.
-        let mut actions = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(bar.shrink2(vec2(8.0, 0.0)))
-                .layout(egui::Layout::right_to_left(egui::Align::Center)),
-        );
-        self.tab_actions(&mut actions);
-        let actions_left = actions.min_rect().left().min(bar.right());
-        let tabs_rect =
-            egui::Rect::from_min_max(bar.min, egui::pos2(actions_left - 8.0, bar.max.y));
-        let mut tabs_ui = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(tabs_rect)
-                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-        );
-        let mut drag_target = None;
-        let out = egui::ScrollArea::horizontal()
-            .id_salt("tab-strip")
-            .max_width(tabs_rect.width())
-            .max_height(TAB_H)
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-            .show(&mut tabs_ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    ui.add_space(6.0);
-                    for i in 0..self.tabs.len() {
-                        let active = i == self.active;
-                        let tab = &self.tabs[i];
-                        let tab_id = tab.id;
-                        let (dot, status) = Self::tab_status(tab, &p);
-                        let waiting = tab.conn.shared.lock().prompt.is_some();
-                        let activity = !active && tab.has_activity();
-                        let title = tab.title();
-                        let font = if active {
-                            style::medium(13.0)
-                        } else {
-                            egui::FontId::proportional(13.0)
-                        };
-                        let galley =
-                            ui.painter()
-                                .layout_no_wrap(title.clone(), font, Color32::PLACEHOLDER);
-                        let width = (12.0 + 10.0 + 8.0 + galley.size().x + 8.0 + 18.0 + 8.0)
-                            .clamp(110.0, 230.0);
-                        let (rect, resp) =
-                            ui.allocate_exact_size(vec2(width, TAB_H), Sense::click_and_drag());
-                        let hovered = ui.rect_contains_pointer(rect);
-                        let painter = ui.painter();
-                        if active {
-                            let body = rect
-                                .with_min_y(rect.top() + 5.0)
-                                .with_max_y(rect.bottom() + 1.0);
-                            let corners = CornerRadius {
-                                nw: 8,
-                                ne: 8,
-                                sw: 0,
-                                se: 0,
-                            };
-                            painter.rect_filled(body, corners, p.canvas);
-                            painter.rect_stroke(
-                                body,
-                                corners,
-                                Stroke::new(1.0, p.border),
-                                egui::StrokeKind::Inside,
-                            );
-                            // The selected tab opens onto the terminal below it.
-                            painter.hline(
-                                rect.x_range().shrink(1.0),
-                                rect.bottom() - 0.5,
-                                Stroke::new(1.5, p.canvas),
-                            );
-                            painter.hline(
-                                body.x_range().shrink(9.0),
-                                body.top() + 1.0,
-                                Stroke::new(2.0, p.accent),
-                            );
-                        } else if hovered {
-                            painter.rect_filled(
-                                rect.shrink2(vec2(2.0, 7.0)).translate(vec2(0.0, 2.0)),
-                                CornerRadius::same(6),
-                                p.hover,
-                            );
-                        }
-                        let cy = rect.center().y + 2.5;
-                        let dot_pos = egui::pos2(rect.left() + 17.0, cy);
-                        match tab.transfer_progress() {
-                            // Transfers running: a small progress ring instead of the dot.
-                            Some(pr) => {
-                                style::progress_ring(painter, dot_pos, 5.0, pr.fraction(), dark);
-                                resp.clone().on_hover_text(format!(
-                                    "{}\n{}",
-                                    crate::ui::sftp_panel::summary_title(&pr),
-                                    crate::ui::sftp_panel::summary_detail(&pr)
-                                ));
-                            }
-                            None => {
-                                painter.circle_filled(dot_pos, 3.5, dot);
-                            }
-                        }
-                        let text_color = if activity {
-                            p.accent_text
-                        } else if active || hovered {
-                            p.text
-                        } else {
-                            p.text_muted
-                        };
-                        let text_x = rect.left() + 30.0;
-                        let clip = egui::Rect::from_min_max(
-                            egui::pos2(text_x, rect.top()),
-                            egui::pos2(rect.right() - 28.0, rect.bottom()),
-                        );
-                        painter.with_clip_rect(clip).galley(
-                            egui::pos2(text_x, cy - galley.size().y / 2.0),
-                            galley,
-                            text_color,
-                        );
-                        // Close button, or the "waiting for you" dot until hovered.
-                        let close_rect = egui::Rect::from_center_size(
-                            egui::pos2(rect.right() - 17.0, cy),
-                            vec2(18.0, 18.0),
-                        );
-                        let close = ui.interact(
-                            close_rect,
-                            egui::Id::new(("tab-close", tab.id)),
-                            Sense::click(),
-                        );
-                        if waiting && !hovered {
-                            ui.painter()
-                                .circle_filled(close_rect.center(), 3.5, p.accent);
-                        } else if hovered || active {
-                            if close.hovered() {
-                                ui.painter().rect_filled(
-                                    close_rect,
-                                    CornerRadius::same(4),
-                                    p.subtle,
-                                );
-                            }
-                            ui.painter().text(
-                                close_rect.center(),
-                                egui::Align2::CENTER_CENTER,
-                                icons::X,
-                                style::icon_font(12.0),
-                                if close.hovered() {
-                                    p.text
-                                } else {
-                                    p.text_muted
-                                },
-                            );
-                        }
-                        #[cfg(debug_assertions)]
-                        {
-                            crate::devtest::record(format!("tab:{i}"), rect);
-                            crate::devtest::record(format!("tab-close:{i}"), close_rect);
-                        }
-                        if close.clicked() || resp.middle_clicked() {
-                            self.actions.push(Action::CloseTab(tab_id));
-                        } else if resp.clicked() {
-                            self.actions.push(Action::SelectTab(i));
-                        }
-                        let resp =
-                            resp.on_hover_text(format!("{}\n{status}", tab.bookmark.address()));
-                        resp.dnd_set_drag_payload(tab_id);
-                        if let Some(from) = resp.dnd_release_payload::<u64>() {
-                            drag_target = Some((*from, tab_id));
-                        }
-                        resp.context_menu(|ui| {
-                            if ui
-                                .button(kit::with_icon(icons::COPY, t("Duplicate Tab")))
-                                .clicked()
-                            {
-                                self.actions.push(Action::DuplicateTab(tab_id));
-                                ui.close();
-                            }
-                            if ui
-                                .button(kit::with_icon(icons::ARROWS_CLOCKWISE, t("Reconnect")))
-                                .clicked()
-                            {
-                                self.actions.push(Action::SelectTab(i));
-                                self.actions.push(Action::Reconnect);
-                                ui.close();
-                            }
-                            if ui
-                                .button(kit::with_icon(icons::PENCIL_SIMPLE, t("Edit Connection…")))
-                                .clicked()
-                            {
-                                self.actions
-                                    .push(Action::EditBookmark(self.tabs[i].bookmark.id));
-                                ui.close();
-                            }
-                            ui.separator();
-                            if ui
-                                .button(kit::with_icon(icons::X, t("Close Tab")))
-                                .clicked()
-                            {
-                                self.actions.push(Action::CloseTab(tab_id));
-                                ui.close();
-                            }
-                        });
-                    }
-                    ui.add_space(4.0);
-                    ui.allocate_ui_with_layout(
-                        vec2(30.0, TAB_H),
-                        egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-                        |ui| {
-                            if kit::icon_button(
-                                ui,
-                                icons::PLUS,
-                                &format!(
-                                    "{} ({})",
-                                    t("Quick Connect…"),
-                                    keys::Shortcut::QuickConnect.label()
-                                ),
-                            )
-                            .clicked()
-                            {
-                                self.actions.push(Action::QuickConnect);
-                            }
-                        },
-                    );
-                });
-            });
-        // Tabs that don't fit scroll; the edge hiding more fades out.
-        let (view, offset) = (out.inner_rect, out.state.offset.x);
-        if offset > 0.5 {
-            kit::fade(
-                ui.painter(),
-                egui::Rect::from_min_size(view.left_top(), vec2(28.0, view.height() - 1.0)),
-                p.chrome,
-                false,
-            );
-        }
-        if out.content_size.x - view.width() - offset > 0.5 {
-            kit::fade(
-                ui.painter(),
-                egui::Rect::from_min_size(
-                    egui::pos2(view.right() - 28.0, view.top()),
-                    vec2(28.0, view.height() - 1.0),
-                ),
-                p.chrome,
-                true,
-            );
-        }
-        if let Some((from, to)) = drag_target {
-            self.actions.push(Action::MoveTab { from, to });
-        }
-        ui.allocate_rect(bar, Sense::hover());
-    }
-
-    /// The buttons at the right of the tab strip (laid out right to left).
-    fn tab_actions(&mut self, ui: &mut Ui) {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        let has_tab = !self.tabs.is_empty();
-        if !cfg!(target_os = "macos") {
-            self.app_menu(ui);
-        }
-        self.theme_button(ui);
-        if self.updater.toolbar_button(ui) {
-            ui.add_space(4.0);
-        }
-        ui.add_enabled_ui(has_tab, |ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            if kit::icon_button(
-                ui,
-                icons::SQUARE_SPLIT_HORIZONTAL,
-                &format!(
-                    "{} ({})",
-                    t("Split Right"),
-                    keys::Shortcut::SplitRight.label()
-                ),
-            )
-            .clicked()
-            {
-                self.actions.push(Action::SplitRight);
-            }
-            let quick = kit::icon_button(ui, icons::LIGHTNING, t("Quick Commands"));
-            egui::Popup::menu(&quick).show(|ui| {
-                ui.set_min_width(220.0);
-                if self.settings.quick_commands.is_empty() {
-                    ui.label(RichText::new(t("No quick commands")).weak());
-                }
-                for qc in &self.settings.quick_commands {
-                    let label = if qc.name.trim().is_empty() {
-                        qc.command.clone()
-                    } else {
-                        qc.name.clone()
-                    };
-                    if ui
-                        .button(kit::with_icon(icons::TERMINAL, &label))
-                        .on_hover_text(RichText::new(&qc.command).monospace())
-                        .clicked()
-                    {
-                        self.actions.push(Action::SendQuickCommand(qc.id));
-                        ui.close();
-                    }
-                }
-                ui.separator();
-                if ui
-                    .button(kit::with_icon(
-                        icons::PENCIL_SIMPLE,
-                        t("Edit quick commands…"),
-                    ))
-                    .clicked()
-                {
-                    self.actions.push(Action::Settings);
-                    ui.close();
-                }
-            });
-            ui.add_space(6.0);
-            // The SFTP panel toggle; while files move it shows how far along they are (also
-            // when the panel is hidden).
-            let sftp_on = self.tabs.get(self.active).is_some_and(|t| t.show_sftp);
-            let progress = self.tabs.get(self.active).and_then(Tab::transfer_progress);
-            let label = match &progress {
-                Some(pr) => format!("{} {}%", t("SFTP"), (pr.fraction() * 100.0).floor() as u32),
-                None => t("SFTP").to_string(),
-            };
-            let hover = match &progress {
-                Some(pr) => format!(
-                    "{}\n{}",
-                    crate::ui::sftp_panel::summary_title(pr),
-                    crate::ui::sftp_panel::summary_detail(pr)
-                ),
-                None => format!("{} ({})", t("SFTP Panel"), keys::Shortcut::Sftp.label()),
-            };
-            let sftp = kit::button_full(
-                ui,
-                kit::Kind::Secondary,
-                Some(icons::ARROWS_DOWN_UP),
-                &label,
-                true,
-                sftp_on,
-            )
-            .on_hover_text(hover);
-            #[cfg(debug_assertions)]
-            crate::devtest::record("sftp-button", sftp.rect);
-            if sftp.clicked() {
-                self.actions.push(Action::ToggleSftp);
-            }
-        });
-    }
-
-    /// The commands of the macOS menu bar, for Windows and Linux (which have none here).
-    fn app_menu(&mut self, ui: &mut Ui) {
-        use keys::Shortcut as S;
-        let button = kit::icon_button(ui, icons::LIST, t("Menu"));
-        #[cfg(debug_assertions)]
-        crate::devtest::record("app-menu", button.rect);
-        let has_tab = !self.tabs.is_empty();
-        let mut chosen = None;
-        egui::Popup::menu(&button).show(|ui| {
-            ui.set_min_width(260.0);
-            let mut item = |ui: &mut Ui,
-                            icon: &str,
-                            label: &str,
-                            shortcut: Option<S>,
-                            action: Action,
-                            enabled: bool| {
-                let mut b = egui::Button::new(kit::with_icon(icon, label));
-                if let Some(s) = shortcut {
-                    b = b.shortcut_text(s.label());
-                }
-                if ui.add_enabled(enabled, b).clicked() {
-                    chosen = Some(action);
-                    ui.close();
-                }
-            };
-            item(
-                ui,
-                icons::PLUS,
-                t("New Connection…"),
-                Some(S::NewConnection),
-                Action::NewBookmark { group: None },
-                true,
-            );
-            item(
-                ui,
-                icons::MAGNIFYING_GLASS,
-                t("Quick Connect…"),
-                Some(S::QuickConnect),
-                Action::QuickConnect,
-                true,
-            );
-            item(
-                ui,
-                icons::TERMINAL_WINDOW,
-                t("New Tab"),
-                Some(S::NewTab),
-                Action::NewTab,
-                has_tab,
-            );
-            item(
-                ui,
-                icons::ARROWS_CLOCKWISE,
-                t("Reconnect"),
-                Some(S::Reconnect),
-                Action::Reconnect,
-                has_tab,
-            );
-            item(
-                ui,
-                icons::X,
-                t("Close"),
-                Some(S::Close),
-                Action::CloseTabOrPane,
-                has_tab,
-            );
-            ui.separator();
-            item(
-                ui,
-                icons::COPY,
-                t("Copy"),
-                Some(S::Copy),
-                Action::Copy,
-                true,
-            );
-            item(
-                ui,
-                icons::CLIPBOARD,
-                t("Paste"),
-                Some(S::Paste),
-                Action::Paste,
-                true,
-            );
-            item(
-                ui,
-                icons::LIST,
-                t("Select All"),
-                None,
-                Action::SelectAll,
-                has_tab,
-            );
-            item(
-                ui,
-                icons::BROOM,
-                t("Clear Scrollback"),
-                Some(S::ClearScrollback),
-                Action::ClearScrollback,
-                has_tab,
-            );
-            ui.separator();
-            ui.menu_button(kit::with_icon(icons::SIDEBAR_SIMPLE, t("View")), |ui| {
-                ui.set_min_width(240.0);
-                item(
-                    ui,
-                    icons::SIDEBAR_SIMPLE,
-                    t("Show/Hide Sidebar"),
-                    Some(S::Sidebar),
-                    Action::ToggleSidebar,
-                    true,
-                );
-                item(
-                    ui,
-                    icons::ARROWS_DOWN_UP,
-                    t("SFTP Panel"),
-                    Some(S::Sftp),
-                    Action::ToggleSftp,
-                    has_tab,
-                );
-                ui.separator();
-                item(
-                    ui,
-                    icons::SQUARE_SPLIT_HORIZONTAL,
-                    t("Split Right"),
-                    Some(S::SplitRight),
-                    Action::SplitRight,
-                    has_tab,
-                );
-                item(
-                    ui,
-                    icons::SQUARE_SPLIT_VERTICAL,
-                    t("Split Down"),
-                    Some(S::SplitDown),
-                    Action::SplitDown,
-                    has_tab,
-                );
-                item(
-                    ui,
-                    icons::ARROW_RIGHT,
-                    t("Next Pane"),
-                    Some(S::NextPane),
-                    Action::NextPane,
-                    has_tab,
-                );
-                item(
-                    ui,
-                    icons::ARROW_LEFT,
-                    t("Previous Pane"),
-                    Some(S::PrevPane),
-                    Action::PrevPane,
-                    has_tab,
-                );
-                ui.separator();
-                item(
-                    ui,
-                    icons::TEXT_AA,
-                    t("Bigger Text"),
-                    Some(S::Bigger),
-                    Action::FontBigger,
-                    true,
-                );
-                item(
-                    ui,
-                    icons::TEXT_AA,
-                    t("Smaller Text"),
-                    Some(S::Smaller),
-                    Action::FontSmaller,
-                    true,
-                );
-                item(
-                    ui,
-                    icons::TEXT_AA,
-                    t("Actual Size"),
-                    Some(S::ActualSize),
-                    Action::FontReset,
-                    true,
-                );
-                item(
-                    ui,
-                    icons::DESKTOP,
-                    t("Full Screen"),
-                    Some(S::FullScreen),
-                    Action::ToggleFullScreen,
-                    true,
-                );
-            });
-            ui.menu_button(kit::with_icon(icons::HARD_DRIVES, t("Connections")), |ui| {
-                ui.set_min_width(240.0);
-                item(
-                    ui,
-                    icons::DOWNLOAD_SIMPLE,
-                    t("Import Connections…"),
-                    None,
-                    Action::Import,
-                    true,
-                );
-                item(
-                    ui,
-                    icons::FILE_CODE,
-                    t("Import from ~/.ssh/config"),
-                    None,
-                    Action::ImportSshConfig,
-                    true,
-                );
-                item(
-                    ui,
-                    icons::EXPORT,
-                    t("Export Connections…"),
-                    Some(S::Export),
-                    Action::Export(ExportScope::All),
-                    true,
-                );
-            });
-            ui.separator();
-            item(
-                ui,
-                icons::GEAR_SIX,
-                t("Settings…"),
-                Some(S::Settings),
-                Action::Settings,
-                true,
-            );
-            item(
-                ui,
-                icons::KEYBOARD,
-                t("Keyboard Shortcuts"),
-                None,
-                Action::Shortcuts,
-                true,
-            );
-            item(
-                ui,
-                icons::ARROW_CIRCLE_UP,
-                t("Check for Updates…"),
-                None,
-                Action::CheckForUpdates,
-                true,
-            );
-            ui.separator();
-            item(
-                ui,
-                icons::SIGN_OUT,
-                t("Quit TernaryShell"),
-                Some(S::Quit),
-                Action::Quit,
-                true,
-            );
-        });
-        if let Some(action) = chosen {
-            self.actions.push(action);
-        }
-    }
-
-    /// Toolbar button: click toggles dark/light; right-click offers "follow macOS".
-    fn theme_button(&mut self, ui: &mut Ui) {
-        let dark = ui.visuals().dark_mode;
-        // Shows what a click switches to.
-        let resp = kit::icon_button(
-            ui,
-            if dark { icons::SUN } else { icons::MOON },
-            if dark {
-                t("Switch to light theme")
-            } else {
-                t("Switch to dark theme")
-            },
-        );
-        #[cfg(debug_assertions)]
-        crate::devtest::record("theme-button", resp.rect);
-        if resp.clicked() {
-            self.settings.theme = if dark {
-                ThemeMode::Light
-            } else {
-                ThemeMode::Dark
-            };
-        }
-        resp.context_menu(|ui| {
-            ui.radio_value(
-                &mut self.settings.theme,
-                ThemeMode::System,
-                if cfg!(target_os = "macos") {
-                    t("Follow macOS")
-                } else {
-                    t("Follow system")
-                },
-            );
-            ui.radio_value(&mut self.settings.theme, ThemeMode::Light, t("Light"));
-            ui.radio_value(&mut self.settings.theme, ThemeMode::Dark, t("Dark"));
-        });
-    }
-
-    /// The bar along the bottom of the window: the sidebar toggle and the state of the active
-    /// connection on the left; port forwards, transfers and the number of connections on the
-    /// right.
-    fn status_bar(&mut self, ui: &mut Ui) {
-        let p = style::pal(ui);
-        let bar = ui.max_rect();
-        ui.painter()
-            .hline(bar.x_range(), bar.top() + 0.5, Stroke::new(1.0, p.border));
-        ui.horizontal_centered(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            if kit::icon_button_ex(
-                ui,
-                icons::SIDEBAR_SIMPLE,
-                &format!(
-                    "{} ({})",
-                    t("Show/Hide Sidebar"),
-                    keys::Shortcut::Sidebar.label()
-                ),
-                self.settings.sidebar_visible,
-                22.0,
-            )
-            .clicked()
-            {
-                self.actions.push(Action::ToggleSidebar);
-            }
-            if let Some(tab) = self.tabs.get(self.active) {
-                let (dot, status) = Self::tab_status(tab, &p);
-                kit::dot(ui, dot, 3.5);
-                ui.label(RichText::new(status).small().color(p.text));
-                let via = tab.conn.shared.lock().via.clone();
-                let address = match via {
-                    Some(v) => format!("{}  ·  {} {v}", tab.bookmark.address(), t("via")),
-                    None => tab.bookmark.address(),
-                };
-                ui.add(
-                    egui::Label::new(RichText::new(address).small().color(p.text_muted)).truncate(),
-                );
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 10.0;
-                ui.label(
-                    RichText::new(Sidebar::status_line(&self.store))
-                        .small()
-                        .color(p.text_faint),
-                );
-                if let Some(pr) = self.tabs.get(self.active).and_then(Tab::transfer_progress) {
-                    let text = format!(
-                        "{}  {}%",
-                        icons::ARROWS_DOWN_UP,
-                        (pr.fraction() * 100.0).floor() as u32
-                    );
-                    let r = ui
-                        .add(
-                            egui::Button::new(RichText::new(text).small().color(p.accent_text))
-                                .frame(false),
-                        )
-                        .on_hover_text(format!(
-                            "{}\n{}",
-                            crate::ui::sftp_panel::summary_title(&pr),
-                            crate::ui::sftp_panel::summary_detail(&pr)
-                        ));
-                    if r.clicked() {
-                        self.actions.push(Action::ToggleSftp);
-                    }
-                }
-                self.forwards_button(ui);
-            });
-        });
-    }
-
-    fn welcome(&mut self, ui: &mut Ui) {
-        let p = style::pal(ui);
-        ui.vertical_centered(|ui| {
-            ui.add_space((ui.available_height() * 0.22).max(20.0));
-            let (rect, _) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::hover());
-            icons::paint_logo(ui.painter(), rect);
-            ui.add_space(14.0);
-            ui.label(
-                RichText::new("TernaryShell")
-                    .font(style::semibold(24.0))
-                    .color(p.text),
-            );
-            ui.add_space(2.0);
-            ui.label(RichText::new(t("Lightweight SSH and SFTP client")).color(p.text_muted));
-            ui.add_space(22.0);
-            let row = |ui: &mut Ui, w: f32, add: &mut dyn FnMut(&mut Ui)| {
-                ui.horizontal(|ui| {
-                    ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
-                    add(ui);
-                });
-            };
-            let mut quick = false;
-            let mut new = false;
-            row(ui, 340.0, &mut |ui| {
-                quick =
-                    kit::primary_icon(ui, icons::MAGNIFYING_GLASS, t("Quick Connect")).clicked();
-                ui.add_space(2.0);
-                new = kit::secondary(ui, Some(icons::PLUS), t("New Connection…")).clicked();
-            });
-            if quick {
-                self.actions.push(Action::QuickConnect);
-            }
-            if new {
-                self.actions.push(Action::NewBookmark { group: None });
-            }
-            ui.add_space(8.0);
-            let mut import = false;
-            let mut ssh_config = false;
-            row(ui, 360.0, &mut |ui| {
-                import = kit::ghost(ui, Some(icons::DOWNLOAD_SIMPLE), t("Import Connections…"))
-                    .clicked();
-                ssh_config = kit::ghost(ui, Some(icons::FILE_CODE), t("Import from ~/.ssh/config"))
-                    .clicked();
-            });
-            if import {
-                self.actions.push(Action::Import);
-            }
-            if ssh_config {
-                self.actions.push(Action::ImportSshConfig);
-            }
-            ui.add_space(26.0);
-            row(ui, 300.0, &mut |ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                kit::kbd(ui, &keys::Shortcut::QuickConnect.label());
-                ui.label(
-                    RichText::new(t("search connections"))
-                        .small()
-                        .color(p.text_faint),
-                );
-                ui.add_space(10.0);
-                kit::kbd(ui, &keys::Shortcut::NewConnection.label());
-                ui.label(
-                    RichText::new(t("new connection"))
-                        .small()
-                        .color(p.text_faint),
-                );
-            });
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new(t(
-                    "Tip: double-click a connection, or select it in the search and press Enter.",
-                ))
-                .small()
-                .color(p.text_faint),
-            );
-        });
-    }
-
-    fn central(&mut self, ui: &mut Ui) {
-        if self.tabs.is_empty() {
-            self.welcome(ui);
-            return;
-        }
-        let ctx = ui.ctx().clone();
-        let cell = self.cell_size(&ctx);
-        let scheme = self.scheme(&ctx);
-        let modal_open = self.modal_open();
-        let rt = self.rt.handle().clone();
-        let fonts_choice = fonts::effective_choice(&self.settings.font);
-        let term_style = terminal::TermStyle {
-            font_size: self.settings.font_size,
-            cell,
-            scheme,
-            real_bold: fonts::has_real_face(&fonts_choice, true, false),
-            real_italic: fonts::has_real_face(&fonts_choice, false, true),
-            option_as_meta: self.settings.option_as_meta,
-            copy_on_select: self.settings.copy_on_select,
-            cursor_blink: self.settings.cursor_blink,
-        };
-        let active = self.active;
-        let tab = &mut self.tabs[active];
-        tab.clear_activity();
-        let state = tab.state();
-        let (has_prompt, checking, via) = {
-            let s = tab.conn.shared.lock();
-            let checking = s
-                .checking_since
-                .is_some_and(|t| t.elapsed() >= Duration::from_millis(1500));
-            (s.prompt.is_some(), checking, s.via.clone())
-        };
-
-        // Connection callout: a quiet strip over the terminal while connecting, or when the
-        // connection is gone (with a way back).
-        let p = style::pal(ui);
-        let banner = match &state {
-            // Only shown when the answer is slow: a healthy server replies in milliseconds.
-            ConnState::Connected if checking => Some((
-                tf("Checking the connection to {}…", &[&tab.bookmark.address()]),
-                p.warn,
-                None,
-            )),
-            ConnState::Connecting | ConnState::Authenticating if !has_prompt && via.is_some() => {
-                Some((
-                    tf(
-                        "Connecting to {} through {}…",
-                        &[&tab.bookmark.address(), via.as_deref().unwrap_or_default()],
-                    ),
-                    p.warn,
-                    None,
-                ))
-            }
-            ConnState::Connecting if !has_prompt => Some((
-                tf("Connecting to {}…", &[&tab.bookmark.address()]),
-                p.warn,
-                None,
-            )),
-            ConnState::Authenticating if !has_prompt => Some((
-                tf("Authenticating as {}…", &[&tab.bookmark.address()]),
-                p.warn,
-                None,
-            )),
-            ConnState::Closed(Some(e)) => Some((e.message(), p.err, Some(icons::WARNING_CIRCLE))),
-            ConnState::Closed(None) => Some((
-                t("Disconnected.").to_string(),
-                p.text_muted,
-                Some(icons::PLUGS),
-            )),
-            _ => None,
-        };
-        if let Some((text, color, icon)) = banner {
-            let offer_reconnect = icon.is_some();
-            let dark = ui.visuals().dark_mode;
-            let frame = egui::Frame::NONE
-                .fill(style::soft(color, if dark { 0.12 } else { 0.09 }))
-                .inner_margin(egui::Margin::symmetric(14, 0))
-                .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    ui.set_height(38.0);
-                    ui.horizontal_centered(|ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        match icon {
-                            Some(icon) => {
-                                kit::icon(ui, icon, 16.0, color);
-                            }
-                            None => {
-                                ui.add(egui::Spinner::new().size(14.0).color(color));
-                            }
-                        }
-                        ui.add(egui::Label::new(RichText::new(text).color(p.text)).truncate());
-                        if offer_reconnect {
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.spacing_mut().item_spacing.x = 6.0;
-                                    let reconnect = kit::button_ex(
-                                        ui,
-                                        kit::Kind::Secondary,
-                                        Some(icons::ARROWS_CLOCKWISE),
-                                        &format!(
-                                            "{}   {}",
-                                            t("Reconnect"),
-                                            keys::Shortcut::Reconnect.label()
-                                        ),
-                                        true,
-                                    );
-                                    if reconnect.clicked() {
-                                        self.actions.push(Action::Reconnect);
-                                    }
-                                    if kit::ghost(
-                                        ui,
-                                        Some(icons::PENCIL_SIMPLE),
-                                        t("Edit Connection…"),
-                                    )
-                                    .clicked()
-                                    {
-                                        self.actions.push(Action::EditBookmark(tab.bookmark.id));
-                                    }
-                                },
-                            );
-                        }
-                    });
-                });
-            let r = frame.response.rect;
-            ui.painter().hline(
-                r.x_range(),
-                r.bottom() - 0.5,
-                Stroke::new(1.0, style::soft(color, 0.35)),
-            );
-        }
-
-        // Terminal area and optional SFTP panel.
-        let full = ui.available_rect_before_wrap();
-        let (term_rect, sftp_rect) = if tab.show_sftp {
-            let split_y = (full.top() + full.height() * (1.0 - tab.sftp_split)).round();
-            (
-                egui::Rect::from_min_max(full.min, egui::pos2(full.right(), split_y - 3.0)),
-                Some(egui::Rect::from_min_max(
-                    egui::pos2(full.left(), split_y + 3.0),
-                    full.max,
-                )),
-            )
-        } else {
-            (full, None)
-        };
-
-        // A split pane whose shell exited (e.g. `exit`/`logout`) closes by itself; the last
-        // pane stays so the session can be reconnected.
-        if tab.panes.len() > 1 {
-            let ended: Vec<_> = tab
-                .panes
-                .iter()
-                .filter(|p| {
-                    matches!(
-                        *p.status.lock(),
-                        crate::ssh::session::PaneStatus::Exited(Some(_))
-                    )
-                })
-                .map(|p| p.id)
-                .collect();
-            for id in ended {
-                if tab.panes.len() > 1 {
-                    tab.close_pane(id);
-                }
-            }
-        }
-        if self.swallow_repeats {
-            if ctx.input(|i| i.keys_down.is_empty()) {
-                self.swallow_repeats = false;
-            } else {
-                ctx.input_mut(|i| {
-                    i.events
-                        .retain(|e| !matches!(e, egui::Event::Key { repeat: true, .. }))
-                });
-            }
-        }
-        // Keyboard focus follows the active pane (after a split, a tab switch, ⌘[ / ⌘]).
-        let want_focus = (tab.id, tab.focused);
-        if self.focus_target != Some(want_focus) && !modal_open && !has_prompt {
-            ctx.memory_mut(|m| m.request_focus(terminal::pane_widget_id(tab.focused)));
-            self.focus_target = Some(want_focus);
-        }
-
-        let (pane_rects, dividers) = tab.layout.arrange(term_rect);
-        let multi = pane_rects.len() > 1;
-        let tab_id = tab.id;
-        let mut new_focus = None;
-        let mut sent_input = false;
-        let mut close_pane = None;
-        for (pane_index, (pane_id, rect)) in pane_rects.into_iter().enumerate() {
-            #[cfg(debug_assertions)]
-            crate::devtest::record(format!("pane:{pane_index}"), rect);
-            let _ = pane_index;
-            let focused_pane = tab.focused == pane_id;
-            let Some(pane) = tab.pane_mut(pane_id) else {
-                continue;
-            };
-            let alive = pane.is_live();
-            let resp = terminal::show(
-                ui,
-                rect,
-                &mut pane.view,
-                &pane.shared,
-                &term_style,
-                focused_pane,
-                !modal_open && !has_prompt,
-                alive,
-            );
-            if !resp.input.is_empty() {
-                pane.send(resp.input);
-                sent_input = true;
-            }
-            if let Some((size, px_w, px_h)) = resp.resized {
-                let _ = pane.input.send(crate::ssh::session::PaneInput::Resize {
-                    cols: size.cols as u32,
-                    rows: size.rows as u32,
-                    px_w,
-                    px_h,
-                });
-            }
-            if let Some(text) = pane.shared.notes.lock().clipboard.take() {
-                ctx.copy_text(text);
-            }
-            if resp.reconnect {
-                self.actions.push(Action::RestartPane(pane_id));
-            }
-            if resp.activated {
-                new_focus = Some(pane_id);
-            }
-            if multi && focused_pane {
-                ui.painter().rect_stroke(
-                    rect,
-                    CornerRadius::ZERO,
-                    Stroke::new(1.0, style::soft(p.accent, 0.6)),
-                    egui::StrokeKind::Inside,
-                );
-            }
-            // Close button for split panes (a single pane is closed with its tab).
-            if multi && !modal_open {
-                let close_rect = egui::Rect::from_center_size(
-                    egui::pos2(rect.right() - 16.0, rect.top() + 16.0),
-                    vec2(20.0, 20.0),
-                );
-                let close = ui
-                    .interact(
-                        close_rect,
-                        egui::Id::new(("pane-close", tab_id, pane_id)),
-                        Sense::click(),
-                    )
-                    .on_hover_text(format!(
-                        "{} ({})",
-                        t("Close pane"),
-                        keys::Shortcut::Close.label()
-                    ));
-                if close.hovered() || ui.rect_contains_pointer(rect) {
-                    let bg = if close.hovered() { p.hover } else { p.surface };
-                    ui.painter().circle(
-                        close_rect.center(),
-                        10.0,
-                        bg,
-                        Stroke::new(1.0, p.border_strong),
-                    );
-                    ui.painter().text(
-                        close_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        icons::X,
-                        style::icon_font(12.0),
-                        if close.hovered() {
-                            p.text
-                        } else {
-                            p.text_muted
-                        },
-                    );
-                }
-                #[cfg(debug_assertions)]
-                crate::devtest::record(format!("pane-close:{pane_index}"), close_rect);
-                if close.clicked() {
-                    close_pane = Some(pane_id);
-                }
-            }
-            let bell = pane.shared.notes.lock().bell_at;
-            if let Some(at) = bell {
-                let age = at.elapsed().as_secs_f32();
-                if age < 0.25 {
-                    ui.painter().rect_filled(
-                        rect,
-                        CornerRadius::ZERO,
-                        Color32::from_white_alpha(((0.25 - age) * 120.0) as u8),
-                    );
-                    ctx.request_repaint_after(Duration::from_millis(30));
-                }
-            }
-        }
-        if let Some(f) = new_focus {
-            tab.focused = f;
-        }
-        if sent_input {
-            tab.note_input();
-        }
-        if let Some(id) = close_pane {
-            tab.close_pane(id);
-        }
-        for (i, d) in dividers.iter().enumerate() {
-            let resp = ui.interact(
-                d.rect.expand(2.0),
-                egui::Id::new(("divider", tab.id, i)),
-                Sense::drag(),
-            );
-            let color = if resp.hovered() || resp.dragged() {
-                p.accent
-            } else {
-                p.border
-            };
-            ui.painter()
-                .rect_filled(d.rect, CornerRadius::ZERO, p.canvas);
-            match d.dir {
-                SplitDir::Horizontal => {
-                    ui.painter().vline(
-                        d.rect.center().x,
-                        d.rect.y_range(),
-                        Stroke::new(1.0, color),
-                    );
-                }
-                SplitDir::Vertical => {
-                    ui.painter().hline(
-                        d.rect.x_range(),
-                        d.rect.center().y,
-                        Stroke::new(1.0, color),
-                    );
-                }
-            }
-            if resp.hovered() || resp.dragged() {
-                ctx.set_cursor_icon(match d.dir {
-                    SplitDir::Horizontal => egui::CursorIcon::ResizeHorizontal,
-                    SplitDir::Vertical => egui::CursorIcon::ResizeVertical,
-                });
-            }
-            if resp.dragged()
-                && let Some(p) = resp.interact_pointer_pos()
-            {
-                tab.layout.set_ratio(&d.path, layout::ratio_at(d, p));
-            }
-        }
-
-        if let Some(rect) = sftp_rect {
-            // Divider between terminal and SFTP panel.
-            let div = egui::Rect::from_min_max(
-                egui::pos2(full.left(), rect.top() - 6.0),
-                egui::pos2(full.right(), rect.top()),
-            );
-            let resp = ui.interact(div, egui::Id::new(("sftp-divider", tab.id)), Sense::drag());
-            #[cfg(debug_assertions)]
-            crate::devtest::record("sftp-divider", div);
-            ui.painter().hline(
-                div.x_range(),
-                div.center().y,
-                Stroke::new(
-                    if resp.hovered() || resp.dragged() {
-                        2.0
-                    } else {
-                        1.0
-                    },
-                    if resp.hovered() || resp.dragged() {
-                        p.accent
-                    } else {
-                        p.border
-                    },
-                ),
-            );
-            if resp.hovered() || resp.dragged() {
-                ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
-            }
-            if resp.dragged()
-                && let Some(p) = resp.interact_pointer_pos()
-            {
-                tab.sftp_split = (1.0 - (p.y - full.top()) / full.height()).clamp(0.15, 0.85);
-                // The panel was laid out with the old split this frame: draw again.
-                ctx.request_repaint();
-            }
-            let last = self.settings.last_local_dir.clone();
-            if tab.sftp.is_none() && tab.state().is_connected() {
-                tab.sftp = Some(tab.new_sftp_panel(last.as_deref()));
-            }
-            let mut child =
-                ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(8.0, 4.0))));
-            match &mut tab.sftp {
-                Some(panel) => {
-                    if let PanelOutput::LocalDir(dir) = panel.show(&mut child, &rt, !modal_open) {
-                        self.settings.last_local_dir = Some(dir);
-                    }
-                }
-                None => {
-                    child.centered_and_justified(|ui| {
-                        ui.label(
-                            RichText::new(t("SFTP opens once the connection is ready.")).weak(),
-                        )
-                    });
-                }
-            }
-        }
-
-        // Files dragged from Finder over the window.
-        let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
-        if hovering && state.is_connected() {
-            let painter = ui.ctx().layer_painter(egui::LayerId::new(
-                egui::Order::Foreground,
-                egui::Id::new("drop-overlay"),
-            ));
-            painter.rect_filled(full, CornerRadius::same(10), style::soft(p.accent, 0.14));
-            painter.rect_stroke(
-                full.shrink(6.0),
-                CornerRadius::same(10),
-                Stroke::new(1.5, p.accent),
-                egui::StrokeKind::Inside,
-            );
-            painter.text(
-                full.center() - vec2(0.0, 18.0),
-                egui::Align2::CENTER_CENTER,
-                icons::UPLOAD_SIMPLE,
-                style::icon_font(30.0),
-                p.accent_text,
-            );
-            painter.text(
-                full.center() + vec2(0.0, 14.0),
-                egui::Align2::CENTER_CENTER,
-                t("Drop to upload to the current remote folder"),
-                style::medium(16.0),
-                p.accent_text,
-            );
-        }
-    }
-
-    fn prompt_ui(&mut self, ctx: &egui::Context) {
-        let Some(tab) = self.tabs.get_mut(self.active) else {
-            return;
-        };
-        let view = {
-            let s = tab.conn.shared.lock();
-            match &s.prompt {
-                Some(Prompt::HostKey {
-                    host,
-                    port,
-                    algorithm,
-                    fingerprint,
-                    status,
-                    known,
-                    ..
-                }) => PromptView::HostKey {
-                    host: host.clone(),
-                    port: *port,
-                    algorithm: algorithm.clone(),
-                    fingerprint: fingerprint.clone(),
-                    changed: *status == HostKeyStatus::Changed,
-                    known: known.clone(),
-                },
-                Some(Prompt::Secret {
-                    kind,
-                    message,
-                    echo,
-                    can_save,
-                    retry,
-                    ..
-                }) => PromptView::Secret {
-                    kind: *kind,
-                    message: message.clone(),
-                    echo: *echo,
-                    can_save: *can_save,
-                    retry: *retry,
-                },
-                None => return,
-            }
-        };
-        let mut answer: Option<Option<SecretAnswer>> = None;
-        let mut hostkey_answer: Option<bool> = None;
-        // A palette or dialog opened over the prompt gets the keys (Esc, typing) until it closes.
-        let modal_id = egui::Id::new(("prompt", tab.id));
-        let on_top = ctx.memory(|m| m.top_modal_layer().is_none_or(|layer| layer.id == modal_id));
-        let modal = egui::Modal::new(modal_id).show(ctx, |ui| {
-            ui.set_width(460.0);
-            style::form_spacing(ui);
-            let pal = style::pal(ui);
-            match &view {
-                PromptView::HostKey { host, port, algorithm, fingerprint, changed, known } => {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 12.0;
-                        if *changed {
-                            kit::icon_badge(ui, icons::SHIELD_WARNING, pal.err, 40.0);
-                            ui.heading(RichText::new(t("Warning: the host key has changed!")).color(pal.err));
-                        } else {
-                            kit::icon_badge(ui, icons::FINGERPRINT, pal.accent, 40.0);
-                            ui.heading(t("Unknown host"));
-                        }
-                    });
-                    ui.add_space(2.0);
-                    let explanation = if *changed {
-                        t("The server presented a different key than the one saved for it. Someone could be intercepting the connection, or the server may have been reinstalled. Only continue if you know why the key changed.")
-                    } else {
-                        t("This server has not been seen before. Check that the fingerprint matches the server's key before trusting it.")
-                    };
-                    ui.label(RichText::new(explanation).color(pal.text_muted));
-                    ui.add_space(6.0);
-                    kit::card(ui).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    egui::Grid::new("hostkey").num_columns(2).spacing([14.0, 6.0]).show(ui, |ui| {
-                        ui.label(RichText::new(t("Host")).color(pal.text_muted));
-                        ui.label(RichText::new(format!("{host}:{port}")).strong());
-                        ui.end_row();
-                        ui.label(RichText::new(t("Key type")).color(pal.text_muted));
-                        ui.label(algorithm.as_str());
-                        ui.end_row();
-                        ui.label(RichText::new(t("Fingerprint")).color(pal.text_muted));
-                        ui.add(egui::Label::new(RichText::new(fingerprint.as_str()).monospace()).wrap().selectable(true));
-                        ui.end_row();
-                        if !known.is_empty() {
-                            ui.label(RichText::new(t("Saved keys")).color(pal.text_muted));
-                            ui.vertical(|ui| {
-                                for k in known {
-                                    ui.add(egui::Label::new(RichText::new(k.as_str()).monospace()).wrap().selectable(true));
-                                }
-                            });
-                            ui.end_row();
-                        }
-                    });
-                    });
-                    ui.add_space(10.0);
-                    style::right_to_left(ui, |ui| {
-                        let accept = if *changed { t("Accept New Key") } else { t("Trust and Connect") };
-                        if *changed {
-                            if kit::danger(ui, accept).clicked() {
-                                hostkey_answer = Some(true);
-                            }
-                            if ui.button(RichText::new(t("Cancel")).strong()).clicked() {
-                                hostkey_answer = Some(false);
-                            }
-                        } else {
-                            // No Enter shortcut: a key press meant for the terminal must never
-                            // trust a host key. The decision takes a click.
-                            if ui.add(style::primary(accept)).clicked() {
-                                hostkey_answer = Some(true);
-                            }
-                            if ui.button(t("Cancel")).clicked() {
-                                hostkey_answer = Some(false);
-                            }
-                        }
-                    });
-                }
-                PromptView::Secret { kind, message, echo, can_save, retry } => {
-                    let title = match kind {
-                        SecretPromptKind::Password => tf("Password for {}", &[message]),
-                        SecretPromptKind::Passphrase => t("Key passphrase").to_string(),
-                        SecretPromptKind::Interactive => t("The server asks").to_string(),
-                    };
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 12.0;
-                        let icon = match kind {
-                            SecretPromptKind::Passphrase => icons::KEY,
-                            SecretPromptKind::Interactive => icons::SHIELD_CHECK,
-                            SecretPromptKind::Password => icons::LOCK_KEY,
-                        };
-                        kit::icon_badge(ui, icon, pal.accent, 40.0);
-                        ui.add(egui::Label::new(RichText::new(title).font(style::semibold(17.0))).wrap());
-                    });
-                    match kind {
-                        SecretPromptKind::Passphrase => {
-                            ui.label(tf("The private key ({}) is protected by a passphrase.", &[message]));
-                        }
-                        SecretPromptKind::Interactive => {
-                            ui.label(message.as_str());
-                        }
-                        SecretPromptKind::Password => {}
-                    }
-                    if *retry {
-                        ui.colored_label(pal.err, if *kind == SecretPromptKind::Passphrase { t("Wrong passphrase, try again.") } else { t("Wrong password, try again.") });
-                    }
-                    let r = ui.add(style::input(&mut tab.prompt.text).password(!echo));
-                    if *can_save && style::checkbox(ui, &mut tab.prompt.save, tf("Save in {}", &[crate::platform::keychain()])).changed() {
-                        // Back to the field, so Enter submits instead of toggling the box.
-                        r.request_focus();
-                    }
-                    // Enter submits only when pressed (not auto-repeated) after the prompt has
-                    // been up for a moment: an Enter held or typed into the terminal just before
-                    // the prompt appeared must not send an empty or half-typed secret.
-                    let settled = tab.prompt.shown_at.is_some_and(|t| t.elapsed() >= Duration::from_millis(300));
-                    let enter = ui.input(|i| {
-                        i.events.iter().any(|e| matches!(e, egui::Event::Key { key: Key::Enter, pressed: true, repeat: false, modifiers, .. } if modifiers.is_none()))
-                    });
-                    let nothing_focused = ui.memory(|m| m.focused().is_none());
-                    let submit = settled && enter && (r.lost_focus() || nothing_focused);
-                    // The field keeps the keyboard while the prompt is on top: after an early
-                    // Enter (which makes it give up focus) or a click beside it.
-                    if on_top && !submit && (!tab.prompt.focus || nothing_focused || r.lost_focus()) {
-                        r.request_focus();
-                        tab.prompt.focus = true;
-                    }
-                    ui.add_space(8.0);
-                    style::right_to_left(ui, |ui| {
-                        if ui.add(style::primary(t("Connect"))).clicked() || submit {
-                            answer = Some(Some(SecretAnswer { value: std::mem::take(&mut tab.prompt.text), save: tab.prompt.save }));
-                        }
-                        if ui.button(t("Cancel")).clicked() {
-                            answer = Some(None);
-                        }
-                    });
-                }
-            }
-        });
-        // Only Esc dismisses (a stray click beside the dialog must not cancel the login).
-        let _ = modal;
-        let escape = on_top && ctx.input(|i| i.key_pressed(Key::Escape));
-        if escape && tab.prompt.armed && answer.is_none() && hostkey_answer.is_none() {
-            match view {
-                PromptView::HostKey { .. } => hostkey_answer = Some(false),
-                PromptView::Secret { .. } => answer = Some(None),
-            }
-        }
-        if answer.is_some() || hostkey_answer.is_some() {
-            tab.answer_prompt(hostkey_answer.unwrap_or(false), answer.flatten());
-            self.focus_target = None;
-            ctx.request_repaint();
-        } else if !on_top {
-            tab.prompt.focus = false;
-            tab.prompt.armed = false;
-            tab.prompt.shown_at = None;
-            // Notice when the dialog above closes.
-            ctx.request_repaint_after(Duration::from_millis(150));
-        } else {
-            tab.prompt.armed = true;
-            if tab.prompt.shown_at.is_none() {
-                tab.prompt.shown_at = Some(Instant::now());
-                ctx.request_repaint_after(Duration::from_millis(320));
-            }
-        }
     }
 
     fn overlays(&mut self, ctx: &egui::Context) {
@@ -2945,10 +1637,27 @@ impl TernaryShellApp {
     }
 
     fn overlay_dialogs(&mut self, ctx: &egui::Context) {
-        if let Some(palette) = &mut self.palette {
-            match palette.show(ctx, &self.store) {
+        if self.palette.is_some() {
+            let recent: Vec<Uuid> = self.settings.recent.iter().map(|r| r.id).collect();
+            let live: std::collections::HashSet<Uuid> = self
+                .live_map()
+                .into_iter()
+                .filter(|(_, l)| *l == Live::Connected)
+                .map(|(id, _)| id)
+                .collect();
+            let commands = self.palette_commands(ctx);
+            let palette = self.palette.as_mut().expect("checked");
+            match palette.show(ctx, &self.store, &recent, &live, &commands) {
                 PaletteResult::Open => {}
                 PaletteResult::Close => self.palette = None,
+                PaletteResult::SaveAs(address) => {
+                    self.palette = None;
+                    self.actions.push(Action::SaveAddress(address));
+                }
+                PaletteResult::Run(action) => {
+                    self.palette = None;
+                    self.actions.push(action);
+                }
                 PaletteResult::Connect(id) => {
                     self.palette = None;
                     self.actions.push(Action::Connect(id));
@@ -3014,9 +1723,143 @@ impl TernaryShellApp {
                     self.dialog = None;
                     self.apply_import(*plan);
                 }
+                DialogResult::Run(action) => self.actions.push(action),
             }
         }
-        self.toasts.show(ctx);
+        if let Some(action) = self.toasts.show(ctx) {
+            self.actions.push(action);
+        }
+    }
+
+    /// Everything the command palette can run, in the order it lists them.
+    fn palette_commands(&self, ctx: &egui::Context) -> Vec<crate::ui::dialogs::Command> {
+        use crate::ui::dialogs::Command;
+        use keys::Shortcut as S;
+        let has_tab = !self.tabs.is_empty();
+        let dark = ctx.theme() == Theme::Dark;
+        let mut list = vec![Command {
+            icon: icons::PLUS,
+            label: t("New Connection…").into(),
+            shortcut: Some(S::NewConnection.label()),
+            action: Action::NewBookmark { group: None },
+        }];
+        if has_tab {
+            list.push(Command {
+                icon: icons::ARROWS_DOWN_UP,
+                label: t("Toggle SFTP Panel").into(),
+                shortcut: Some(S::Sftp.label()),
+                action: Action::ToggleSftp,
+            });
+            list.push(Command {
+                icon: icons::SQUARE_SPLIT_HORIZONTAL,
+                label: t("Split Right").into(),
+                shortcut: Some(S::SplitRight.label()),
+                action: Action::SplitRight,
+            });
+        }
+        list.push(Command {
+            icon: icons::CIRCLE_HALF,
+            label: if dark {
+                t("Switch to Light Theme")
+            } else {
+                t("Switch to Dark Theme")
+            }
+            .into(),
+            shortcut: None,
+            action: Action::ToggleTheme,
+        });
+        list.push(Command {
+            icon: icons::FILE_CODE,
+            label: t("Import from ~/.ssh/config").into(),
+            shortcut: None,
+            action: Action::ImportSshConfig,
+        });
+        if has_tab {
+            list.push(Command {
+                icon: icons::SQUARE_SPLIT_VERTICAL,
+                label: t("Split Down").into(),
+                shortcut: Some(S::SplitDown.label()),
+                action: Action::SplitDown,
+            });
+            list.push(Command {
+                icon: icons::TERMINAL_WINDOW,
+                label: t("New Tab").into(),
+                shortcut: Some(S::NewTab.label()),
+                action: Action::NewTab,
+            });
+            list.push(Command {
+                icon: icons::ARROWS_CLOCKWISE,
+                label: t("Reconnect").into(),
+                shortcut: Some(S::Reconnect.label()),
+                action: Action::Reconnect,
+            });
+            list.push(Command {
+                icon: icons::BROOM,
+                label: t("Clear Scrollback").into(),
+                shortcut: Some(S::ClearScrollback.label()),
+                action: Action::ClearScrollback,
+            });
+        }
+        list.extend([
+            Command {
+                icon: icons::SIDEBAR_SIMPLE,
+                label: t("Show/Hide Sidebar").into(),
+                shortcut: Some(S::Sidebar.label()),
+                action: Action::ToggleSidebar,
+            },
+            Command {
+                icon: icons::FOLDER_PLUS,
+                label: t("New Group").into(),
+                shortcut: None,
+                action: Action::NewGroup { parent: None },
+            },
+            Command {
+                icon: icons::DOWNLOAD_SIMPLE,
+                label: t("Import Connections…").into(),
+                shortcut: None,
+                action: Action::Import,
+            },
+            Command {
+                icon: icons::EXPORT,
+                label: t("Export Connections…").into(),
+                shortcut: Some(S::Export.label()),
+                action: Action::Export(ExportScope::All),
+            },
+            Command {
+                icon: icons::GEAR_SIX,
+                label: t("Settings…").into(),
+                shortcut: Some(S::Settings.label()),
+                action: Action::Settings,
+            },
+            Command {
+                icon: icons::KEYBOARD,
+                label: t("Keyboard Shortcuts").into(),
+                shortcut: None,
+                action: Action::Shortcuts,
+            },
+            Command {
+                icon: icons::ARROW_CIRCLE_UP,
+                label: t("Check for Updates…").into(),
+                shortcut: None,
+                action: Action::CheckForUpdates,
+            },
+        ]);
+        if has_tab {
+            for qc in &self.settings.quick_commands {
+                let name = if qc.name.trim().is_empty() {
+                    qc.command.clone()
+                } else {
+                    qc.name.clone()
+                };
+                list.push(Command {
+                    icon: icons::LIGHTNING,
+                    label: tf("Run: {}", &[&name]),
+                    shortcut: None,
+                    action: Action::SendQuickCommand(qc.id),
+                });
+            }
+        }
+        list
     }
 
     /// Starts the update installer and quits; the new version opens by itself.
@@ -3181,53 +2024,20 @@ impl TernaryShellApp {
         }
     }
 
-    /// Port forwards of the active connection, in the status bar (only while it has some): how
-    /// many, and a list of how each is doing.
-    fn forwards_button(&mut self, ui: &mut Ui) {
-        let Some(tab) = self.tabs.get(self.active) else {
-            return;
-        };
-        let forwards = tab.conn.shared.lock().forwards.clone();
-        if forwards.is_empty() || !tab.state().is_connected() {
+    /// Moves the traffic lights to the middle of the 44 px title row (the title bar is
+    /// transparent and the content runs under it). Checked every frame: AppKit lays the title
+    /// bar out again on resizes and title changes; nothing is moved when they are in place.
+    #[cfg(target_os = "macos")]
+    fn place_traffic_lights(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        if self.fullscreen {
+            self.traffic_placed = None;
             return;
         }
-        let p = style::pal(ui);
-        let failing = forwards.iter().filter(|f| f.error.is_some()).count();
-        let color = if failing > 0 { p.err } else { p.text_muted };
-        let label = RichText::new(format!(
-            "{}  {} {}",
-            icons::ARROWS_LEFT_RIGHT,
-            forwards.len(),
-            t("forwards")
-        ))
-        .small()
-        .color(color);
-        let resp = ui
-            .add(egui::Button::new(label).frame(false))
-            .on_hover_text(if failing > 0 {
-                tf("{} port forward(s) not working", &[&failing.to_string()])
-            } else {
-                t("Port forwarding is on").to_string()
-            });
-        egui::Popup::menu(&resp).show(|ui| {
-            ui.set_min_width(320.0);
-            ui.label(kit::section_title(t("Port forwarding")));
-            ui.add_space(2.0);
-            for f in &forwards {
-                let mark_color = match (&f.error, f.listening) {
-                    (None, true) => p.ok,
-                    (Some(_), true) => p.warn,
-                    (_, false) => p.err,
-                };
-                ui.horizontal(|ui| {
-                    kit::dot(ui, mark_color, 3.5);
-                    ui.label(RichText::new(f.forward.describe()).monospace());
-                });
-                if let Some(e) = &f.error {
-                    ui.label(RichText::new(e).small().color(p.text_muted));
-                }
-            }
-        });
+        let _ = ctx;
+        if let Some(w) = frame.winit_window() {
+            crate::ui::macos::place_traffic_lights(w, 13.0, f64::from(TITLE_H / 2.0));
+            self.traffic_placed = Some((0.0, 0.0));
+        }
     }
 
     fn update_title(&mut self, ctx: &egui::Context) {
@@ -3252,6 +2062,12 @@ impl TernaryShellApp {
 }
 
 impl eframe::App for TernaryShellApp {
+    /// Debug builds: the events a dev script queued (see `devtest::push_egui_events`).
+    #[cfg(debug_assertions)]
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        raw_input.events.extend(crate::devtest::take_egui_events());
+    }
+
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         // A bug that panics while drawing must not take the whole app (and every open session)
         // down: the panic hook has already written a report; the frame is skipped and the app
@@ -3314,6 +2130,8 @@ impl TernaryShellApp {
 
     fn frame_ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        #[cfg(debug_assertions)]
+        crate::devtest::save_screenshots(&ctx);
         self.handle_menu_events();
         self.apply_settings_changes(&ctx);
         self.handle_shortcuts(&ctx);
@@ -3338,42 +2156,26 @@ impl TernaryShellApp {
         self.run_dev_script(&ctx);
 
         let p = style::pal(ui);
+        self.fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+        #[cfg(target_os = "macos")]
+        self.place_traffic_lights(&ctx, frame);
+        self.track_steps();
         // Panels are laid out with the root Ui's item spacing between them; keep them flush and
         // restore normal spacing inside each panel.
         let spacing = ui.spacing().item_spacing;
         ui.spacing_mut().item_spacing = egui::Vec2::ZERO;
-        egui::Panel::bottom("status-bar")
-            .frame(
-                egui::Frame::NONE
-                    .fill(p.chrome)
-                    .inner_margin(egui::Margin::symmetric(8, 0)),
-            )
-            .exact_size(STATUS_H)
-            .show(ui, |ui| {
-                ui.spacing_mut().item_spacing = spacing;
-                self.status_bar(ui)
-            });
-        // The sidebar next, so it runs the full height above the status bar and the tabs sit
-        // over the terminal only.
+        // The sidebar first, so it runs the full height of the window (the traffic lights sit
+        // in its top row); the title row and the canvas share the rest.
         let mut sidebar_visible = self.settings.sidebar_visible;
         let sidebar = egui::Panel::left("sidebar")
             .resizable(true)
+            .show_separator_line(false)
             .default_size(self.settings.sidebar_width)
             .size_range(200.0..=480.0)
-            .frame(egui::Frame::NONE.fill(p.chrome).inner_margin(egui::Margin {
-                left: 10,
-                right: 10,
-                top: 0,
-                bottom: 6,
-            }))
+            .frame(egui::Frame::NONE.fill(p.chrome))
             .show_collapsible(ui, &mut sidebar_visible, |ui| {
                 ui.spacing_mut().item_spacing = spacing;
-                let live = self.live_map();
-                let (actions, moved) = self.sidebar.show(ui, &self.store, &live, TAB_H);
-                self.actions.extend(actions);
-                if let Some(mv) = moved {
-                    self.apply_move(mv);
-                }
+                self.sidebar_panel(ui);
             });
         if let Some(r) = sidebar {
             let w = r.response.rect.width();
@@ -3383,19 +2185,30 @@ impl TernaryShellApp {
         }
         self.settings.sidebar_visible = sidebar_visible;
 
-        egui::Panel::top("tab-bar")
+        egui::Panel::top("title-row")
             .frame(egui::Frame::NONE.fill(p.chrome))
-            .exact_size(TAB_H)
+            .show_separator_line(false)
+            .exact_size(TITLE_H)
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = spacing;
-                self.tab_bar(ui)
+                self.title_row(ui)
             });
 
+        let gutter = chrome::GUTTER as i8;
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(p.canvas))
+            .frame(egui::Frame::NONE.fill(p.chrome).inner_margin(egui::Margin {
+                left: if self.settings.sidebar_visible {
+                    0
+                } else {
+                    gutter
+                },
+                right: gutter,
+                top: 0,
+                bottom: gutter,
+            }))
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing = spacing;
-                self.central(ui)
+                self.canvas(ui)
             });
 
         self.background_transfers(&ctx);
@@ -3403,16 +2216,16 @@ impl TernaryShellApp {
         if let Some(text) = self.updater.tick(&ctx, &mut self.settings, can_popup) {
             self.toasts.info(text);
         }
-        self.prompt_ui(&ctx);
         self.overlays(&ctx);
         if let crate::ui::update_ui::UpdateEvent::Restart =
             self.updater.show_dialog(&ctx, &mut self.settings)
         {
             match self.quit_warning() {
-                Some(message) => {
-                    self.dialog = Some(dialogs::confirm(
+                Some(details) => {
+                    self.dialog = Some(dialogs::confirm_details(
                         t("Restart to update?"),
-                        message,
+                        t("TernaryShell restarts and opens your connections again.").to_string(),
+                        details,
                         t("Restart"),
                         ConfirmAction::RestartForUpdate,
                     ))

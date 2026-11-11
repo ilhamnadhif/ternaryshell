@@ -221,6 +221,111 @@ pub fn tab_number_label() -> &'static str {
     }
 }
 
+/// Keys of an SFTP file list, handled by the list that has the keyboard (after a click in it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileKey {
+    Open,
+    Rename,
+    Delete,
+    CopyPath,
+    /// Remote → this computer (the left list).
+    Download,
+    /// This computer → the server (the right list).
+    Upload,
+}
+
+impl FileKey {
+    pub fn label(self) -> &'static str {
+        let mac = cfg!(target_os = "macos");
+        match self {
+            FileKey::Open => "↩",
+            FileKey::Rename => "F2",
+            FileKey::Delete if mac => "⌘⌫",
+            FileKey::Delete => "Delete",
+            FileKey::CopyPath if mac => "⌥⌘C",
+            FileKey::CopyPath => "Ctrl+Alt+C",
+            FileKey::Download if mac => "⌘←",
+            FileKey::Download => "Ctrl+Left",
+            FileKey::Upload if mac => "⌘→",
+            FileKey::Upload => "Ctrl+Right",
+        }
+    }
+
+    /// Whether the key was pressed this frame; its press is taken out of the input.
+    pub fn take(self, input: &mut eframe::egui::InputState) -> bool {
+        let (command, alt, key) = match self {
+            FileKey::Open => (false, false, Key::Enter),
+            FileKey::Rename => (false, false, Key::F2),
+            FileKey::Delete => {
+                return take_key(input, true, false, Key::Backspace)
+                    || take_key(input, false, false, Key::Delete);
+            }
+            FileKey::CopyPath => (true, true, Key::C),
+            FileKey::Download => (true, false, Key::ArrowLeft),
+            FileKey::Upload => (true, false, Key::ArrowRight),
+        };
+        take_key(input, command, alt, key)
+    }
+}
+
+/// Keys of the connection list, handled while it has the keyboard (after a click in it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TreeKey {
+    /// Connect, or open / close a group.
+    Open,
+    /// Edit a connection.
+    Edit,
+    /// Rename a group.
+    Rename,
+    Delete,
+}
+
+impl TreeKey {
+    pub fn label(self) -> &'static str {
+        let mac = cfg!(target_os = "macos");
+        match self {
+            TreeKey::Open => "↩",
+            TreeKey::Edit if mac => "⌘E",
+            TreeKey::Edit => "Ctrl+E",
+            TreeKey::Rename => "F2",
+            TreeKey::Delete if mac => "⌫",
+            TreeKey::Delete => "Delete",
+        }
+    }
+
+    /// Whether the key was pressed this frame; its press is taken out of the input.
+    pub fn take(self, input: &mut eframe::egui::InputState) -> bool {
+        match self {
+            TreeKey::Open => take_key(input, false, false, Key::Enter),
+            TreeKey::Edit => take_key(input, true, false, Key::E),
+            TreeKey::Rename => take_key(input, false, false, Key::F2),
+            TreeKey::Delete => {
+                take_key(input, false, false, Key::Backspace)
+                    || take_key(input, true, false, Key::Backspace)
+                    || take_key(input, false, false, Key::Delete)
+            }
+        }
+    }
+}
+
+/// Takes a press of `key` with exactly these modifiers (Shift never) out of the input. With
+/// Alt the key is also matched by its position: ⌥ changes the character the key types.
+fn take_key(input: &mut eframe::egui::InputState, command: bool, alt: bool, key: Key) -> bool {
+    let before = input.events.len();
+    input.events.retain(|e| {
+        !matches!(
+            e,
+            eframe::egui::Event::Key { key: k, physical_key, pressed: true, modifiers, .. }
+                if (*k == key || (alt && *physical_key == Some(key)))
+                    && modifiers.command == command
+                    && modifiers.alt == alt
+                    && !modifiers.shift
+                    && (command || !modifiers.ctrl)
+        )
+    });
+    input.events.len() != before
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

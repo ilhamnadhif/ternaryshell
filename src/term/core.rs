@@ -61,6 +61,9 @@ pub struct UiNotes {
     pub activity: bool,
     /// "Clear Scrollback" was chosen on the alternate screen: clear when it is left.
     pub clear_history_pending: bool,
+    /// Why the shell ended ("Session ended."), shown by the UI under the last output while
+    /// the pane is ended (see `end_session_hint`).
+    pub ended: Option<String>,
 }
 
 /// Colours used to answer OSC 4/10/11 queries (kept in sync with the active scheme).
@@ -257,6 +260,25 @@ pub fn write_status(feeder: &mut Feeder, text: &str) {
 /// application cursor keys, hidden cursor, scroll region). The last output stays visible and a
 /// reconnect starts from a clean terminal.
 pub fn end_session(feeder: &mut Feeder, text: &str) {
+    reset_after_session(feeder);
+    write_status(feeder, text);
+    let _ = feeder.drain_events();
+}
+
+/// Ends a session like `end_session`, but leaves the message to the UI: `hint` goes to
+/// `UiNotes::ended`, and the cursor is left at the start of a line with an empty line under
+/// it, where the UI draws the hint.
+pub fn end_session_hint(feeder: &mut Feeder, hint: String) {
+    reset_after_session(feeder);
+    let column = feeder.shared.term.lock().grid().cursor.point.column.0;
+    let fresh_line = if column > 0 { "\r\n" } else { "" };
+    // Down and back up: scrolls when the cursor is on the last line.
+    let _ = feeder.feed(format!("{fresh_line}\n\x1b[A").as_bytes());
+    feeder.shared.notes.lock().ended = Some(hint);
+    let _ = feeder.drain_events();
+}
+
+fn reset_after_session(feeder: &mut Feeder) {
     {
         let mut term = feeder.shared.term.lock();
         feeder.parser.stop_sync(&mut *term);
@@ -274,8 +296,6 @@ pub fn end_session(feeder: &mut Feeder, text: &str) {
     let _ = feeder.feed(RESET.as_bytes());
     // Resetting the scroll region and origin mode moved the cursor to the top: put it back.
     let _ = feeder.feed(format!("\x1b[{line};{column}H").as_bytes());
-    write_status(feeder, text);
-    let _ = feeder.drain_events();
 }
 
 #[cfg(test)]
@@ -312,7 +332,7 @@ mod tests {
         let reply = String::from_utf8(reply).unwrap();
         assert!(reply.contains("\x1b[1;6R"), "{reply:?}");
         assert!(reply.contains("\x1b[?6c"));
-        assert!(reply.contains("\x1b]11;rgb:1717/1919/1e1e"), "{reply:?}");
+        assert!(reply.contains("\x1b]11;rgb:1616/1717/1c1c"), "{reply:?}");
         assert_eq!(f.shared.notes.lock().title.as_deref(), Some("my title"));
     }
 
@@ -361,6 +381,29 @@ mod tests {
             })
             .collect();
         assert!(text.contains("closed"), "{text:?}");
+    }
+
+    /// The hint is left to the UI: the cursor goes to a fresh line with room under it.
+    #[test]
+    fn end_session_hint_leaves_room_under_the_output() {
+        let mut f = make();
+        for i in 0..9 {
+            f.feed(format!("line {i}\r\n").as_bytes());
+        }
+        f.feed(b"logout");
+        end_session_hint(&mut f, "Session ended.".into());
+        let term = f.shared.term.lock();
+        let cursor = term.grid().cursor.point;
+        assert_eq!(cursor.column.0, 0);
+        // Ten lines: the output scrolled by one so that a line is left under the cursor.
+        assert_eq!(cursor.line.0, 8);
+        drop(term);
+        assert_eq!(row_text(&f, 7), "logout");
+        assert_eq!(row_text(&f, 9), "");
+        assert_eq!(
+            f.shared.notes.lock().ended.as_deref(),
+            Some("Session ended.")
+        );
     }
 
     /// The message goes under the session's last output, not over the top of the screen.
