@@ -19,7 +19,7 @@ use crate::paths;
 use crate::sftp::entry::{self, FileEntry, SortKey, remote_join, remote_parent};
 use crate::sftp::remote::{self, Sftp};
 use crate::sftp::transfer::{Direction, Summary, Transfer, TransferState, Transfers};
-use crate::ssh::session::SftpOpener;
+use crate::ssh::session::{RootError, RootLogin, SftpOpener};
 use crate::ui::file_editor::{EditorOutput, FileEditor};
 use crate::ui::kit::{self, Segment};
 use crate::ui::{icons, style};
@@ -30,9 +30,11 @@ enum Session {
     Failed(String),
 }
 
-/// A session being opened to switch root on/off: (reply, whether it is the root session, the
-/// folder to show once it is ready).
-type Reopen = (oneshot::Receiver<Result<SftpSession, String>>, bool, String);
+/// A session being opened to switch root on or off, with the folder to show once it is ready.
+enum Reopen {
+    ToRoot(oneshot::Receiver<Result<SftpSession, RootError>>, String),
+    ToUser(oneshot::Receiver<Result<SftpSession, String>>, String),
+}
 
 enum Event {
     Listed {
@@ -136,8 +138,12 @@ enum Dialog {
         dest: String,
         conflicts: Vec<String>,
     },
-    /// Switch the remote session to root via sudo; the password is optional (passwordless sudo).
-    Sudo { password: String },
+    /// Switch the remote session to root via sudo, with a password the user types. Asked only
+    /// when sudo wants a password that isn't known (or rejected the one tried); `note` says why.
+    Sudo {
+        password: String,
+        note: Option<String>,
+    },
 }
 
 pub struct SftpPanel {
@@ -316,6 +322,11 @@ impl SftpPanel {
         matches!(self.session, Session::Ready(_))
     }
 
+    /// The remote side runs as root (sudo).
+    pub fn is_root(&self) -> bool {
+        self.is_root
+    }
+
     fn error(&mut self, msg: impl Into<String>) {
         self.message = Some((msg.into(), true));
         self.show_activity = true;
@@ -485,20 +496,36 @@ impl SftpPanel {
         });
     }
 
-    /// Opens a new session on the same connection to switch root on or off. The working session
-    /// is kept until the new one is ready, so a failed switch never drops the working one.
-    fn reopen(&mut self, to_root: bool, password: Option<String>) {
+    /// Opens a new session on the same connection to switch root on (`Some`, with how to get
+    /// past sudo) or off. The working session is kept until the new one is ready, so a failed
+    /// switch never drops the working one.
+    fn reopen(&mut self, root: Option<RootLogin>) {
         if self.reopening.is_some() {
             return;
         }
         let dir = self.remote.cwd.clone();
-        let rx = if to_root {
-            self.opener.open_root(password)
-        } else {
-            self.opener.open()
-        };
-        self.reopening = Some((rx, to_root, dir));
+        self.reopening = Some(match root {
+            Some(login) => Reopen::ToRoot(self.opener.open_root(login), dir),
+            None => Reopen::ToUser(self.opener.open(), dir),
+        });
         self.remote.loading = true;
+    }
+
+    /// Asks for the sudo password (`note`: why it is asked). With another dialog open, says so
+    /// instead of replacing it.
+    fn ask_sudo_password(&mut self, note: Option<&str>) {
+        if self.dialog_open() {
+            self.error(tf(
+                "Could not switch to root: {}",
+                &[note.unwrap_or(t("sudo needs a password."))],
+            ));
+            return;
+        }
+        self.dialog = Some(Dialog::Sudo {
+            password: String::new(),
+            note: note.map(str::to_string),
+        });
+        self.focus_dialog = true;
     }
 
     fn run_op(
@@ -610,32 +637,49 @@ impl SftpPanel {
             }
         }
         // Switching root on or off: swap to the new session only once it is ready.
-        if self.reopening.is_some() {
-            let recv = self.reopening.as_mut().unwrap().0.try_recv();
-            match recv {
-                Ok(result) => {
-                    let (_, to_root, dir) = self.reopening.take().unwrap();
-                    self.remote.loading = false;
-                    match result {
-                        Ok(sftp) => {
-                            self.session = Session::Ready(Arc::new(sftp));
-                            self.is_root = to_root;
-                            let dir = if dir.is_empty() { ".".to_string() } else { dir };
-                            self.remote_cd(rt, ctx, dir);
-                        }
-                        Err(e) => self.error(if to_root {
-                            tf("Could not switch to root: {}", &[&e])
-                        } else {
-                            tf("Could not switch back to your user: {}", &[&e])
-                        }),
-                    }
-                }
-                Err(oneshot::error::TryRecvError::Empty) => {}
+        let gone = || t("Not connected.").to_string();
+        let reopened = match &mut self.reopening {
+            None => None,
+            Some(Reopen::ToRoot(rx, _)) => match rx.try_recv() {
+                Ok(result) => Some((true, result)),
+                Err(oneshot::error::TryRecvError::Empty) => None,
                 Err(oneshot::error::TryRecvError::Closed) => {
-                    self.reopening = None;
-                    self.remote.loading = false;
-                    self.error(t("Not connected."));
+                    Some((true, Err(RootError::Other(gone()))))
                 }
+            },
+            Some(Reopen::ToUser(rx, _)) => match rx.try_recv() {
+                Ok(result) => Some((false, result.map_err(RootError::Other))),
+                Err(oneshot::error::TryRecvError::Empty) => None,
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    Some((false, Err(RootError::Other(gone()))))
+                }
+            },
+        };
+        if let Some((to_root, result)) = reopened {
+            let dir = match self.reopening.take() {
+                Some(Reopen::ToRoot(_, dir) | Reopen::ToUser(_, dir)) => dir,
+                None => String::new(),
+            };
+            self.remote.loading = false;
+            match result {
+                Ok(sftp) => {
+                    self.session = Session::Ready(Arc::new(sftp));
+                    self.is_root = to_root;
+                    let dir = if dir.is_empty() { ".".to_string() } else { dir };
+                    self.remote_cd(rt, ctx, dir);
+                }
+                Err(RootError::NeedsPassword) => self.ask_sudo_password(None),
+                Err(RootError::Denied { login: true }) => self.ask_sudo_password(Some(t(
+                    "sudo did not accept your login password. Enter the sudo password.",
+                ))),
+                Err(RootError::Denied { login: false }) => self.ask_sudo_password(Some(t(
+                    "sudo did not accept the password (or does not allow this user).",
+                ))),
+                Err(RootError::Other(e)) => self.error(if to_root {
+                    tf("Could not switch to root: {}", &[&e])
+                } else {
+                    tf("Could not switch back to your user: {}", &[&e])
+                }),
             }
         }
         if matches!(self.session, Session::Failed(_)) {
@@ -1432,14 +1476,9 @@ impl SftpPanel {
                 self.menu_target = Some(target);
             }
             SideAction::Root => {
-                if self.is_root {
-                    self.reopen(false, None);
-                } else {
-                    self.dialog = Some(Dialog::Sudo {
-                        password: String::new(),
-                    });
-                    self.focus_dialog = true;
-                }
+                // Passwordless sudo, or the login password; the password is asked for only
+                // when neither gets past sudo.
+                self.reopen((!self.is_root).then_some(RootLogin::Auto));
             }
             SideAction::ToggleHidden(remote) => {
                 let side = if remote {
@@ -1953,21 +1992,28 @@ impl SftpPanel {
                         ui.label(RichText::new(format!("• {n}")).weak());
                     }
                 }
-                Dialog::Sudo { password } => {
+                Dialog::Sudo { password, note } => {
                     ui.heading(t("Browse as root"));
                     ui.label(t(
                         "Reopen the file panel as root through sudo, to see and transfer files your user has no access to. The terminal stays as your user.",
                     ));
+                    if let Some(note) = note {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(note.as_str()).color(ui.visuals().error_fg_color));
+                    }
                     ui.add_space(6.0);
                     let r = ui.add(
                         style::input(password)
                             .password(true)
-                            .hint_text(t("sudo password (leave empty if not needed)")),
+                            .hint_text(t("sudo password")),
                     );
                     if focus {
                         r.request_focus();
                     }
-                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    if r.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        && !password.is_empty()
+                    {
                         confirmed = true;
                     }
                     ui.add_space(4.0);
@@ -1989,7 +2035,13 @@ impl SftpPanel {
                     Dialog::Sudo { .. } => t("Connect"),
                     _ => t("OK"),
                 };
-                if ui.button(ok_label).clicked() {
+                // sudo is asked without a password first: here one is needed.
+                let ok_enabled =
+                    !matches!(dialog, Dialog::Sudo { password, .. } if password.is_empty());
+                if ui
+                    .add_enabled(ok_enabled, egui::Button::new(ok_label))
+                    .clicked()
+                {
                     confirmed = true;
                 }
                 if ui.button(t("Cancel")).clicked() {
@@ -2129,14 +2181,9 @@ impl SftpPanel {
                     self.start_download(rt, ctx, src, Path::new(&dest));
                 }
             }
-            Dialog::Sudo { password } => {
-                // An empty box means passwordless sudo; a box of spaces is a real password.
-                let password = if password.is_empty() {
-                    None
-                } else {
-                    Some(password)
-                };
-                self.reopen(true, password);
+            // A box of spaces is a real password.
+            Dialog::Sudo { password, .. } if !password.is_empty() => {
+                self.reopen(Some(RootLogin::Password(password)));
             }
             _ => {}
         }

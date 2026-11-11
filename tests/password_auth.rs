@@ -1,9 +1,10 @@
 //! Password and keyboard-interactive login against an in-process russh server (an unprivileged
-//! OpenSSH server cannot check passwords, so these flows are tested here).
+//! OpenSSH server cannot check passwords, so these flows are tested here), and the login password
+//! offered to sudo for root SFTP.
 
 mod common;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::wait_for;
@@ -12,13 +13,16 @@ use russh::server::{Auth as ServerAuth, Msg, Response, Session};
 use russh::{Channel, ChannelId, MethodKind, MethodSet};
 use ternaryshell::bookmarks::{Auth, Bookmark};
 use ternaryshell::secrets::{self, SecretKind};
-use ternaryshell::ssh::session::{ConnectSpec, Connection};
+use ternaryshell::ssh::session::{ConnectSpec, Connection, RootError, RootLogin};
 use ternaryshell::ssh::types::{ConnError, ConnState, Prompt, SecretAnswer, SecretPromptKind};
 
 #[derive(Clone)]
 struct TestServer {
     /// When false only keyboard-interactive is accepted (russh leaves enforcing this to us).
     password_allowed: bool,
+    /// What a root SFTP session's sudo was sent (a stand-in for sudo that wants a password and
+    /// rejects every one).
+    sudo_input: Arc<Mutex<Vec<u8>>>,
 }
 
 impl russh::server::Handler for TestServer {
@@ -96,14 +100,42 @@ impl russh::server::Handler for TestServer {
         session.data(channel, b"welcome-from-test-server\r\n".to_vec())?;
         Ok(())
     }
+
+    /// The root SFTP script: sudo asks for a password.
+    async fn exec_request(
+        &mut self,
+        channel: ChannelId,
+        _data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_success(channel)?;
+        session.data(channel, b"ternaryshell-root:password\n".to_vec())?;
+        Ok(())
+    }
+
+    /// The password line: rejected.
+    async fn data(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.sudo_input.lock().unwrap().extend_from_slice(data);
+        if data.contains(&b'\n') {
+            session.data(channel, b"ternaryshell-root:denied\n".to_vec())?;
+            session.eof(channel)?;
+            session.close(channel)?;
+        }
+        Ok(())
+    }
 }
 
-/// Starts a server offering `methods`; returns its port.
+/// Starts a server offering `methods`; returns its port, and what root SFTP sent sudo.
 fn start_server(
     rt: &tokio::runtime::Runtime,
     dir: &std::path::Path,
     methods: &[MethodKind],
-) -> u16 {
+) -> (u16, Arc<Mutex<Vec<u8>>>) {
     let key_path = dir.join(format!("host_{}", uuid::Uuid::new_v4()));
     common::keygen(&key_path, "ed25519", "");
     let key =
@@ -120,18 +152,38 @@ fn start_server(
         .unwrap();
     let port = listener.local_addr().unwrap().port();
     let password_allowed = methods.contains(&MethodKind::Password);
+    let sudo_input = Arc::new(Mutex::new(Vec::new()));
+    let server_input = sudo_input.clone();
     rt.spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let config = config.clone();
+            let sudo_input = server_input.clone();
             tokio::spawn(async move {
-                let handler = TestServer { password_allowed };
+                let handler = TestServer {
+                    password_allowed,
+                    sudo_input,
+                };
                 if let Ok(session) = russh::server::run_stream(config, stream, handler).await {
                     let _ = session.await;
                 }
             });
         }
     });
-    port
+    (port, sudo_input)
+}
+
+/// Opens a root SFTP session (sudo rejects every password); returns the error and what sudo
+/// was sent.
+fn try_root(
+    rt: &tokio::runtime::Runtime,
+    conn: &Connection,
+    sudo_input: &Mutex<Vec<u8>>,
+    login: RootLogin,
+) -> (RootError, String) {
+    sudo_input.lock().unwrap().clear();
+    let result = rt.block_on(conn.sftp_opener().open_root(login)).unwrap();
+    let sent = String::from_utf8(sudo_input.lock().unwrap().clone()).unwrap();
+    (result.err().expect("sudo rejects every password"), sent)
 }
 
 fn spec(port: u16, id: uuid::Uuid, known: &std::path::Path) -> ConnectSpec {
@@ -199,7 +251,7 @@ fn password_and_keyboard_interactive_logins() {
     let ctx = egui::Context::default();
 
     // --- password only: wrong, then right (saved), then no prompt next time -------------
-    let port = start_server(&rt, dir.path(), &[MethodKind::Password]);
+    let (port, sudo_input) = start_server(&rt, dir.path(), &[MethodKind::Password]);
     let id = uuid::Uuid::new_v4();
     let conn = Connection::start(rt.handle(), ctx.clone(), spec(port, id, &known));
     assert_eq!(answer(&conn, None, false), None, "host key first");
@@ -220,6 +272,21 @@ fn password_and_keyboard_interactive_logins() {
         secrets::get(id, SecretKind::Password).unwrap().as_deref(),
         Some("secret")
     );
+    // Root SFTP offers sudo the password that logged in (not the rejected one), without asking.
+    assert_eq!(
+        try_root(&rt, &conn, &sudo_input, RootLogin::Auto),
+        (RootError::Denied { login: true }, "secret\n".into())
+    );
+    // A typed sudo password is sent as typed.
+    assert_eq!(
+        try_root(
+            &rt,
+            &conn,
+            &sudo_input,
+            RootLogin::Password("t yped".into())
+        ),
+        (RootError::Denied { login: false }, "t yped\n".into())
+    );
     drop(conn);
 
     let conn = Connection::start(rt.handle(), ctx.clone(), spec(port, id, &known));
@@ -227,6 +294,11 @@ fn password_and_keyboard_interactive_logins() {
         conn.state().is_connected().then_some(())
     });
     assert!(conn.shared.lock().prompt.is_none());
+    // The saved password logged in: it is the one offered to sudo.
+    assert_eq!(
+        try_root(&rt, &conn, &sudo_input, RootLogin::Auto),
+        (RootError::Denied { login: true }, "secret\n".into())
+    );
     drop(conn);
 
     // Three wrong answers end with a clear error.
@@ -244,7 +316,7 @@ fn password_and_keyboard_interactive_logins() {
     );
 
     // --- keyboard-interactive (PAM style): password filled in, one-time code asked -----
-    let port = start_server(&rt, dir.path(), &[MethodKind::KeyboardInteractive]);
+    let (port, sudo_input) = start_server(&rt, dir.path(), &[MethodKind::KeyboardInteractive]);
     let conn = Connection::start(
         rt.handle(),
         ctx.clone(),
@@ -262,4 +334,9 @@ fn password_and_keyboard_interactive_logins() {
     wait_for(15, "connected via keyboard-interactive", || {
         conn.state().is_connected().then_some(())
     });
+    // The password answered the server's password prompt: it is offered to sudo too.
+    assert_eq!(
+        try_root(&rt, &conn, &sudo_input, RootLogin::Auto),
+        (RootError::Denied { login: true }, "secret\n".into())
+    );
 }

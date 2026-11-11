@@ -121,13 +121,14 @@ impl PaneStart {
 
 enum ConnCmd {
     OpenShell(PaneStart),
+    /// An SFTP session as the logged-in user.
     OpenSftp {
-        /// Run the session as root through sudo.
-        root: bool,
-        /// The sudo password, for `sudo -S`; `None` means passwordless sudo (or a normal, non-root
-        /// session).
-        password: Option<String>,
         reply: oneshot::Sender<Result<SftpSession, String>>,
+    },
+    /// An SFTP session as root, through sudo.
+    OpenSftpRoot {
+        login: RootLogin,
+        reply: oneshot::Sender<Result<SftpSession, RootError>>,
     },
     /// Check that the server still answers; close the connection if it doesn't.
     Probe(ProbeReason),
@@ -205,6 +206,29 @@ impl Connection {
     }
 }
 
+/// How a root SFTP session gets past sudo.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RootLogin {
+    /// Passwordless sudo when the server allows it, otherwise the password this connection logged
+    /// in with (sudo asks for the user's own password, the one SSH checked at login). Without a
+    /// login password (a key or agent login) sudo must be passwordless.
+    Auto,
+    /// A sudo password the user typed.
+    Password(String),
+}
+
+/// Why a root SFTP session could not be opened.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RootError {
+    /// sudo wants a password and none is known (the login was not by password).
+    NeedsPassword,
+    /// sudo did not accept the password (or does not allow this user). `login`: the password was
+    /// the login password, tried without asking.
+    Denied { login: bool },
+    /// Anything else, as a message for the user.
+    Other(String),
+}
+
 /// Opens SFTP sessions on a connection: as the logged-in user, or as root through sudo.
 #[derive(Clone)]
 pub struct SftpOpener {
@@ -212,35 +236,26 @@ pub struct SftpOpener {
 }
 
 impl SftpOpener {
-    fn send(
-        &self,
-        root: bool,
-        password: Option<String>,
-    ) -> oneshot::Receiver<Result<SftpSession, String>> {
+    /// A normal SFTP session, as the logged-in user.
+    pub fn open(&self) -> oneshot::Receiver<Result<SftpSession, String>> {
         let (tx, rx) = oneshot::channel();
-        let cmd = ConnCmd::OpenSftp {
-            root,
-            password,
-            reply: tx,
-        };
-        if let Err(mpsc::error::SendError(ConnCmd::OpenSftp { reply, .. })) = self.cmd_tx.send(cmd)
+        if let Err(mpsc::error::SendError(ConnCmd::OpenSftp { reply })) =
+            self.cmd_tx.send(ConnCmd::OpenSftp { reply: tx })
         {
             let _ = reply.send(Err(t("Not connected.").into()));
         }
         rx
     }
 
-    /// A normal SFTP session, as the logged-in user.
-    pub fn open(&self) -> oneshot::Receiver<Result<SftpSession, String>> {
-        self.send(false, None)
-    }
-
-    /// An SFTP session running as root through sudo. `password` is `None` for passwordless sudo.
-    pub fn open_root(
-        &self,
-        password: Option<String>,
-    ) -> oneshot::Receiver<Result<SftpSession, String>> {
-        self.send(true, password)
+    /// An SFTP session running as root through sudo.
+    pub fn open_root(&self, login: RootLogin) -> oneshot::Receiver<Result<SftpSession, RootError>> {
+        let (tx, rx) = oneshot::channel();
+        if let Err(mpsc::error::SendError(ConnCmd::OpenSftpRoot { reply, .. })) =
+            self.cmd_tx.send(ConnCmd::OpenSftpRoot { login, reply: tx })
+        {
+            let _ = reply.send(Err(RootError::Other(t("Not connected.").into())));
+        }
+        rx
     }
 }
 
@@ -692,15 +707,24 @@ struct Flags {
     remote_forwards: super::forward::RemoteForwards,
 }
 
+/// A server's connection, logged in.
+struct Established {
+    handle: SshHandle,
+    /// The jump hosts' connections: they must stay open as long as the server's.
+    jumps: Vec<SshHandle>,
+    /// The password the server accepted at login, kept for sudo (root SFTP). Only the server's
+    /// own: a jump host's password is never offered to another machine.
+    login_password: Option<String>,
+}
+
 /// Connects and logs in, through the jump hosts if there are any: the first hop over TCP, each
-/// next one through a `direct-tcpip` channel of the one before (as `ssh -J`). Returns the
-/// server's connection and the jump hosts' (they must stay open as long as it).
+/// next one through a `direct-tcpip` channel of the one before (as `ssh -J`).
 async fn establish(
     spec: &ConnectSpec,
     shared: &Arc<Mutex<ConnShared>>,
     ctx: &Context,
     flags: &Flags,
-) -> Result<(SshHandle, Vec<SshHandle>), ConnError> {
+) -> Result<Established, ConnError> {
     let mut jumps: Vec<SshHandle> = Vec::new();
     let hops = spec.jumps.len() + 1;
     for i in 0..hops {
@@ -746,11 +770,15 @@ async fn establish(
             }
         };
         match result {
-            Ok(handle) if last => {
+            Ok((handle, login_password)) if last => {
                 shared.lock().via = None;
-                return Ok((handle, jumps));
+                return Ok(Established {
+                    handle,
+                    jumps,
+                    login_password,
+                });
             }
-            Ok(handle) => jumps.push(handle),
+            Ok((handle, _)) => jumps.push(handle),
             // Each failure names the hop it happened on; a cancelled prompt stays a cancel.
             Err(ConnError::Cancelled) => return Err(ConnError::Cancelled),
             Err(e) if i + 1 < hops => {
@@ -762,7 +790,8 @@ async fn establish(
     unreachable!("the last hop returns")
 }
 
-/// The SSH handshake and login with one server, over `stream`.
+/// The SSH handshake and login with one server, over `stream`. Returns the connection and the
+/// password it logged in with, if it did with one.
 async fn connect_hop<S>(
     stream: S,
     spec: &ConnectSpec,
@@ -770,7 +799,7 @@ async fn connect_hop<S>(
     shared: &Arc<Mutex<ConnShared>>,
     ctx: &Context,
     flags: &Flags,
-) -> Result<SshHandle, ConnError>
+) -> Result<(SshHandle, Option<String>), ConnError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -801,15 +830,17 @@ where
         r = authenticate(&mut handle, spec, shared, ctx, flags) => r,
         _ = handshake_watchdog(flags.prompting.clone(), AUTH_TIMEOUT) => Err(ConnError::Timeout),
     };
-    if let Err(e) = auth {
-        // A login the server cut short says why ("Too many authentication failures", …).
-        let reason = flags.reason.lock().clone();
-        return Err(match (e, reason) {
-            (ConnError::Other(_), Some(r)) => ConnError::Disconnected(r),
-            (e, _) => e,
-        });
+    match auth {
+        Ok(login_password) => Ok((handle, login_password)),
+        Err(e) => {
+            // A login the server cut short says why ("Too many authentication failures", …).
+            let reason = flags.reason.lock().clone();
+            Err(match (e, reason) {
+                (ConnError::Other(_), Some(r)) => ConnError::Disconnected(r),
+                (e, _) => e,
+            })
+        }
     }
-    Ok(handle)
 }
 
 fn set_state(shared: &Arc<Mutex<ConnShared>>, ctx: &Context, state: ConnState) {
@@ -853,13 +884,15 @@ fn method_list(m: &[MethodKind]) -> String {
         .join(", ")
 }
 
+/// Logs in. Returns the password the server accepted, when the login was by password (`None`
+/// for a key or an agent).
 async fn authenticate(
     handle: &mut SshHandle,
     spec: &ConnectSpec,
     shared: &Arc<Mutex<ConnShared>>,
     ctx: &Context,
     flags: &Flags,
-) -> Result<(), ConnError> {
+) -> Result<Option<String>, ConnError> {
     let b = &spec.bookmark;
     let user = if b.username.trim().is_empty() {
         local_user()
@@ -894,7 +927,7 @@ async fn authenticate(
     let mut fallback_methods: Option<Vec<MethodKind>> = None;
     if let Auth::Agent { socket } = &b.auth {
         let remaining = match auth_agent(handle, &user, socket, b.legacy_algorithms, flags).await? {
-            None => return Ok(()),
+            None => return Ok(None),
             Some(remaining) => remaining,
         };
         if !remaining.is_empty()
@@ -950,7 +983,7 @@ async fn authenticate(
             if save && let Some(p) = passphrase {
                 keychain_set(b.id, SecretKind::Passphrase, p).await;
             }
-            return Ok(());
+            return Ok(None);
         }
         let remaining = methods(&result);
         if !remaining
@@ -1002,15 +1035,18 @@ async fn authenticate(
             .await
             .map_err(other)?;
         let mut ok = result.success();
+        // Whether the server took this password (keyboard-interactive may log in without it).
+        let mut password_used = ok;
         let remaining = methods(&result);
         if !ok && remaining.contains(&MethodKind::KeyboardInteractive) {
-            ok = keyboard_interactive(handle, &user, &password, shared, ctx, flags).await?;
+            (ok, password_used) =
+                keyboard_interactive(handle, &user, &password, shared, ctx, flags).await?;
         }
         if ok {
             if save {
-                keychain_set(b.id, SecretKind::Password, password).await;
+                keychain_set(b.id, SecretKind::Password, password.clone()).await;
             }
-            return Ok(());
+            return Ok(password_used.then_some(password));
         }
         // Servers list the methods that may still succeed; an empty list says nothing, so
         // only give up when password-style methods are clearly not offered.
@@ -1221,7 +1257,8 @@ where
 }
 
 /// Keyboard-interactive login: password-like hidden prompts get the password, anything else
-/// (e.g. a one-time code) is asked of the user.
+/// (e.g. a one-time code) is asked of the user. Returns whether it logged in, and whether the
+/// password was one of the answers.
 async fn keyboard_interactive(
     handle: &mut SshHandle,
     user: &str,
@@ -1229,7 +1266,7 @@ async fn keyboard_interactive(
     shared: &Arc<Mutex<ConnShared>>,
     ctx: &Context,
     flags: &Flags,
-) -> Result<bool, ConnError> {
+) -> Result<(bool, bool), ConnError> {
     let other = |e: russh::Error| ConnError::Other(e.to_string());
     let mut response = handle
         .authenticate_keyboard_interactive_start(user, None::<String>)
@@ -1238,8 +1275,8 @@ async fn keyboard_interactive(
     let mut password_used = false;
     for _ in 0..8 {
         match response {
-            KeyboardInteractiveAuthResponse::Success => return Ok(true),
-            KeyboardInteractiveAuthResponse::Failure { .. } => return Ok(false),
+            KeyboardInteractiveAuthResponse::Success => return Ok((true, password_used)),
+            KeyboardInteractiveAuthResponse::Failure { .. } => return Ok((false, password_used)),
             KeyboardInteractiveAuthResponse::InfoRequest {
                 name,
                 instructions,
@@ -1283,7 +1320,7 @@ async fn keyboard_interactive(
             }
         }
     }
-    Ok(false)
+    Ok((false, password_used))
 }
 
 async fn run_connection(
@@ -1324,7 +1361,7 @@ async fn run_connection(
     let queued: Vec<ConnCmd> = std::mem::take(&mut *pending.lock());
 
     // The jump hosts' connections carry this one: they stay open until it ends.
-    let (handle, _jump_handles) = match result {
+    let (handle, _jump_handles, login_password) = match result {
         None => {
             flags.cancel.cancel();
             set_state(&shared, &ctx, ConnState::Closed(None));
@@ -1338,7 +1375,11 @@ async fn run_connection(
             fail_all(queued, cmd_rx, &message);
             return;
         }
-        Some(Ok((h, jumps))) => (Arc::new(h), jumps),
+        Some(Ok(e)) => (
+            Arc::new(e.handle),
+            e.jumps,
+            e.login_password.map(Arc::<str>::from),
+        ),
     };
     set_state(&shared, &ctx, ConnState::Connected);
     if !spec.bookmark.forwards.is_empty() {
@@ -1353,7 +1394,7 @@ async fn run_connection(
     }
 
     for cmd in queued {
-        if handle_cmd(cmd, &handle, &ctx) {
+        if handle_cmd(cmd, &handle, &ctx, &login_password) {
             close(&handle, &flags, &shared, &ctx).await;
             return;
         }
@@ -1369,7 +1410,7 @@ async fn run_connection(
                         probe(&handle, &shared, &ctx, &flags, &probing, &lost_tx, reason);
                         false
                     }
-                    Some(cmd) => handle_cmd(cmd, &handle, &ctx),
+                    Some(cmd) => handle_cmd(cmd, &handle, &ctx, &login_password),
                     None => true,
                 };
                 if stop {
@@ -1414,16 +1455,25 @@ fn fail_all(queued: Vec<ConnCmd>, mut rx: mpsc::UnboundedReceiver<ConnCmd>, reas
     for cmd in queued.into_iter().chain(rest) {
         match cmd {
             ConnCmd::OpenShell(p) => fail_pane(&p, reason),
-            ConnCmd::OpenSftp { reply, .. } => {
+            ConnCmd::OpenSftp { reply } => {
                 let _ = reply.send(Err(reason.to_string()));
+            }
+            ConnCmd::OpenSftpRoot { reply, .. } => {
+                let _ = reply.send(Err(RootError::Other(reason.to_string())));
             }
             ConnCmd::Probe(_) | ConnCmd::Disconnect => {}
         }
     }
 }
 
-/// Returns true when the connection should close.
-fn handle_cmd(cmd: ConnCmd, handle: &Arc<SshHandle>, ctx: &Context) -> bool {
+/// Returns true when the connection should close. `login_password` is the password the server
+/// accepted at login, if any (offered to sudo for a root SFTP session).
+fn handle_cmd(
+    cmd: ConnCmd,
+    handle: &Arc<SshHandle>,
+    ctx: &Context,
+    login_password: &Option<Arc<str>>,
+) -> bool {
     match cmd {
         ConnCmd::OpenShell(pane) => {
             let handle = handle.clone();
@@ -1431,19 +1481,21 @@ fn handle_cmd(cmd: ConnCmd, handle: &Arc<SshHandle>, ctx: &Context) -> bool {
             tokio::spawn(run_shell(handle, pane, ctx));
             false
         }
-        ConnCmd::OpenSftp {
-            root,
-            password,
-            reply,
-        } => {
+        ConnCmd::OpenSftp { reply } => {
             let handle = handle.clone();
             tokio::spawn(async move {
-                let result = if root {
-                    open_sftp_root(&handle, password).await
-                } else {
-                    open_sftp(&handle).await
-                };
-                let _ = reply.send(result);
+                let _ = reply.send(open_sftp(&handle).await);
+            });
+            false
+        }
+        ConnCmd::OpenSftpRoot { login, reply } => {
+            let handle = handle.clone();
+            let (password, from_login) = match login {
+                RootLogin::Password(p) => (Some(p), false),
+                RootLogin::Auto => (login_password.as_deref().map(str::to_string), true),
+            };
+            tokio::spawn(async move {
+                let _ = reply.send(open_sftp_root(&handle, password, from_login).await);
             });
             false
         }
@@ -1532,73 +1584,193 @@ async fn open_sftp(handle: &SshHandle) -> Result<SftpSession, String> {
         })
 }
 
-/// The usual places an OpenSSH `sftp-server` lives, tried in turn. The server runs as root (via
-/// sudo), so the whole SFTP session acts as root.
-const SFTP_SERVER_DISCOVERY: &str = "for p in \
-/usr/lib/openssh/sftp-server \
-/usr/libexec/openssh/sftp-server \
-/usr/libexec/sftp-server \
-/usr/lib/ssh/sftp-server \
-/usr/libexec/ssh/sftp-server \
-/usr/lib/sftp-server; do [ -x \"$p\" ] && exec \"$p\"; done; \
-echo ternaryshell: sftp-server not found >&2; exit 127";
+/// Where an OpenSSH `sftp-server` usually lives, tried in turn. It runs as root (through sudo),
+/// so the whole SFTP session acts as root.
+const SFTP_SERVER_PATHS: &[&str] = &[
+    "/usr/lib/openssh/sftp-server",
+    "/usr/libexec/openssh/sftp-server",
+    "/usr/libexec/sftp-server",
+    "/usr/lib/ssh/sftp-server",
+    "/usr/libexec/ssh/sftp-server",
+    "/usr/lib/sftp-server",
+];
 
-/// Opens an SFTP session that runs as root through `sudo`. `password` is written on the channel
-/// for `sudo -S`; `None` uses `sudo -n` (passwordless sudo). The server must allow sudo for this
-/// user, and `sudo` must not need a real terminal (`requiretty` off, the default on modern
-/// systems).
+/// Starts every line the root script reports on; other output (from a chatty shell profile) is
+/// skipped.
+const ROOT_MARK: &str = "ternaryshell-root:";
+
+/// How long sudo may take to get going (a wrong password costs a few seconds of PAM delay), and
+/// then the SFTP handshake.
+const ROOT_START_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The script that starts `sftp-server` as root through `sudo`. It reports on its output, in
+/// lines starting with [`ROOT_MARK`]:
+/// - `ready`: sftp-server is starting as root, the SFTP handshake comes next.
+/// - `password`: sudo needs a password; the client answers with it as one line. Asked once to
+///   check it (sudo gets exactly that line, so a wrong password fails at once instead of
+///   waiting for another try), and again for the sudo that starts sftp-server unless the check
+///   left sudo's credentials cached.
+/// - `denied`: sudo did not accept the password (or does not allow this user).
+/// - `no-sudo`, `no-sftp-server`.
+///
+/// sudo reads a password only when it needs one, and a line it doesn't read would reach
+/// sftp-server as the start of the SFTP stream: the client therefore never sends one unasked,
+/// and the script asks only when the next sudo is sure to read it. The sudos run as children of
+/// the script's shell, so credentials sudo caches per parent process (the default without a
+/// terminal) apply to the next one.
+///
+/// One line without single quotes: it goes through the user's login shell as
+/// `/bin/sh -c '…'`, whatever that shell is (csh allows no newline inside quotes). `sudo` is
+/// the program to run as sudo.
+fn root_script(sudo: &str) -> String {
+    let m = ROOT_MARK;
+    let paths = SFTP_SERVER_PATHS.join(" ");
+    // `S`: sudo. `P`: sftp-server. `R`: what root runs. `W`: the password, held in the shell
+    // (printf is a builtin, so it never shows in a process list).
+    format!(
+        "S=\"{sudo}\"; P=; \
+for p in {paths}; do if [ -x \"$p\" ]; then P=$p; break; fi; done; \
+[ -n \"$P\" ] || {{ echo {m}no-sftp-server; exit 127; }}; \
+if [ \"$(id -u)\" = 0 ]; then echo {m}ready; exec \"$P\"; fi; \
+command -v \"$S\" >/dev/null 2>&1 || {{ echo {m}no-sudo; exit 127; }}; \
+R=\"echo {m}ready && exec $P\"; \
+if \"$S\" -n -- /bin/sh -c : >/dev/null 2>&1; then \"$S\" -n -- /bin/sh -c \"$R\"; exit; fi; \
+echo {m}password; \
+IFS= read -r W || exit 1; \
+printf \"%s\\n\" \"$W\" | \"$S\" -S -p \"\" -- /bin/sh -c : >/dev/null 2>&1 || {{ echo {m}denied; exit 1; }}; \
+W=; \
+if \"$S\" -n -- /bin/sh -c : >/dev/null 2>&1; then \"$S\" -n -- /bin/sh -c \"$R\"; exit; fi; \
+echo {m}password; \
+exec \"$S\" -S -p \"\" -- /bin/sh -c \"$R\""
+    )
+}
+
+/// The sudo to run on the server. Debug builds can name a stand-in (`TERNARYSHELL_SUDO`), so
+/// tests can run the whole flow without real sudo.
+fn sudo_program() -> String {
+    if cfg!(debug_assertions)
+        && let Ok(p) = std::env::var("TERNARYSHELL_SUDO")
+    {
+        assert!(
+            !p.contains(['\'', '"', '$', '`', '\\']),
+            "TERNARYSHELL_SUDO must be a plain path"
+        );
+        return p;
+    }
+    "sudo".to_string()
+}
+
+/// The next status line of the root script (without [`ROOT_MARK`]), skipping anything else it
+/// prints. `None` when the session ended first. Reads a byte at a time: whatever follows belongs
+/// to SFTP.
+async fn read_root_status<R: AsyncRead + Unpin>(stream: &mut R) -> Result<Option<String>, String> {
+    use tokio::io::AsyncReadExt;
+    let mut line = Vec::new();
+    let mut total = 0usize;
+    let mut byte = [0u8; 1];
+    loop {
+        if stream.read(&mut byte).await.map_err(|e| e.to_string())? == 0 {
+            return Ok(None);
+        }
+        total += 1;
+        if total > 64 * 1024 {
+            return Err(t("the server sent unexpected output").to_string());
+        }
+        if byte[0] != b'\n' {
+            line.push(byte[0]);
+            continue;
+        }
+        let text = String::from_utf8_lossy(&line);
+        if let Some(status) = text.trim_end_matches('\r').strip_prefix(ROOT_MARK) {
+            return Ok(Some(status.to_string()));
+        }
+        line.clear();
+    }
+}
+
+/// Opens an SFTP session that runs as root through sudo (see [`root_script`]). `password` is
+/// given to sudo if it asks for one; `from_login` says it is the login password, tried without
+/// asking the user.
 async fn open_sftp_root(
     handle: &SshHandle,
     password: Option<String>,
-) -> Result<SftpSession, String> {
+    from_login: bool,
+) -> Result<SftpSession, RootError> {
+    let failed = |reason: &str| {
+        RootError::Other(tf(
+            "Could not start a root SFTP session ({}). Check that sudo is allowed for this user and that the password is correct.",
+            &[reason],
+        ))
+    };
+    let timed_out = || {
+        RootError::Other(
+            t("Timed out starting the root session. Check the sudo password, or that sudo works without a terminal on this server.")
+                .to_string(),
+        )
+    };
     let channel = handle
         .channel_open_session()
         .await
-        .map_err(|e| e.to_string())?;
-    // `-p ''` silences the prompt; `--` ends sudo's options before the shell command. Debug
-    // builds can swap the whole prefix (tests run the discovery without real sudo).
-    let sudo = if password.is_some() {
-        "sudo -S -p '' --"
-    } else {
-        "sudo -n -p '' --"
-    };
-    let prefix = if cfg!(debug_assertions) {
-        std::env::var("TERNARYSHELL_SFTP_ROOT_PREFIX").unwrap_or_else(|_| sudo.to_string())
-    } else {
-        sudo.to_string()
-    };
-    let command = format!("{prefix} /bin/sh -c '{SFTP_SERVER_DISCOVERY}'");
+        .map_err(|e| failed(&e.to_string()))?;
     channel
-        .exec(true, command)
+        .exec(
+            true,
+            format!("/bin/sh -c '{}'", root_script(&sudo_program())),
+        )
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| failed(&e.to_string()))?;
     let mut stream = channel.into_stream();
-    // sudo reads exactly the one password line from stdin, then execs sftp-server, which reads
-    // the SFTP handshake that `new_with_config` sends next. Order on the channel is preserved.
-    if let Some(pw) = password {
-        use tokio::io::AsyncWriteExt;
-        let mut line = pw.into_bytes();
-        line.push(b'\n');
-        stream.write_all(&line).await.map_err(|e| e.to_string())?;
-        stream.flush().await.map_err(|e| e.to_string())?;
-    }
-    // A wrong password (or a sudo that insists on a terminal) can leave the handshake waiting
-    // forever, so bound it: sudo reads the password line, then the SFTP init follows at once.
+    let started = tokio::time::timeout(ROOT_START_TIMEOUT, async {
+        let mut sent = 0;
+        loop {
+            let status = read_root_status(&mut stream)
+                .await
+                .map_err(|e| failed(&e))?;
+            match status.as_deref() {
+                Some("ready") => return Ok(()),
+                Some("password") => {
+                    let Some(pw) = &password else {
+                        return Err(RootError::NeedsPassword);
+                    };
+                    sent += 1;
+                    if sent > 2 {
+                        return Err(failed(t("sudo kept asking for the password")));
+                    }
+                    use tokio::io::AsyncWriteExt;
+                    let line = format!("{pw}\n");
+                    stream
+                        .write_all(line.as_bytes())
+                        .await
+                        .map_err(|e| failed(&e.to_string()))?;
+                    stream.flush().await.map_err(|e| failed(&e.to_string()))?;
+                }
+                Some("denied") => return Err(RootError::Denied { login: from_login }),
+                Some("no-sudo") => {
+                    return Err(RootError::Other(
+                        t("sudo is not installed on this server.").to_string(),
+                    ));
+                }
+                Some("no-sftp-server") => {
+                    return Err(RootError::Other(
+                        t("No sftp-server program was found on this server.").to_string(),
+                    ));
+                }
+                Some(other) => return Err(failed(other)),
+                None => return Err(failed(t("the server ended the session"))),
+            }
+        }
+    })
+    .await;
+    started.map_err(|_| timed_out())??;
     match tokio::time::timeout(
-        Duration::from_secs(20),
+        ROOT_START_TIMEOUT,
         SftpSession::new_with_config(stream, sftp_config()),
     )
     .await
     {
         Ok(Ok(session)) => Ok(session),
-        Ok(Err(e)) => Err(tf(
-            "Could not start a root SFTP session ({}). Check that sudo is allowed for this user and that the password is correct.",
-            &[&e.to_string()],
-        )),
-        Err(_) => Err(t(
-            "Timed out starting the root session. Check the sudo password, or that sudo works without a terminal on this server.",
-        )
-        .to_string()),
+        Ok(Err(e)) => Err(failed(&e.to_string())),
+        Err(_) => Err(timed_out()),
     }
 }
 
@@ -1818,6 +1990,62 @@ fn signal_number(sig: &Sig) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// sshd runs a command through the user's login shell: the root script must reach /bin/sh
+    /// intact through any of them (one line, no single quotes), and run there.
+    #[cfg(unix)]
+    #[test]
+    fn root_script_through_login_shells() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::{Command, Stdio};
+        let script = root_script("sudo");
+        assert!(!script.contains('\'') && !script.contains('\n'));
+        let dir = tempfile::tempdir().unwrap();
+        // Passwordless: runs what follows `--`.
+        let sudo = dir.path().join("sudo");
+        std::fs::write(
+            &sudo,
+            "#!/bin/sh\nwhile [ \"$1\" != -- ]; do shift; done; shift; exec \"$@\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&sudo, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let sudo = sudo.display().to_string();
+        let mut tried = 0;
+        for (sudo, expect) in [(sudo.as_str(), "ready"), ("/nonexistent/sudo", "no-sudo")] {
+            let command = format!("/bin/sh -c '{}'", root_script(sudo));
+            for shell in [
+                "/bin/sh",
+                "/bin/bash",
+                "/bin/dash",
+                "/bin/zsh",
+                "/bin/ksh",
+                "/bin/csh",
+                "/bin/tcsh",
+                "/usr/bin/fish",
+            ] {
+                if !std::path::Path::new(shell).exists() {
+                    continue;
+                }
+                tried += 1;
+                let out = Command::new(shell)
+                    .arg("-c")
+                    .arg(&command)
+                    .stdin(Stdio::null())
+                    .output()
+                    .unwrap();
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let first = stdout.lines().next().unwrap_or_default();
+                // A machine without sftp-server says so first.
+                assert!(
+                    first == format!("{ROOT_MARK}{expect}")
+                        || first == format!("{ROOT_MARK}no-sftp-server"),
+                    "{shell}: {stdout:?} {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+        }
+        assert!(tried >= 2);
+    }
 
     #[test]
     fn cd_quoting() {

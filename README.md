@@ -201,9 +201,11 @@ The data folder holds the connections, settings and known hosts.
   then drag between the lists, drop files from Finder or Explorer, or use the right-click menu.
   **Upload…** on the remote side opens the system's file picker.
 - **Browse as root (sudo)**: the **Root** button on the remote side reopens the file panel as root
-  through `sudo`, to see and transfer files your user has no access to. It asks for the sudo password
-  (or leave it empty for passwordless sudo); the terminal stays as your user. The server must allow
-  sudo for your user. Click **Root** again to go back.
+  through `sudo`, to see and transfer files your user has no access to. Passwordless sudo just works,
+  and a connection that logged in with a password gives sudo that same password, so usually nothing
+  is asked. The sudo password is asked only when neither works (a key login, or a sudo that wants a
+  different password). The terminal stays as your user, and the server must allow sudo for your user.
+  Click **Root** again to go back.
 - **Transfers you can follow**: a floating popup (which you can hide or close) shows the whole batch:
   files done, percent, size, speed and time left, with each row's own progress, and any errors. While
   the panel is hidden, the tab shows a progress ring and the SFTP button shows **SFTP 45%**. A
@@ -387,9 +389,11 @@ random port. They cover:
 
 - key authentication, and host keys that are new, changed or revoked;
 - shells, resizing and several panes;
-- SFTP transfers and the remote editor.
+- SFTP transfers and the remote editor;
+- root SFTP through sudo (with a stand-in for sudo): passwordless, with a password, a wrong one.
 
-An in-process SSH server covers the password and keyboard-interactive flows.
+An in-process SSH server covers the password and keyboard-interactive flows, and the login password
+offered to sudo.
 
 Debug builds include an end-to-end driver. On macOS it sends real keyboard and mouse events to the
 window, through the same path as user input (menu, winit, egui); elsewhere it runs the actions and

@@ -203,9 +203,11 @@ Folder data berisi koneksi, pengaturan, dan known hosts.
   kursor di atas daftar, lalu drag antar daftar, drop file dari Finder atau Explorer, atau pakai menu
   klik-kanan. **Unggah…** di sisi remote membuka pemilih file sistem.
 - **Jelajahi sebagai root (sudo)**: tombol **Root** di sisi remote membuka ulang panel file sebagai
-  root lewat `sudo`, untuk melihat dan mentransfer file yang tidak bisa diakses user Anda. TernaryShell
-  menanyakan password sudo (atau kosongkan untuk sudo tanpa password); terminal tetap sebagai user
-  Anda. Server harus mengizinkan sudo untuk user Anda. Klik **Root** lagi untuk kembali.
+  root lewat `sudo`, untuk melihat dan mentransfer file yang tidak bisa diakses user Anda. Sudo tanpa
+  password langsung jalan, dan koneksi yang login dengan password memberikan password yang sama ke
+  sudo, jadi biasanya tidak ada yang ditanyakan. Password sudo hanya ditanyakan kalau keduanya tidak
+  berhasil (login dengan key, atau sudo yang meminta password lain). Terminal tetap sebagai user Anda,
+  dan server harus mengizinkan sudo untuk user Anda. Klik **Root** lagi untuk kembali.
 - **Transfer yang bisa dipantau**: popup mengambang (bisa disembunyikan atau ditutup) menampilkan
   seluruh batch: file selesai, persen, ukuran, kecepatan, dan sisa waktu, dengan progres tiap baris,
   dan error bila ada. Saat panel disembunyikan, tab menampilkan cincin progres dan tombol SFTP
@@ -390,9 +392,11 @@ Tes integrasi menjalankan `sshd` OpenSSH bawaan sistem (macOS dan Linux) tanpa r
 
 - autentikasi key, serta host key baru, berubah, dan revoked;
 - shell, resize, dan beberapa pane;
-- transfer SFTP dan editor remote.
+- transfer SFTP dan editor remote;
+- SFTP root lewat sudo (dengan pengganti sudo): tanpa password, dengan password, password salah.
 
-Alur password dan keyboard-interactive diuji dengan server SSH in-process.
+Alur password dan keyboard-interactive, serta password login yang diberikan ke sudo, diuji dengan
+server SSH in-process.
 
 Build debug punya driver end-to-end. Di macOS driver ini mengirim event keyboard dan mouse
 sungguhan ke jendela, lewat jalur yang sama dengan input pengguna (menu, winit, egui); di sistem

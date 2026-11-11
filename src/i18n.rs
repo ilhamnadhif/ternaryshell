@@ -324,9 +324,32 @@ const ID: &[(&str, &str)] = &[
         "Reopen the file panel as root through sudo, to see and transfer files your user has no access to. The terminal stays as your user.",
         "Buka ulang panel file sebagai root lewat sudo, untuk melihat dan mentransfer file yang tidak bisa diakses user Anda. Terminal tetap sebagai user Anda.",
     ),
+    ("sudo password", "Password sudo"),
+    ("sudo needs a password.", "sudo memerlukan password."),
     (
-        "sudo password (leave empty if not needed)",
-        "Password sudo (kosongkan jika tidak perlu)",
+        "sudo did not accept your login password. Enter the sudo password.",
+        "sudo tidak menerima password login Anda. Masukkan password sudo.",
+    ),
+    (
+        "sudo did not accept the password (or does not allow this user).",
+        "sudo tidak menerima password tersebut (atau tidak mengizinkan user ini).",
+    ),
+    (
+        "sudo is not installed on this server.",
+        "sudo tidak terpasang di server ini.",
+    ),
+    (
+        "No sftp-server program was found on this server.",
+        "Program sftp-server tidak ditemukan di server ini.",
+    ),
+    ("the server ended the session", "server mengakhiri sesi"),
+    (
+        "the server sent unexpected output",
+        "server mengirim keluaran yang tidak terduga",
+    ),
+    (
+        "sudo kept asking for the password",
+        "sudo terus meminta password",
     ),
     (
         "The server must allow sudo for your user. The password is sent only to this server.",

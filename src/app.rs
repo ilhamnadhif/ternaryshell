@@ -451,6 +451,17 @@ impl TernaryShellApp {
                 self.dev
                     .check(cwd == arg, &format!("local cwd = {arg} (got {cwd})"));
             }
+            "expect-root" => {
+                let root = self
+                    .tabs
+                    .get(self.active)
+                    .and_then(|t| t.sftp.as_ref())
+                    .is_some_and(SftpPanel::is_root);
+                self.dev.check(
+                    root == (arg == "yes"),
+                    &format!("SFTP as root = {arg} (got {root})"),
+                );
+            }
             "expect-modal" => {
                 let open = self.modal_open();
                 self.dev.check(
