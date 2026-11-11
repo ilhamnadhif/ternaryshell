@@ -788,7 +788,7 @@ impl Sidebar {
                 pos2(right - g.size().x - 12.0, name_y - 8.0),
                 vec2(g.size().x + 12.0, 16.0),
             );
-            painter.rect_filled(pill, CornerRadius::same(8), p.accent_soft);
+            painter.rect_filled(pill, CornerRadius::same(8), p.accent_tint);
             painter.galley(pill.center() - g.size() / 2.0, g, p.accent_text);
             right = pill.left() - 6.0;
         }

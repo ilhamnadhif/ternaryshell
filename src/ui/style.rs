@@ -2,7 +2,7 @@
 //! helpers every dialog uses. Shared components (buttons, menus, badges, cards) are in `kit.rs`.
 //!
 //! The tokens are those of the design book in `design/` (`design/css/tokens.css`): two themes,
-//! Graphite (dark) and Paper (light). Every screen draws with [`Palette`] and the type helpers
+//! Graphite (dark) and Paper (light): neutral greys and one quiet blue, as in TernaryCode. Every screen draws with [`Palette`] and the type helpers
 //! [`medium`], [`semibold`], [`mono`] and [`icon_font`].
 
 use eframe::egui::{
@@ -51,10 +51,14 @@ pub struct Palette {
     pub accent_press: Color32,
     /// Text on an accent fill.
     pub on_accent: Color32,
-    /// Background of selected rows and "on" toggles.
+    /// Background of selected rows and "on" toggles (a neutral grey, as in TernaryCode).
     pub accent_soft: Color32,
-    /// Even quieter accent wash (drop targets, the active editor line).
+    /// The quietest accent wash (drop targets, the active editor line).
     pub accent_softer: Color32,
+    /// A soft accent fill (accent badges and icon tiles, the update pill, "on" toolbar toggles).
+    pub accent_tint: Color32,
+    /// The halo around a focused field.
+    pub accent_halo: Color32,
     /// Accent borders (focus rings, drop targets).
     pub accent_line: Color32,
     /// Accent-colored text (readable on the canvas and on `accent_soft`).
@@ -93,90 +97,99 @@ const fn rgb(hex: u32) -> Color32 {
     Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
 }
 
+// Neutral greys with no blue or violet cast (the same as TernaryCode), one quiet blue for focus,
+// links and the main action, and status colours a little below full saturation. Selected rows
+// and "on" controls are a neutral grey (`accent_soft`); blue washes are `accent_tint`.
 const DARK: Palette = Palette {
     dark: true,
-    canvas: rgb(0x16171c),
-    chrome: rgb(0x0f1014),
-    surface: rgb(0x1c1d23),
-    dialog: rgb(0x1b1c22),
-    card: rgb(0x1a1b21),
-    raised: rgb(0x23242b),
-    sheet: rgb(0x1f2026),
-    field: rgb(0x121318),
-    field_border: rgb(0x2c2d35),
-    hover: rgba(255, 255, 255, 0.045),
-    subtle: rgba(255, 255, 255, 0.085),
-    border: rgb(0x25262d),
-    border_strong: rgb(0x34353e),
+    // The background of the "TernaryShell Dark" terminal scheme, so the terminal blends in.
+    canvas: rgb(0x232323),
+    chrome: rgb(0x1c1c1c),
+    surface: rgb(0x2c2c2c),
+    dialog: rgb(0x2c2c2c),
+    card: rgb(0x292929),
+    raised: rgb(0x2c2c2c),
+    sheet: rgb(0x2c2c2c),
+    field: rgb(0x232323),
+    field_border: rgb(0x454545),
+    hover: rgba(255, 255, 255, 0.05),
+    subtle: rgba(255, 255, 255, 0.08),
+    border: rgb(0x323232),
+    border_strong: rgb(0x454545),
     line_soft: rgba(255, 255, 255, 0.06),
-    text: rgb(0xececf1),
-    text_muted: rgb(0xa2a3ad),
-    text_faint: rgb(0x6d6e78),
-    accent: rgb(0x7b6ef6),
-    accent_hover: rgb(0x8d82f8),
-    accent_press: rgb(0x6a5cee),
+    text: rgb(0xe6e6e6),
+    text_muted: rgb(0xa4a4a4),
+    text_faint: rgb(0x767676),
+    accent: rgb(0x3d7bd9),
+    accent_hover: rgb(0x528ce2),
+    accent_press: rgb(0x336bc4),
     on_accent: Color32::WHITE,
-    accent_soft: rgba(123, 110, 246, 0.16),
-    accent_softer: rgba(123, 110, 246, 0.09),
-    accent_line: rgba(123, 110, 246, 0.50),
-    accent_text: rgb(0xb4abff),
-    ok: rgb(0x3ccf8e),
-    warn: rgb(0xf2b84b),
-    err: rgb(0xf26d6d),
-    info: rgb(0x64a8ff),
-    root: rgb(0xf59e4c),
-    folder: rgb(0x8d9df9),
-    scrim: rgba(6, 7, 10, 0.58),
-    card_ring: rgb(0x24252c),
-    tab_on: rgb(0x1d1e24),
-    button: rgb(0x24252c),
-    button_border: rgb(0x33343c),
-    segment_on: rgb(0x2a2b33),
-    nav: rgb(0x17181d),
-    footer: rgba(255, 255, 255, 0.015),
+    accent_soft: rgba(255, 255, 255, 0.085),
+    accent_softer: rgba(61, 123, 217, 0.10),
+    accent_tint: rgba(61, 123, 217, 0.18),
+    accent_halo: rgba(61, 123, 217, 0.22),
+    accent_line: rgba(61, 123, 217, 0.55),
+    accent_text: rgb(0x7faeec),
+    ok: rgb(0x5fb87e),
+    warn: rgb(0xd6a247),
+    err: rgb(0xe86b61),
+    info: rgb(0x72a7e8),
+    root: rgb(0xe8915a),
+    folder: rgb(0x9aa3ae),
+    scrim: rgba(0, 0, 0, 0.50),
+    card_ring: rgb(0x323232),
+    tab_on: rgb(0x2c2c2c),
+    button: rgb(0x2f2f2f),
+    button_border: rgb(0x454545),
+    segment_on: rgb(0x2c2c2c),
+    nav: rgb(0x272727),
+    footer: rgba(255, 255, 255, 0.02),
 };
 
 const LIGHT: Palette = Palette {
     dark: false,
-    canvas: rgb(0xffffff),
-    chrome: rgb(0xf1f1f4),
+    // The background of the "TernaryShell Light" terminal scheme.
+    canvas: rgb(0xfbfbfb),
+    chrome: rgb(0xf3f3f3),
     surface: rgb(0xffffff),
     dialog: rgb(0xffffff),
     card: rgb(0xffffff),
     raised: rgb(0xffffff),
     sheet: rgb(0xffffff),
-    field: rgb(0xffffff),
-    field_border: rgb(0xd1d1da),
-    hover: rgba(22, 22, 48, 0.045),
-    subtle: rgba(22, 22, 48, 0.085),
-    border: rgb(0xe4e4ea),
-    border_strong: rgb(0xd1d1da),
-    line_soft: rgba(22, 22, 48, 0.06),
-    text: rgb(0x17171c),
-    text_muted: rgb(0x5e5e6a),
-    text_faint: rgb(0x9898a4),
-    accent: rgb(0x5b4ee6),
-    accent_hover: rgb(0x4c3fd7),
-    accent_press: rgb(0x4234c7),
+    field: rgb(0xfbfbfb),
+    field_border: rgb(0xcbcbcb),
+    hover: rgba(0, 0, 0, 0.05),
+    subtle: rgba(0, 0, 0, 0.085),
+    border: rgb(0xe0e0e0),
+    border_strong: rgb(0xcbcbcb),
+    line_soft: rgba(0, 0, 0, 0.06),
+    text: rgb(0x1d1d1d),
+    text_muted: rgb(0x5e5e5e),
+    text_faint: rgb(0x8e8e8e),
+    accent: rgb(0x2563c9),
+    accent_hover: rgb(0x1d52ae),
+    accent_press: rgb(0x1a4a9c),
     on_accent: Color32::WHITE,
-    accent_soft: rgba(91, 78, 230, 0.10),
-    accent_softer: rgba(91, 78, 230, 0.06),
-    accent_line: rgba(91, 78, 230, 0.42),
-    accent_text: rgb(0x4a3dcc),
-    ok: rgb(0x12895a),
-    warn: rgb(0xad6a00),
-    err: rgb(0xd33b3b),
-    info: rgb(0x2463d9),
+    accent_soft: rgba(0, 0, 0, 0.075),
+    accent_softer: rgba(37, 99, 201, 0.07),
+    accent_tint: rgba(37, 99, 201, 0.12),
+    accent_halo: rgba(37, 99, 201, 0.22),
+    accent_line: rgba(37, 99, 201, 0.45),
+    accent_text: rgb(0x1f5abd),
+    ok: rgb(0x1f844b),
+    warn: rgb(0xa66600),
+    err: rgb(0xc8322e),
+    info: rgb(0x2563c9),
     root: rgb(0xc25e0a),
-    folder: rgb(0x5b6ee8),
-    scrim: rgba(24, 24, 36, 0.28),
-    card_ring: rgb(0xe4e4ea),
+    folder: rgb(0x6c7888),
+    scrim: rgba(0, 0, 0, 0.25),
+    card_ring: rgb(0xe0e0e0),
     tab_on: rgb(0xffffff),
     button: rgb(0xffffff),
-    button_border: rgb(0xd1d1da),
+    button_border: rgb(0xcbcbcb),
     segment_on: rgb(0xffffff),
-    nav: rgb(0xf1f1f4),
-    footer: rgba(91, 78, 230, 0.06),
+    nav: rgb(0xf6f6f6),
+    footer: rgba(0, 0, 0, 0.025),
 };
 
 /// The tint behind a status color (badges, callouts, icon tiles).
@@ -215,7 +228,7 @@ impl Palette {
         let d = self.dark;
         match tone {
             Tone::Neutral => self.hover,
-            Tone::Accent => self.accent_soft,
+            Tone::Accent => self.accent_tint,
             Tone::Ok => soft(self.ok, if d { 0.14 } else { 0.10 }),
             Tone::Warn => {
                 if d {
@@ -465,7 +478,7 @@ pub fn focus_halo(ui: &Ui, rect: egui::Rect, radius: u8) {
     painter.rect_stroke(
         rect,
         CornerRadius::same(radius),
-        Stroke::new(3.0, p.accent_soft),
+        Stroke::new(3.0, p.accent_halo),
         egui::StrokeKind::Outside,
     );
     painter.rect_stroke(

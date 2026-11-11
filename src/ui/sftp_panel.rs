@@ -886,7 +886,7 @@ impl SftpPanel {
                 let (fill, stroke, color) = if go {
                     (
                         if resp.hovered() {
-                            p.accent_soft
+                            p.accent_tint
                         } else {
                             p.accent_softer
                         },

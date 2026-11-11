@@ -310,9 +310,9 @@ impl Updater {
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 26.0), egui::Sense::click());
         let painter = ui.painter();
         let fill = if resp.hovered() {
-            style::soft(p.accent, if p.dark { 0.24 } else { 0.16 })
+            style::soft(p.accent, if p.dark { 0.26 } else { 0.18 })
         } else {
-            p.accent_soft
+            p.accent_tint
         };
         painter.rect_filled(rect, egui::CornerRadius::same(13), fill);
         painter.text(

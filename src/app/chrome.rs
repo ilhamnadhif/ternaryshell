@@ -364,7 +364,7 @@ impl TernaryShellApp {
                     rect,
                     radius,
                     p.tab_on,
-                    Stroke::new(1.0, Color32::from_rgb(0x2a, 0x2b, 0x32)),
+                    Stroke::new(1.0, Color32::from_rgb(0x3a, 0x3a, 0x3a)),
                     StrokeKind::Inside,
                 );
             } else {
@@ -915,7 +915,7 @@ impl TernaryShellApp {
             Stroke::new(
                 1.0,
                 if dark {
-                    Color32::from_rgb(0x21, 0x22, 0x28)
+                    Color32::from_rgb(0x2a, 0x2a, 0x2a)
                 } else {
                     p.border
                 },
@@ -1566,7 +1566,7 @@ fn sftp_toggle(ui: &mut Ui, on: bool, fraction: Option<f32>, percent: &str) -> e
     let hovered = resp.hovered();
     let painter = ui.painter();
     let fill = if on {
-        p.accent_soft
+        p.accent_tint
     } else if hovered {
         p.hover
     } else {

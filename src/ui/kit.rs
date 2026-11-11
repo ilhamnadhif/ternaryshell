@@ -614,7 +614,7 @@ pub fn method_card(
             painter.rect_stroke(
                 rect,
                 radius,
-                Stroke::new(3.0, p.accent_soft),
+                Stroke::new(3.0, p.accent_halo),
                 StrokeKind::Outside,
             );
         }
@@ -671,7 +671,7 @@ pub fn radio_card(
         painter.rect_stroke(
             rect,
             radius,
-            Stroke::new(3.0, p.accent_soft),
+            Stroke::new(3.0, p.accent_halo),
             StrokeKind::Outside,
         );
     }

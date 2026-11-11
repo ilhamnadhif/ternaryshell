@@ -880,12 +880,13 @@ impl Syntax {
         };
         Self {
             kind,
-            fg: c(0xd6d8de, 0x2b2d35),
-            key: c(0x6cb6f5, 0x2b62d0),
-            string: c(0x9fd07f, 0x2f8a3a),
-            number: c(0xecc77d, 0x9a6a00),
-            literal: c(0xc993f0, 0x8a3fc0),
-            comment: c(0x6b7080, 0x8a8e9c),
+            // The ANSI colours of the TernaryShell terminal schemes.
+            fg: c(0xd8d8d8, 0x1f1f1f),
+            key: c(0x6aa6e8, 0x2563c9),
+            string: c(0x98c379, 0x2f7d32),
+            number: c(0xe0be7a, 0x8a6100),
+            literal: c(0xc58ad8, 0x8e44ad),
+            comment: c(0x7a7a7a, 0x8a8a8a),
         }
     }
 

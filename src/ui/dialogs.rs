@@ -1666,7 +1666,7 @@ fn theme_card(
         painter.rect_stroke(
             rect,
             radius,
-            Stroke::new(3.0, p.accent_soft),
+            Stroke::new(3.0, p.accent_halo),
             StrokeKind::Outside,
         );
     }
@@ -1865,7 +1865,7 @@ fn scheme_card(ui: &mut Ui, sc: &Scheme, on: bool, w: f32) -> egui::Response {
             se: style::RADIUS_MD,
         },
         if p.dark {
-            Color32::from_rgb(0x1d, 0x1e, 0x24)
+            Color32::from_rgb(0x26, 0x26, 0x26)
         } else {
             p.surface
         },
