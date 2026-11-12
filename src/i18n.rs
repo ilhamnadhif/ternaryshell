@@ -176,7 +176,6 @@ const ID: &[(&str, &str)] = &[
     ("Delete “{}”?", "Hapus “{}”?"),
     ("Discard changes to {}?", "Buang perubahan pada {}?"),
     ("Don't show again for {}", "Jangan tampilkan lagi untuk {}"),
-    ("Download selected", "Unduh yang dipilih"),
     (
         "Drop files here or use Upload.",
         "Letakkan file di sini atau gunakan Upload.",
@@ -187,7 +186,6 @@ const ID: &[(&str, &str)] = &[
         "Electerm or a TernaryShell export.",
         "Ekspor Electerm atau TernaryShell.",
     ),
-    ("Empty folder", "Folder kosong"),
     ("Encrypted private key", "Private key terenkripsi"),
     (
         "Enter its passphrase below, or when connecting.",
@@ -509,7 +507,6 @@ const ID: &[(&str, &str)] = &[
     ("Updating to {}", "Memperbarui ke {}"),
     ("Updating {}%", "Memperbarui {}%"),
     ("Updating…", "Memperbarui…"),
-    ("Upload selected", "Unggah yang dipilih"),
     ("Verification", "Verifikasi"),
     (
         "Verified (size and SHA-256).",

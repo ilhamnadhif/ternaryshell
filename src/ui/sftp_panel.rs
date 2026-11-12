@@ -827,101 +827,21 @@ impl SftpPanel {
         // The transfer strip along the bottom, the two lists side by side above it.
         let strip_h = self.strip_height();
         let lists = egui::Rect::from_min_max(full.min, pos2(full.right(), full.bottom() - strip_h));
-        let gutter_w = 40.0;
-        let half = ((lists.width() - gutter_w) / 2.0).floor();
+        let half = (lists.width() / 2.0).floor();
         let local_rect = egui::Rect::from_min_size(lists.min, vec2(half, lists.height()));
-        let gutter = egui::Rect::from_min_size(
-            pos2(local_rect.right(), lists.top()),
-            vec2(gutter_w, lists.height()),
-        );
-        let remote_rect = egui::Rect::from_min_max(pos2(gutter.right(), lists.top()), lists.max);
+        let remote_rect =
+            egui::Rect::from_min_max(pos2(local_rect.right(), lists.top()), lists.max);
         let mut local_ui = ui.new_child(egui::UiBuilder::new().max_rect(local_rect));
         let local_actions = self.side_ui(&mut local_ui, false, input_enabled);
         let mut remote_ui = ui.new_child(egui::UiBuilder::new().max_rect(remote_rect));
         let remote_actions = self.side_ui(&mut remote_ui, true, input_enabled);
-        // The middle: send the selection across with one click.
-        let mut mid = Vec::new();
-        {
-            let painter = ui.painter();
-            painter.vline(
-                gutter.left() + 0.5,
-                gutter.y_range(),
-                Stroke::new(1.0, p.line_soft),
-            );
-            painter.vline(
-                gutter.right() - 0.5,
-                gutter.y_range(),
-                Stroke::new(1.0, p.line_soft),
-            );
-            let c = gutter.center();
-            let up = egui::Rect::from_center_size(c - vec2(0.0, 17.0), vec2(28.0, 28.0));
-            let down = egui::Rect::from_center_size(c + vec2(0.0, 17.0), vec2(28.0, 28.0));
-            for (rect, icon, from_remote, tip) in [
-                (up, icons::ARROW_RIGHT, false, t("Upload selected")),
-                (down, icons::ARROW_LEFT, true, t("Download selected")),
-            ] {
-                let side = if from_remote {
-                    &self.remote
-                } else {
-                    &self.local
-                };
-                let go = !side.selected.is_empty();
-                #[cfg(debug_assertions)]
-                crate::devtest::record(
-                    if from_remote {
-                        "sftp-download-selected"
-                    } else {
-                        "sftp-upload-selected"
-                    },
-                    rect,
-                );
-                let resp = ui
-                    .interact(
-                        rect,
-                        egui::Id::new(("sftp-across", self.uid, from_remote)),
-                        if go { Sense::click() } else { Sense::hover() },
-                    )
-                    .on_hover_text(tip);
-                let painter = ui.painter();
-                let (fill, stroke, color) = if go {
-                    (
-                        if resp.hovered() {
-                            p.accent_tint
-                        } else {
-                            p.accent_softer
-                        },
-                        p.accent_line,
-                        p.accent_text,
-                    )
-                } else {
-                    (p.canvas, p.border, p.text_faint)
-                };
-                painter.rect(
-                    rect,
-                    CornerRadius::same(style::RADIUS),
-                    fill,
-                    Stroke::new(1.0, stroke),
-                    StrokeKind::Inside,
-                );
-                painter.text(
-                    rect.center(),
-                    Align2::CENTER_CENTER,
-                    icon,
-                    style::icon_font(16.0),
-                    color,
-                );
-                if go && resp.clicked() {
-                    let mut names: Vec<String> = side.selected.iter().cloned().collect();
-                    names.sort();
-                    mid.push(SideAction::Transfer {
-                        from_remote,
-                        dir: side.cwd.clone(),
-                        names,
-                    });
-                }
-            }
-        }
-        for a in local_actions.into_iter().chain(remote_actions).chain(mid) {
+        // One hairline between the two lists.
+        ui.painter().vline(
+            local_rect.right() - 0.5,
+            lists.y_range(),
+            Stroke::new(1.0, p.line_soft),
+        );
+        for a in local_actions.into_iter().chain(remote_actions) {
             if let Some(out) = self.apply(a, rt, &ctx) {
                 output = out;
             }
@@ -991,7 +911,7 @@ impl SftpPanel {
     }
 
     /// One side: its header (who, up, the path as a breadcrumb, more, and on the remote side
-    /// Root and Upload), the column titles, the files, and the count.
+    /// Root and Upload), the column titles and the files.
     fn side_ui(&mut self, ui: &mut Ui, is_remote: bool, input_enabled: bool) -> Vec<SideAction> {
         let mut actions = Vec::new();
         // The list's keys work while nothing else is asked (a dialog of the panel or the app).
@@ -1451,7 +1371,7 @@ impl SftpPanel {
             actions.push(SideAction::Sort(is_remote, k));
         }
 
-        // The files (28 px rows inside 4 × 6 padding), then the count.
+        // The files (28 px rows inside 4 × 6 padding), down to the bottom.
         let visible: Vec<usize> = side
             .entries
             .iter()
@@ -1459,11 +1379,7 @@ impl SftpPanel {
             .filter(|(_, e)| show_hidden || !e.is_hidden())
             .map(|(i, _)| i)
             .collect();
-        let foot_h = 26.0;
-        let list_rect = egui::Rect::from_min_max(
-            pos2(area.left(), ui.cursor().top()),
-            pos2(area.right(), area.bottom() - foot_h),
-        );
+        let list_rect = egui::Rect::from_min_max(pos2(area.left(), ui.cursor().top()), area.max);
         // A click in the list gives it the keyboard (Esc gives it back to the terminal).
         let list_id = egui::Id::new(("sftp-list-keys", uid, is_remote));
         let list_bg = ui.interact(list_rect, list_id, Sense::click());
@@ -1787,26 +1703,6 @@ impl SftpPanel {
                 names: drop.names.clone(),
             });
         }
-        // The count.
-        let foot = egui::Rect::from_min_max(pos2(area.left(), area.bottom() - foot_h), area.max);
-        ui.painter().hline(
-            foot.x_range(),
-            foot.top() + 0.5,
-            Stroke::new(1.0, p.line_soft),
-        );
-        let count = tf("{} items", &[&visible.len().to_string()]);
-        let text = if visible.is_empty() && !side.loading {
-            t("Empty folder").to_string()
-        } else {
-            count
-        };
-        ui.painter().text(
-            pos2(foot.left() + 12.0, foot.center().y),
-            Align2::LEFT_CENTER,
-            text,
-            style::regular(style::XS),
-            p.text_faint,
-        );
         let _ = input_enabled;
         actions
     }
