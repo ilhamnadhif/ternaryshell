@@ -363,10 +363,16 @@ impl Tab {
             // and must not mark the reconnected pane as ended.
             pane.generation.fetch_add(1, Ordering::Relaxed);
             pane.status = Arc::new(Mutex::new(PaneStatus::Starting));
-            tcore::end_session(
-                &mut pane.feeder.lock(),
-                &format!("— {} —", crate::i18n::t("reconnecting")),
-            );
+            // A separator under the old session's output (nothing when there was none, so a
+            // retried connection starts on an empty pane behind its progress card).
+            let mut feeder = pane.feeder.lock();
+            if !tcore::is_blank(&feeder) {
+                tcore::end_session(
+                    &mut feeder,
+                    &format!("— {} —", crate::i18n::t("reconnecting")),
+                );
+            }
+            drop(feeder);
             self.conn
                 .open_shell(pane_start(pane, rx, &bookmark, i == 0, None));
         }

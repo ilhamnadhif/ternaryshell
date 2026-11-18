@@ -202,6 +202,8 @@ pub struct SftpPanel {
     focus_dialog: bool,
     /// Finder drops waiting for the session (or for an open dialog to close).
     pending_uploads: Vec<PathBuf>,
+    /// A remote path to show once the session is ready ("Open in Files" in the terminal).
+    pending_remote: Option<String>,
     start_dir: String,
     message: Option<(String, bool)>,
     /// Label shown next to the pointer while files are dragged between the two sides.
@@ -335,6 +337,7 @@ impl SftpPanel {
             dialog: None,
             focus_dialog: false,
             pending_uploads: Vec::new(),
+            pending_remote: None,
             start_dir: start_dir.trim().to_string(),
             message: None,
             drag_label: None,
@@ -833,6 +836,48 @@ impl SftpPanel {
 
     /// Processes finished operations and listings; also called while the panel is hidden, so
     /// transfers finishing in the background refresh the lists and are announced.
+    /// Shows `path` in the remote list: the folder itself, or the folder a file is in.
+    pub fn go_remote(&mut self, path: &str) {
+        let path = path.trim();
+        if !path.is_empty() {
+            self.pending_remote = Some(path.to_string());
+        }
+    }
+
+    /// Lists the folder of a path typed or selected elsewhere (its parent when it is a file).
+    fn remote_go(&mut self, rt: &tokio::runtime::Handle, ctx: &egui::Context, path: String) {
+        let Some(sftp) = self.sftp() else { return };
+        let path = if path == "~" || path.starts_with("~/") {
+            path.replacen('~', ".", 1)
+        } else {
+            path
+        };
+        self.remote.loading = true;
+        self.remote_seq += 1;
+        let seq = self.remote_seq;
+        let tx = self.events_tx.clone();
+        let ctx = ctx.clone();
+        rt.spawn(async move {
+            let mut resolved = remote::canonicalize(&sftp, &path).await.unwrap_or(path);
+            if !remote::is_dir(&sftp, &resolved).await.unwrap_or(true)
+                && let Some((parent, _)) = resolved.rsplit_once('/')
+            {
+                resolved = if parent.is_empty() {
+                    "/".into()
+                } else {
+                    parent.to_string()
+                };
+            }
+            let result = remote::list(&sftp, &resolved).await;
+            let _ = tx.send(Event::Listed {
+                seq,
+                path: resolved,
+                result,
+            });
+            ctx.request_repaint();
+        });
+    }
+
     pub fn poll(&mut self, rt: &tokio::runtime::Handle, ctx: &egui::Context) {
         if let Session::Opening(rx) = &mut self.session {
             match rx.try_recv() {
@@ -856,6 +901,11 @@ impl SftpPanel {
                     self.session = Session::Failed(t("Not connected.").into())
                 }
             }
+        }
+        if self.sftp().is_some()
+            && let Some(path) = self.pending_remote.take()
+        {
+            self.remote_go(rt, ctx, path);
         }
         // Switching root on or off: swap to the new session only once it is ready.
         let gone = || t("Not connected.").to_string();

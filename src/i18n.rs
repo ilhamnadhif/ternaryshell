@@ -1747,6 +1747,7 @@ const ID: &[(&str, &str)] = &[
         "Terjadi kesalahan dan TernaryShell berhasil pulih. Laporannya disimpan di {}.",
     ),
     // ===== Redesign 3.0: shared [foundation] =====
+    ("Open in Files", "Buka di File"),
     // ===== end [foundation] =====
 
     // ===== Redesign 3.0: main window, sidebar, Home [main] =====

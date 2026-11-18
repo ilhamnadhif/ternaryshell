@@ -1225,6 +1225,24 @@ pub fn show(
             ui.close();
         }
         kit::menu_sep(ui);
+        // A selected absolute or home-relative path can be opened in Files.
+        let path = has_sel
+            .then(|| shared.term.lock().selection_to_string())
+            .flatten()
+            .map(|t| t.trim().to_string())
+            .filter(|t| looks_like_path(t));
+        if let Some(path) = path
+            && kit::menu_item(
+                ui,
+                Some(icons::FOLDER_SIMPLE),
+                crate::i18n::t("Open in Files"),
+                None,
+            )
+            .clicked()
+        {
+            out.action = Some(super::actions::Action::OpenFilesAt(path));
+            ui.close();
+        }
         if ui
             .add_enabled_ui(has_sel, |ui| {
                 kit::menu_item(
@@ -1341,5 +1359,26 @@ pub fn copy_selection(ctx: &egui::Context, shared: &TermShared) -> bool {
             true
         }
         None => false,
+    }
+}
+
+/// A selection that names a remote path: one line starting with `/` or `~`, without control
+/// characters.
+fn looks_like_path(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() < 1024
+        && (text.starts_with('/') || text == "~" || text.starts_with("~/"))
+        && !text.chars().any(|c| c.is_control())
+}
+
+#[cfg(test)]
+mod path_tests {
+    #[test]
+    fn selections_that_are_paths() {
+        assert!(super::looks_like_path("/var/log/nginx"));
+        assert!(super::looks_like_path("~/app/config.yml"));
+        assert!(!super::looks_like_path("ls -lh"));
+        assert!(!super::looks_like_path("/a\nb"));
+        assert!(!super::looks_like_path(""));
     }
 }

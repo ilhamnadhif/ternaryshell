@@ -1245,6 +1245,7 @@ impl TernaryShellApp {
         host: &str,
     ) {
         let mut edit = false;
+        let mut retry = None;
         egui::Popup::menu(anchor)
             .width(360.0)
             .align(egui::RectAlign::TOP_END)
@@ -1284,14 +1285,18 @@ impl TernaryShellApp {
                     style::regular(style::SMALL),
                     p.text_faint,
                 );
-                for f in forwards {
+                for (i, f) in forwards.iter().enumerate() {
                     let (color, detail, err) = match (&f.error, f.listening) {
                         (None, true) => (p.ok, listening_on(&f.forward), false),
                         (Some(e), _) => (p.err, e.clone(), true),
                         (None, false) => (p.err, t("Not listening").to_string(), true),
                     };
                     if forward_row(ui, &f.forward, color, &detail, err) {
-                        ui.ctx().copy_text(forward_target(&f.forward));
+                        if err {
+                            retry = Some(i);
+                        } else {
+                            ui.ctx().copy_text(forward_target(&f.forward));
+                        }
                     }
                 }
                 kit::menu_sep(ui);
@@ -1302,6 +1307,11 @@ impl TernaryShellApp {
                     ui.close();
                 }
             });
+        if let Some(i) = retry
+            && let Some(tab) = self.tabs.get(self.active)
+        {
+            tab.conn.retry_forward(i);
+        }
         if edit && let Some(tab) = self.tabs.get(self.active) {
             self.editor_section = Some(crate::ui::editor::Section::Network);
             self.actions.push(Action::EditBookmark(tab.bookmark.id));
@@ -1565,13 +1575,26 @@ fn forward_row(
     let p = style::pal(ui);
     let (rect, resp) = ui.allocate_exact_size(vec2(348.0, 46.0), Sense::hover());
     let hovered = resp.hovered();
+    // A failing forward gets a Retry button; the others copy their address.
+    let retry_w = if err {
+        ui.painter()
+            .layout_no_wrap(t("Retry").to_string(), style::medium(style::SMALL), p.text)
+            .size()
+            .x
+            + 18.0
+    } else {
+        20.0
+    };
     let copy_rect = egui::Rect::from_center_size(
-        pos2(rect.right() - 8.0 - 10.0, rect.center().y),
-        vec2(20.0, 20.0),
+        pos2(rect.right() - 8.0 - retry_w / 2.0, rect.center().y),
+        vec2(retry_w, if err { 24.0 } else { 20.0 }),
     );
-    let copy = ui
-        .interact(copy_rect, resp.id.with("copy"), Sense::click())
-        .on_hover_text(t("Copy Address"));
+    let copy = ui.interact(copy_rect, resp.id.with("copy"), Sense::click());
+    let copy = if err {
+        copy
+    } else {
+        copy.on_hover_text(t("Copy Address"))
+    };
     let painter = ui.painter();
     if hovered || copy.hovered() {
         painter.rect_filled(rect, CornerRadius::same(6), p.hover);
@@ -1601,6 +1624,23 @@ fn forward_row(
         style::regular(style::SMALL),
         if err { p.err } else { p.text_faint },
     );
+    if err {
+        painter.rect(
+            copy_rect,
+            CornerRadius::same(style::RADIUS),
+            if copy.hovered() { p.subtle } else { p.button },
+            Stroke::new(1.0, p.button_border),
+            egui::StrokeKind::Inside,
+        );
+        painter.text(
+            copy_rect.center(),
+            Align2::CENTER_CENTER,
+            t("Retry"),
+            style::medium(style::SMALL),
+            p.text,
+        );
+        return copy.clicked();
+    }
     if copy.hovered() {
         painter.rect_filled(copy_rect, CornerRadius::same(5), p.subtle);
     }

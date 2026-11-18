@@ -132,6 +132,8 @@ enum ConnCmd {
     },
     /// Check that the server still answers; close the connection if it doesn't.
     Probe(ProbeReason),
+    /// Start a failed port forward again.
+    RetryForward(usize),
     Disconnect,
 }
 
@@ -157,6 +159,11 @@ impl Connection {
             cmd_tx,
             received,
         }
+    }
+
+    /// Starts a failed port forward (its index in the bookmark's list) again.
+    pub fn retry_forward(&self, index: usize) {
+        let _ = self.cmd_tx.send(ConnCmd::RetryForward(index));
     }
 
     /// Bytes received from the server so far.
@@ -271,7 +278,11 @@ fn fail_pane(pane: &PaneStart, message: &str) {
     }
     *pane.status.lock() = PaneStatus::Failed(message.to_string());
     let mut feeder = pane.feeder.lock();
-    tcore::end_session(&mut feeder, message);
+    // The failure card shows the message; a terminal that never showed anything stays empty
+    // behind it instead of repeating it.
+    if !tcore::is_blank(&feeder) {
+        tcore::end_session(&mut feeder, message);
+    }
 }
 
 // ----- a TCP stream that dies with its connection -----------------------------------------------
@@ -1411,6 +1422,18 @@ async fn run_connection(
                         probe(&handle, &shared, &ctx, &flags, &probing, &lost_tx, reason);
                         false
                     }
+                    Some(ConnCmd::RetryForward(index)) => {
+                        super::forward::retry(
+                            handle.clone(),
+                            &spec.bookmark.forwards,
+                            index,
+                            &flags.remote_forwards,
+                            &flags.cancel,
+                            &shared,
+                            &ctx,
+                        );
+                        false
+                    }
                     Some(cmd) => handle_cmd(cmd, &handle, &ctx, &login_password),
                     None => true,
                 };
@@ -1462,7 +1485,7 @@ fn fail_all(queued: Vec<ConnCmd>, mut rx: mpsc::UnboundedReceiver<ConnCmd>, reas
             ConnCmd::OpenSftpRoot { reply, .. } => {
                 let _ = reply.send(Err(RootError::Other(reason.to_string())));
             }
-            ConnCmd::Probe(_) | ConnCmd::Disconnect => {}
+            ConnCmd::Probe(_) | ConnCmd::RetryForward(_) | ConnCmd::Disconnect => {}
         }
     }
 }
@@ -1500,8 +1523,8 @@ fn handle_cmd(
             });
             false
         }
-        // Made while connecting: the connection is brand new.
-        ConnCmd::Probe(_) => false,
+        // Made while connecting: the connection is brand new, its forwards just started.
+        ConnCmd::Probe(_) | ConnCmd::RetryForward(_) => false,
         ConnCmd::Disconnect => true,
     }
 }

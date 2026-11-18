@@ -265,6 +265,15 @@ pub fn end_session(feeder: &mut Feeder, text: &str) {
     let _ = feeder.drain_events();
 }
 
+/// Whether nothing was ever shown on the main screen: the cursor at the top left and no
+/// scrollback (a connection that failed before its shell printed anything).
+pub fn is_blank(feeder: &Feeder) -> bool {
+    use alacritty_terminal::grid::Dimensions;
+    let term = feeder.shared.term.lock();
+    let cursor = term.grid().cursor.point;
+    cursor.line.0 == 0 && cursor.column.0 == 0 && term.history_size() == 0
+}
+
 /// Ends a session like `end_session`, but leaves the message to the UI: `hint` goes to
 /// `UiNotes::ended`, and the cursor is left at the start of a line with an empty line under
 /// it, where the UI draws the hint.
@@ -404,6 +413,14 @@ mod tests {
             f.shared.notes.lock().ended.as_deref(),
             Some("Session ended.")
         );
+    }
+
+    #[test]
+    fn blank_until_something_is_shown() {
+        let mut f = make();
+        assert!(is_blank(&f));
+        f.feed(b"hi");
+        assert!(!is_blank(&f));
     }
 
     /// The message goes under the session's last output, not over the top of the screen.

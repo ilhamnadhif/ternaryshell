@@ -1388,6 +1388,20 @@ impl TernaryShellApp {
                     }
                 }
             }
+            Action::OpenFilesAt(path) => {
+                let last = self.settings.last_local_dir.clone();
+                if let Some(tab) = self.tabs.get_mut(self.active)
+                    && tab.state().is_connected()
+                {
+                    tab.show_sftp = true;
+                    if tab.sftp.is_none() {
+                        tab.sftp = Some(tab.new_sftp_panel(last.as_deref()));
+                    }
+                    if let Some(panel) = tab.sftp.as_mut() {
+                        panel.go_remote(&path);
+                    }
+                }
+            }
             Action::FontBigger => {
                 self.settings.font_size = (self.settings.font_size + 1.0).min(Settings::MAX_FONT)
             }

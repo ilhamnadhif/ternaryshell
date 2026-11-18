@@ -82,6 +82,8 @@ pub enum Action {
     SendQuickCommandAt(usize),
     /// Saves text selected in the terminal as a new quick command (pasted, not run).
     SaveQuickCommand(String),
+    /// Opens the Files panel at a remote path selected in the terminal.
+    OpenFilesAt(String),
     // import / export
     Import,
     ImportSshConfig,

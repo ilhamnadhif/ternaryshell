@@ -55,6 +55,43 @@ pub fn start(
     }
 }
 
+/// Starts forward `index` again after it failed (its port was taken, the server refused it),
+/// without reconnecting. A forward that is listening is left alone.
+pub fn retry(
+    handle: Arc<SshHandle>,
+    forwards: &[Forward],
+    index: usize,
+    remote: &RemoteForwards,
+    cancel: &CancellationToken,
+    shared: &Arc<Mutex<ConnShared>>,
+    ctx: &Context,
+) {
+    let Some(f) = forwards.get(index).cloned() else {
+        return;
+    };
+    {
+        let mut s = shared.lock();
+        match s.forwards.get_mut(index) {
+            Some(st) if !st.listening => st.error = None,
+            _ => return,
+        }
+    }
+    let status = Status {
+        shared: shared.clone(),
+        ctx: ctx.clone(),
+        index,
+    };
+    status.ctx.request_repaint();
+    match f.kind {
+        ForwardKind::Local | ForwardKind::Dynamic => {
+            tokio::spawn(listen_here(handle, f, status, cancel.clone()));
+        }
+        ForwardKind::Remote => {
+            tokio::spawn(listen_on_server(handle, f, status, remote.clone()));
+        }
+    }
+}
+
 /// Where a forward reports how it is doing (shown in the tab).
 #[derive(Clone)]
 struct Status {
