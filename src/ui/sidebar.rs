@@ -123,8 +123,6 @@ struct Ctx<'a> {
     hovered: Option<(Uuid, egui::Rect)>,
     /// The sidebar's right edge (the hover card opens beside it).
     right: f32,
-    /// The tree has the keyboard.
-    focused: bool,
     /// The first section has no room above it.
     first: bool,
 }
@@ -324,7 +322,6 @@ impl Sidebar {
             moved: None,
             hovered: None,
             right: ui.max_rect().right(),
-            focused: ui.memory(|m| m.has_focus(tree_keys_id())),
             first: true,
         };
         if std::mem::take(&mut self.collapse_sections) {
@@ -1142,9 +1139,6 @@ impl Sidebar {
         } else if hovered {
             painter.rect_filled(rect, CornerRadius::same(style::RADIUS), p.hover);
         }
-        if selected && cx.focused {
-            focus_ring(&painter, rect, &p);
-        }
         let cy = rect.center().y;
         let x = rect.left() + 8.0 + depth as f32 * INDENT;
         painter.text(
@@ -1507,9 +1501,6 @@ impl Sidebar {
         } else {
             p.chrome
         };
-        if selected && cx.focused && hit.is_none() {
-            focus_ring(&painter, rect, &p);
-        }
         let cy = rect.center().y;
         let x = rect.left() + 8.0 + depth as f32 * INDENT;
         let glyph = Rect::from_center_size(pos2(x + 10.0, cy), vec2(20.0, 20.0));
@@ -1790,7 +1781,9 @@ impl Sidebar {
         let on_card = self
             .card
             .is_some_and(|(_, r)| ptr.is_some_and(|p| r.expand(2.0).contains(p)));
-        let dragging = egui::DragAndDrop::has_any_payload(ui.ctx());
+        // No card while dragging or while a menu is open (it would cover the menu).
+        let dragging = egui::DragAndDrop::has_any_payload(ui.ctx())
+            || (egui::Popup::is_any_open(ui.ctx()) && !on_card);
         let show = match cx.hovered {
             Some((id, rect)) if !dragging => {
                 let since = match self.hover {
@@ -2305,16 +2298,6 @@ fn drop_line(ui: &Ui, row: Rect, y: f32, p: &Palette) {
 fn drop_target(ui: &Ui, rect: Rect, p: &Palette) {
     let painter = ui.painter();
     painter.rect_filled(rect, CornerRadius::same(style::RADIUS), p.accent_softer);
-    painter.rect_stroke(
-        rect,
-        CornerRadius::same(style::RADIUS),
-        Stroke::new(1.5, p.accent_line),
-        StrokeKind::Inside,
-    );
-}
-
-/// The keyboard's place in the tree: a 1.5 px accent ring inside the row.
-fn focus_ring(painter: &egui::Painter, rect: Rect, p: &Palette) {
     painter.rect_stroke(
         rect,
         CornerRadius::same(style::RADIUS),
