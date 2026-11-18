@@ -15,6 +15,8 @@ pub struct FileEntry {
     pub modified: Option<i64>,
     /// Unix permission bits (lower 12 bits), if known.
     pub mode: Option<u32>,
+    /// Where a symlink points, as stored in the link (`releases/1.4.2`).
+    pub link_target: Option<String>,
 }
 
 impl FileEntry {
@@ -75,6 +77,10 @@ pub fn list_local(dir: &Path) -> std::io::Result<Vec<FileEntry>> {
             size: if meta.is_dir() { 0 } else { meta.len() },
             modified: meta.modified().ok().and_then(unix_secs),
             mode: local_mode(&meta),
+            link_target: is_symlink
+                .then(|| std::fs::read_link(entry.path()).ok())
+                .flatten()
+                .map(|t| t.display().to_string()),
         });
     }
     Ok(out)

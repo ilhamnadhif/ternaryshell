@@ -511,6 +511,14 @@ impl TernaryShellApp {
                         Some(Action::Settings)
                     }
                     "sftp" => Some(Action::ToggleSftp),
+                    _ if arg.starts_with("files-") => {
+                        if let Some(panel) =
+                            self.tabs.get_mut(self.active).and_then(|t| t.sftp.as_mut())
+                        {
+                            panel.dev(&arg["files-".len()..]);
+                        }
+                        None
+                    }
                     "split-right" => Some(Action::SplitRight),
                     "split-down" => Some(Action::SplitDown),
                     "new-bookmark" => Some(Action::NewBookmark { group: None }),
@@ -1367,6 +1375,13 @@ impl TernaryShellApp {
             Action::ToggleSftp => {
                 let last = self.settings.last_local_dir.clone();
                 if let Some(tab) = self.tabs.get_mut(self.active) {
+                    // With Files filling the tab, the shortcut brings the terminal back first.
+                    if tab.show_sftp
+                        && let Some(panel) = tab.sftp.as_mut().filter(|s| s.maximized())
+                    {
+                        panel.set_maximized(false);
+                        return;
+                    }
                     tab.show_sftp = !tab.show_sftp;
                     if tab.show_sftp && tab.sftp.is_none() && tab.state().is_connected() {
                         tab.sftp = Some(tab.new_sftp_panel(last.as_deref()));

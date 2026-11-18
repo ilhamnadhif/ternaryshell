@@ -36,6 +36,7 @@ fn entry_from(
     name: String,
     attrs: &FileAttributes,
     link_target: Option<&FileAttributes>,
+    link_path: Option<String>,
 ) -> FileEntry {
     let is_symlink = attrs.file_type() == FileType::Symlink;
     // A symlink shows (and chmods) what it points to; a broken link has no usable mode.
@@ -52,6 +53,7 @@ fn entry_from(
         },
         modified: attrs.mtime.map(i64::from),
         mode: effective.and_then(|a| a.permissions).map(|p| p & 0o7777),
+        link_target: link_path.filter(|_| is_symlink),
     }
 }
 
@@ -77,17 +79,21 @@ pub async fn list(sftp: &Sftp, path: &str) -> Result<Vec<FileEntry>, String> {
             );
             links.spawn(async move {
                 let _permit = limit.acquire_owned().await;
-                (idx, sftp.metadata(full).await.ok())
+                // What it points to, and where (both answered in one round trip each, side by
+                // side).
+                let (meta, path) = tokio::join!(sftp.metadata(full.clone()), sftp.read_link(full));
+                (idx, meta.ok(), path.ok())
             });
         }
-        raw.push((name, attrs, None));
+        raw.push((name, attrs, None, None));
     }
-    while let Some(Ok((idx, target))) = links.join_next().await {
+    while let Some(Ok((idx, target, path))) = links.join_next().await {
         raw[idx].2 = target;
+        raw[idx].3 = path;
     }
     Ok(raw
         .into_iter()
-        .map(|(name, attrs, target)| entry_from(name, &attrs, target.as_ref()))
+        .map(|(name, attrs, target, path)| entry_from(name, &attrs, target.as_ref(), path))
         .collect())
 }
 

@@ -191,6 +191,13 @@ impl TernaryShellApp {
         if self.tabs.is_empty() {
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(card));
             self.start_page(&mut child);
+        } else if self.tabs[self.active]
+            .sftp
+            .as_ref()
+            .is_some_and(|s| s.editor_open())
+        {
+            // A remote file in the editor fills the canvas, with its own status bar.
+            self.session(ui, card, fill);
         } else {
             let status =
                 egui::Rect::from_min_max(pos2(card.left(), card.bottom() - STATUS_H), card.max);
@@ -243,9 +250,15 @@ impl TernaryShellApp {
             cursor_blink: self.settings.cursor_blink,
         };
         let active = self.active;
+        let files_ident = files_identity(&self.store, &self.tabs[active].bookmark, p.dark);
         let tab = &mut self.tabs[active];
         tab.clear_activity();
         let state = tab.state();
+        // A remote file open in the editor fills the canvas.
+        if let Some(panel) = tab.sftp.as_mut().filter(|s| s.editor_open()) {
+            panel.show_editor(ui, body, &rt, files_ident.3.clone());
+            return;
+        }
         let (has_prompt, checking, was_connected) = {
             let s = tab.conn.shared.lock();
             let checking = s
@@ -254,19 +267,11 @@ impl TernaryShellApp {
             (s.prompt.is_some(), checking, s.connected_at.is_some())
         };
 
-        // Terminal over the optional SFTP panel.
-        let (term_rect, sftp_rect) = if tab.show_sftp {
-            let split_y = (body.top() + body.height() * (1.0 - tab.sftp_split)).round();
-            (
-                egui::Rect::from_min_max(body.min, pos2(body.right(), split_y)),
-                Some(egui::Rect::from_min_max(
-                    pos2(body.left(), split_y),
-                    body.max,
-                )),
-            )
-        } else {
-            (body, None)
-        };
+        // Terminal over the optional Files panel, or one line of it over a panel that fills the
+        // tab.
+        let files_max = tab.sftp.as_ref().is_some_and(|s| s.maximized());
+        let (term_rect, sftp_rect, term_line) =
+            crate::ui::sftp_panel::files_layout(body, tab.show_sftp, files_max, tab.sftp_split);
 
         // A split pane whose shell exited closes by itself; the last pane stays.
         if tab.panes.len() > 1 {
@@ -304,7 +309,11 @@ impl TernaryShellApp {
             self.focus_target = Some(want_focus);
         }
 
-        let (pane_rects, dividers) = tab.layout.arrange(term_rect);
+        let (pane_rects, dividers) = if term_line.is_some() {
+            (Vec::new(), Vec::new())
+        } else {
+            tab.layout.arrange(term_rect)
+        };
         let multi = pane_rects.len() > 1;
         let tab_id = tab.id;
         let mut new_focus = None;
@@ -478,23 +487,36 @@ impl TernaryShellApp {
             }
         }
 
-        if let Some(rect) = sftp_rect {
-            // The panel's top edge: a hairline with a grip, dragged to resize.
-            let div = egui::Rect::from_min_max(
-                pos2(body.left(), rect.top() - 3.0),
-                pos2(body.right(), rect.top() + 3.0),
-            );
-            let resp = ui.interact(div, egui::Id::new(("sftp-divider", tab.id)), Sense::drag());
-            #[cfg(debug_assertions)]
-            crate::devtest::record("sftp-divider", div);
-            if resp.hovered() || resp.dragged() {
-                ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
-            }
-            if resp.dragged()
-                && let Some(pos) = resp.interact_pointer_pos()
+        if let Some(line) = term_line {
+            let shared = tab.focused_pane().map(|p| p.shared.clone());
+            if crate::ui::sftp_panel::terminal_line(ui, line, shared.as_deref(), scheme, fill)
+                && let Some(panel) = tab.sftp.as_mut()
             {
-                tab.sftp_split = (1.0 - (pos.y - body.top()) / body.height()).clamp(0.2, 0.85);
-                ctx.request_repaint();
+                panel.set_maximized(false);
+            }
+        }
+        if let Some(rect) = sftp_rect {
+            // A docked panel's top edge: a hairline with a grip, dragged to resize.
+            let docked = term_line.is_none();
+            let mut edge_active = false;
+            if docked {
+                let div = egui::Rect::from_min_max(
+                    pos2(body.left(), rect.top() - 3.0),
+                    pos2(body.right(), rect.top() + 3.0),
+                );
+                let resp = ui.interact(div, egui::Id::new(("sftp-divider", tab.id)), Sense::drag());
+                #[cfg(debug_assertions)]
+                crate::devtest::record("sftp-divider", div);
+                edge_active = resp.hovered() || resp.dragged();
+                if edge_active {
+                    ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                }
+                if resp.dragged()
+                    && let Some(pos) = resp.interact_pointer_pos()
+                {
+                    tab.sftp_split = (1.0 - (pos.y - body.top()) / body.height()).clamp(0.2, 0.85);
+                    ctx.request_repaint();
+                }
             }
             let last = self.settings.last_local_dir.clone();
             if tab.sftp.is_none() && tab.state().is_connected() {
@@ -504,8 +526,11 @@ impl TernaryShellApp {
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
             match &mut tab.sftp {
                 Some(panel) => {
-                    if let PanelOutput::LocalDir(dir) = panel.show(&mut child, &rt, !modal_open) {
-                        self.settings.last_local_dir = Some(dir);
+                    panel.set_identity(&files_ident.0, files_ident.1, files_ident.2);
+                    match panel.show(&mut child, &rt, !modal_open) {
+                        PanelOutput::LocalDir(dir) => self.settings.last_local_dir = Some(dir),
+                        PanelOutput::Close => tab.show_sftp = false,
+                        PanelOutput::None => {}
                     }
                 }
                 None => {
@@ -517,36 +542,31 @@ impl TernaryShellApp {
                     });
                 }
             }
-            let painter = ui.painter();
-            painter.hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, p.border));
-            let grip = egui::Rect::from_center_size(
-                pos2(rect.center().x, rect.top() + 1.0),
-                vec2(36.0, 4.0),
-            );
-            painter.rect_filled(
-                grip,
-                CornerRadius::same(2),
-                if resp.hovered() || resp.dragged() {
-                    p.accent
-                } else {
-                    style::soft(p.border_strong, 0.7)
-                },
-            );
+            if docked {
+                crate::ui::sftp_panel::paint_panel_edge(ui.painter(), rect, edge_active, &p);
+            }
         }
 
         // Files dragged from Finder with the panel closed: the whole session is the target.
-        let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
-        if hovering && state.is_connected() && sftp_rect.is_none() {
+        let hovered = ctx.input(|i| crate::ui::sftp_panel::hovered_names(&i.raw.hovered_files));
+        if !hovered.is_empty() && state.is_connected() && sftp_rect.is_none() {
             let host = tab.bookmark.display_name();
+            let folder = tab
+                .sftp
+                .as_ref()
+                .map(|s| s.remote_cwd().to_string())
+                .filter(|f| !f.is_empty());
             let painter = ctx.layer_painter(egui::LayerId::new(
                 egui::Order::Foreground,
                 egui::Id::new("drop-overlay"),
             ));
-            kit::drop_zone(
+            crate::ui::sftp_panel::paint_drop_layer(
                 &painter,
-                term_rect.shrink(6.0),
+                term_rect,
                 &p,
-                &tf("to the remote folder on {}", &[&host]),
+                folder.as_deref(),
+                &host,
+                &hovered,
             );
         }
 
@@ -1685,4 +1705,27 @@ fn session_ended_hint(ui: &Ui, pane: egui::Rect, at: egui::Rect, headline: &str)
         painter.galley(pos2(x, y - g.size().y / 2.0), g, p.text_faint);
         x += w + 14.0;
     }
+}
+
+/// What the Files panel and the editor show of the tab's host: its address, icon and label
+/// (colour, and the tag with its colour for the editor's header).
+fn files_identity(
+    store: &crate::bookmarks::BookmarkStore,
+    b: &crate::bookmarks::Bookmark,
+    dark: bool,
+) -> (
+    String,
+    &'static str,
+    Option<crate::bookmarks::LabelColor>,
+    Option<(String, Color32)>,
+) {
+    let label = store.label_of(b);
+    (
+        b.address(),
+        kit::host_icon(b.host_icon()),
+        label.map(|l| l.color),
+        label
+            .filter(|l| !l.tag().is_empty())
+            .map(|l| (l.tag(), style::label_color(l.color, dark))),
+    )
 }
