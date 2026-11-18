@@ -485,7 +485,9 @@ impl Palette {
                     row.bottom() - 0.5,
                     Stroke::new(1.0, p.border),
                 );
-                if !self.focused {
+                // The field keeps the keyboard: Tab switches the scope instead of moving focus.
+                let nothing_focused = ui.memory(|m| m.focused().is_none());
+                if !self.focused || tab || back_tab || (!r.has_focus() && nothing_focused) {
                     r.request_focus();
                     self.focused = true;
                 }
@@ -878,6 +880,8 @@ fn palette_row(
         Color32::TRANSPARENT
     };
     painter.rect_filled(rect, CornerRadius::same(8), row_fill);
+    // The status dot is cut out of the row's own colour.
+    let ring = over(p.sheet, row_fill);
     let tile = egui::Rect::from_min_size(
         pos2(rect.left() + 10.0, rect.center().y - 13.0),
         vec2(26.0, 26.0),
@@ -909,7 +913,7 @@ fn palette_row(
                 kit::host_icon(b.map_or(Default::default(), |b| b.host_icon())),
                 label.map(|l| style::label_color(l.color, dark)),
                 data.live.contains(id).then_some(p.ok),
-                p.sheet,
+                ring,
                 &p,
             );
             let mut job = egui::text::LayoutJob::default();
@@ -995,7 +999,7 @@ fn palette_row(
                 kit::host_icon(b.map_or(Default::default(), |b| b.host_icon())),
                 label.map(|l| style::label_color(l.color, dark)),
                 tab.connected.then_some(p.ok),
-                p.sheet,
+                ring,
                 &p,
             );
             let mut job = egui::text::LayoutJob::default();
@@ -1076,6 +1080,14 @@ fn palette_row(
         );
     }
     resp
+}
+
+/// `top` (maybe translucent) painted over the opaque `base`.
+fn over(base: Color32, top: Color32) -> Color32 {
+    let a = top.a() as f32 / 255.0;
+    let [tr, tg, tb, _] = top.to_srgba_unmultiplied();
+    let mix = |b: u8, t: u8| (b as f32 * (1.0 - a) + t as f32 * a).round() as u8;
+    Color32::from_rgb(mix(base.r(), tr), mix(base.g(), tg), mix(base.b(), tb))
 }
 
 /// The preview of the selected row, in the palette's right column. Returns a row to open when
