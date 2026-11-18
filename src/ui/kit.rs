@@ -61,6 +61,11 @@ pub fn button_kbd(
     small: bool,
     on: bool,
 ) -> Response {
+    // Redesign 3.1: buttons carry no keycaps; shortcuts are shown in menus and tooltips.
+    let keys: Option<&str> = {
+        let _ = keys;
+        None
+    };
     let p = style::pal(ui);
     let size = if small { style::SMALL } else { style::BODY };
     let height = if small {
@@ -735,14 +740,13 @@ pub fn badge(ui: &mut Ui, text: &str, tone: Tone, icon: Option<&str>) -> Respons
         Some(i) => format!("{i} {text}"),
         None => text.to_string(),
     };
+    // Redesign 3.1: a status in words, coloured, with no pill behind it.
     let galley = ui
         .painter()
         .layout_no_wrap(label, style::medium(style::XS), color);
-    let size = vec2(galley.size().x + 14.0, 20.0);
+    let size = vec2(galley.size().x, 20.0);
     let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
     if ui.is_rect_visible(rect) {
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(10), p.tone_soft(tone));
         ui.painter()
             .galley(rect.center() - galley.size() / 2.0, galley, color);
     }
@@ -1077,18 +1081,27 @@ pub fn callout(ui: &mut Ui, icon: &str, tone: Tone, text: &str) {
 /// A callout with custom content.
 pub fn callout_rich(ui: &mut Ui, icon: &str, tone: Tone, add: impl FnOnce(&mut Ui)) {
     let p = style::pal(ui);
+    // Redesign 3.1: information is plain text; only warnings get a faint tint.
+    let boxed = matches!(tone, Tone::Warn | Tone::Err | Tone::Root);
     egui::Frame::NONE
-        .fill(p.tone_soft(tone))
-        .corner_radius(CornerRadius::same(style::RADIUS_MD))
-        .inner_margin(egui::Margin::symmetric(12, 10))
+        .fill(if boxed {
+            style::soft(p.tone(tone), 0.07)
+        } else {
+            Color32::TRANSPARENT
+        })
+        .corner_radius(CornerRadius::same(style::RADIUS))
+        .inner_margin(if boxed {
+            egui::Margin::symmetric(12, 9)
+        } else {
+            egui::Margin::ZERO
+        })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
-                let color = if tone == Tone::Neutral {
-                    p.text_muted
-                } else {
-                    p.tone(tone)
+                let color = match tone {
+                    Tone::Neutral | Tone::Accent | Tone::Info => p.text_faint,
+                    _ => p.tone(tone),
                 };
                 ui.add_space(0.0);
                 icon_label_top(ui, icon, 16.0, color);
@@ -1532,7 +1545,7 @@ pub fn menu_label(ui: &mut Ui, text: &str) {
     ui.add_space(2.0);
     ui.horizontal(|ui| {
         ui.add_space(8.0);
-        ui.label(style::section_label(text, p.text_faint));
+        ui.label(style::section_label(text, p.text_muted));
     });
     ui.add_space(2.0);
 }
@@ -1757,7 +1770,7 @@ pub fn setting_row_rich(
 /// A group of settings: an uppercase label, then a card holding the rows (14 px side padding).
 pub fn setting_group(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
     let p = style::pal(ui);
-    ui.label(style::section_label(title, p.text_faint));
+    ui.label(style::section_label(title, p.text_muted));
     ui.add_space(4.0);
     egui::Frame::NONE
         .fill(p.card)
@@ -1908,20 +1921,19 @@ pub fn paint_host_glyph(
     p: &Palette,
 ) {
     let side = rect.width();
-    let (radius, size) = if side >= 50.0 {
-        (14, 26.0)
+    // Redesign 3.1: a plain icon in the faint text colour; the label colour lives on the group
+    // dot, the tab line, the canvas edge and the status bar instead.
+    let _ = label;
+    let size = if side >= 50.0 {
+        28.0
     } else if side >= 38.0 {
-        (11, 20.0)
+        22.0
     } else if side >= 26.0 {
-        (8, 15.0)
+        17.0
     } else {
-        (6, 12.0)
+        15.0
     };
-    let (fill, color) = match label {
-        Some(c) => (style::soft(c, 0.15), c),
-        None => (p.hover, p.text_faint),
-    };
-    painter.rect_filled(rect, CornerRadius::same(radius), fill);
+    let color = p.text_faint;
     painter.text(
         rect.center(),
         Align2::CENTER_CENTER,

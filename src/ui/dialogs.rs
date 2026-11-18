@@ -1233,7 +1233,7 @@ fn preview(
     }
     match selected {
         Some(Row::ConnectTo(a) | Row::SaveAs(a)) => {
-            ui.label(style::section_label(t("Not saved"), p.text_faint));
+            ui.label(style::section_label(t("Not saved"), p.text_muted));
             if let Some(target) = address {
                 let rows: Vec<(&str, String, Option<Color32>)> = vec![
                     (

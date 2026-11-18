@@ -532,11 +532,10 @@ pub fn icon_font(size: f32) -> FontId {
 }
 
 /// An uppercase section label (`CONNECTIONS`): 11 px semibold, faint, tracked out.
+/// A section label (`Theme`): sentence case, 12 px semibold (Redesign 3.1: no tracked-out
+/// capitals). Callers pass `text_muted`.
 pub fn section_label(text: &str, color: Color32) -> egui::RichText {
-    egui::RichText::new(text.to_uppercase())
-        .font(semibold(XS))
-        .color(color)
-        .extra_letter_spacing(0.66)
+    egui::RichText::new(text).font(semibold(SMALL)).color(color)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -885,7 +884,7 @@ impl egui::Widget for Primary {
 /// A section label in a form (`SERVER`), with room above.
 pub fn section(ui: &mut Ui, title: &str) {
     ui.add_space(4.0);
-    ui.label(section_label(title, pal(ui).text_faint));
+    ui.label(section_label(title, pal(ui).text_muted));
     ui.add_space(2.0);
 }
 

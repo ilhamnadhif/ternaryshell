@@ -875,7 +875,7 @@ pub fn checklist(ui: &mut Ui, items: &[(&'static str, String, bool)]) -> bool {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 6.0;
             ui.spacing_mut().interact_size.y = 17.0;
-            ui.label(style::section_label(t("Things to check"), p.text_faint));
+            ui.label(style::section_label(t("Things to check"), p.text_muted));
             ui.add_space(2.0);
             for (icon, text, link) in items {
                 ui.horizontal_top(|ui| {

@@ -931,7 +931,7 @@ fn available(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 12.0;
-            ui.label(style::section_label(t("What's new"), p.text_faint));
+            ui.label(style::section_label(t("What's new"), p.text_muted));
             release_notes(ui, &release.notes, notes_h);
             callout(ui, sessions);
             if !installable {
