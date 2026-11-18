@@ -23,7 +23,7 @@ use crate::term::core::GridSize;
 use crate::term::scheme::{self, Scheme};
 use crate::ui::actions::Action;
 use crate::ui::dialogs::{
-    self, ConfirmAction, Dialog, DialogResult, ExportDialog, GroupTarget, ImportDialog, Palette,
+    ConfirmAction, Dialog, DialogResult, ExportDialog, GroupTarget, ImportDialog, Palette,
     PaletteResult, SettingsDialog, Toasts,
 };
 use crate::ui::editor::{Editor, EditorResult};
@@ -33,6 +33,7 @@ use crate::ui::menu::{self, AppMenu};
 use crate::ui::sftp_panel::SftpPanel;
 use crate::ui::sidebar::{Live, Sidebar, TreeMove};
 use crate::ui::tabs::{Env, Tab};
+use crate::ui::toasts::{Do as ToastDo, Kind as ToastKind, Toast};
 use crate::ui::{fonts, icons, keys, style, terminal};
 
 /// Settings that need work when they change.
@@ -86,6 +87,8 @@ pub struct TernaryShellApp {
     /// The dialog that was open when ⌘Q asked for confirmation; back if the user cancels.
     dialog_below: Option<Dialog>,
     toasts: Toasts,
+    /// About TernaryShell, while it is open.
+    about: Option<crate::ui::about::About>,
     #[cfg(target_os = "macos")]
     menu: Option<AppMenu>,
     #[cfg(target_os = "macos")]
@@ -175,6 +178,7 @@ fn adhoc_bookmark(target: &str) -> Option<Bookmark> {
 
 mod canvas;
 mod chrome;
+mod confirms;
 
 pub use chrome::{address_with_port, forward_rule};
 
@@ -271,11 +275,13 @@ impl TernaryShellApp {
             dialog: None,
             dialog_below: None,
             toasts,
+            about: None,
             #[cfg(target_os = "macos")]
             menu: Some(menu),
             #[cfg(target_os = "macos")]
             menu_rx: Some(menu_rx),
-            actions: Vec::new(),
+            // Connections an update restarted the app with.
+            actions: confirms::reopen_after_update(),
             cell: (FontChoice::default(), 0.0, vec2(8.0, 16.0)),
             allow_close: false,
             title: String::new(),
@@ -367,6 +373,8 @@ impl TernaryShellApp {
                     .dev
                     .check(false, &format!("{cmd} {arg}: target not found")),
             },
+            // Redesign 3.0 dialogs, toasts, update states and About, for screenshots.
+            "dg" => self.dev_dialogs(ctx, arg),
             "connect" => {
                 if let Some(b) = self
                     .store
@@ -780,49 +788,11 @@ impl TernaryShellApp {
     fn handle_close_request(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.viewport().close_requested())
             && !self.allow_close
-            && let Some(details) = self.quit_warning()
+            && let Some(rows) = self.quit_rows()
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.dialog = Some(dialogs::confirm_details(
-                t("Quit TernaryShell?"),
-                String::new(),
-                details,
-                t("Quit"),
-                ConfirmAction::Quit,
-            ));
+            self.dialog = Some(self.quit_dialog(rows));
         }
-    }
-
-    /// What quitting would interrupt, if the user should be asked first (one line each, with
-    /// its icon). Running file transfers always ask; open sessions only when the setting says so.
-    fn quit_warning(&self) -> Option<Vec<(&'static str, String)>> {
-        let live = self.tabs.iter().filter(|t| t.is_active()).count();
-        let transfers: usize = self.tabs.iter().map(Tab::running_transfers).sum();
-        let mut lines = Vec::new();
-        if live > 0 && (self.settings.confirm_close_connected || transfers > 0) {
-            lines.push((
-                icons::TERMINAL_WINDOW,
-                tf("{} open session(s)", &[&live.to_string()]),
-            ));
-        }
-        if transfers > 0 {
-            lines.push((
-                icons::ARROWS_DOWN_UP,
-                tf(
-                    "{} transfer(s) will be cancelled",
-                    &[&transfers.to_string()],
-                ),
-            ));
-        }
-        for tab in &self.tabs {
-            if let Some(file) = tab.unsaved_file() {
-                lines.push((
-                    icons::PENCIL_SIMPLE,
-                    tf("{} on {} has unsaved changes", &[&file, &tab.title()]),
-                ));
-            }
-        }
-        (!lines.is_empty()).then_some(lines)
     }
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
@@ -975,39 +945,7 @@ impl TernaryShellApp {
             || transfers > 0
             || unsaved.is_some()
         {
-            let mut details = Vec::new();
-            if tab.is_active() {
-                details.push((
-                    icons::TERMINAL,
-                    t("The session is still running").to_string(),
-                ));
-            }
-            if transfers > 0 {
-                details.push((
-                    icons::ARROWS_DOWN_UP,
-                    tf(
-                        "{} transfer(s) will be cancelled",
-                        &[&transfers.to_string()],
-                    ),
-                ));
-            }
-            if let Some(file) = &unsaved {
-                details.push((icons::PENCIL_SIMPLE, tf("{} has unsaved changes", &[file])));
-            }
-            // Only the plain "it's connected" question can be turned off; lost transfers and
-            // edits are always asked about.
-            let ask = if transfers == 0 && unsaved.is_none() {
-                dialogs::confirm_close
-            } else {
-                dialogs::confirm_details
-            };
-            self.dialog = Some(ask(
-                &tf("Close {}?", &[&tab.title()]),
-                String::new(),
-                details,
-                t("Close Tab"),
-                ConfirmAction::CloseTab(tab.id),
-            ));
+            self.dialog = Some(self.close_tab_dialog(tab));
         } else {
             self.close_tab(idx);
         }
@@ -1097,16 +1035,8 @@ impl TernaryShellApp {
                 }
             }
             Action::DeleteBookmark(id) => {
-                if let Some(b) = self.store.bookmark(id) {
-                    self.dialog = Some(dialogs::confirm(
-                        &tf("Delete “{}”?", &[&b.display_name()]),
-                        tf(
-                            "The connection and its saved password are removed from {}. The server isn't touched.",
-                            &[crate::platform::this_computer()],
-                        ),
-                        t("Delete"),
-                        ConfirmAction::DeleteBookmark(id),
-                    ));
+                if let Some(d) = self.delete_bookmark_dialog(id) {
+                    self.dialog = Some(d);
                 }
             }
             Action::Connect(id) => {
@@ -1142,17 +1072,8 @@ impl TernaryShellApp {
                 });
             }
             Action::DeleteGroup(id) => {
-                if let Some(g) = self.store.group(id) {
-                    let count = self.store.bookmarks_in(Some(id)).count();
-                    self.dialog = Some(dialogs::confirm(
-                        &tf("Delete group “{}”?", &[&g.name]),
-                        tf(
-                            "Its {} connection(s) and subgroups move up one level. Nothing else is deleted.",
-                            &[&count.to_string()],
-                        ),
-                        t("Delete Group"),
-                        ConfirmAction::DeleteGroup(id),
-                    ));
+                if let Some(d) = self.delete_group_dialog(id) {
+                    self.dialog = Some(d);
                 }
             }
             Action::QuickConnect => self.palette = Some(Palette::default()),
@@ -1278,23 +1199,7 @@ impl TernaryShellApp {
                     let transfers = tab.running_transfers();
                     if tab.is_active() || transfers > 0 {
                         // Running programs would be cut off: ask first.
-                        let mut details = Vec::new();
-                        if transfers > 0 {
-                            details.push((
-                                icons::ARROWS_DOWN_UP,
-                                tf(
-                                    "{} transfer(s) will be cancelled",
-                                    &[&transfers.to_string()],
-                                ),
-                            ));
-                        }
-                        self.dialog = Some(dialogs::confirm_details(
-                            &tf("Reconnect {}?", &[&tab.title()]),
-                            t("The running sessions are closed and opened again. Scrollback is kept.").to_string(),
-                            details,
-                            t("Reconnect"),
-                            ConfirmAction::Reconnect(tab.id),
-                        ));
+                        self.dialog = Some(self.reconnect_dialog(tab));
                     } else {
                         self.reconnect_tab(ctx, self.active);
                     }
@@ -1436,7 +1341,7 @@ impl TernaryShellApp {
                 let page = self.settings_page.take();
                 self.dialog = Some(Dialog::Settings(SettingsDialog::new(page)));
             }
-            Action::About => {}
+            Action::About => self.about = Some(Default::default()),
             Action::CheckForUpdates => self.updater.check_now(ctx),
             Action::Shortcuts => {
                 self.dialog = Some(Dialog::Settings(SettingsDialog::new(Some(
@@ -1444,26 +1349,24 @@ impl TernaryShellApp {
                 ))))
             }
             Action::Quit => {
-                if matches!(
-                    self.dialog,
-                    Some(Dialog::Confirm {
-                        action: ConfirmAction::Quit,
-                        ..
-                    })
-                ) {
+                // ⌘Q again while "Quit?" is up (not the key repeat that opened it) quits.
+                if let Some(Dialog::Confirm {
+                    action: ConfirmAction::Quit,
+                    shown_at,
+                    ..
+                }) = &self.dialog
+                {
+                    if shown_at.is_some_and(|at| at.elapsed() >= Duration::from_millis(400)) {
+                        self.allow_close = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
                     return;
                 }
-                if let Some(details) = self.quit_warning() {
+                if let Some(rows) = self.quit_rows() {
                     if self.dialog.is_some() {
                         self.dialog_below = self.dialog.take();
                     }
-                    self.dialog = Some(dialogs::confirm_details(
-                        t("Quit TernaryShell?"),
-                        String::new(),
-                        details,
-                        t("Quit"),
-                        ConfirmAction::Quit,
-                    ));
+                    self.dialog = Some(self.quit_dialog(rows));
                 } else {
                     self.allow_close = true;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1543,8 +1446,16 @@ impl TernaryShellApp {
                     .file_name()
                     .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
                 let folder = path.parent().map(paths::contract_tilde);
-                self.toasts
-                    .push(tf("Exported to {}", &[&name]), folder, false, None);
+                let mut toast = Toast::new(ToastKind::Info, tf("Exported to {}", &[&name]))
+                    .icon(icons::EXPORT, None)
+                    .button(
+                        crate::platform::reveal_label(),
+                        ToastDo::Reveal(path.to_path_buf()),
+                    );
+                if let Some(f) = folder {
+                    toast = toast.detail(f);
+                }
+                self.toasts.add(toast);
             }
             Ok(()) => self.toasts.error(tf(
                 "Exported to {}, but the key file of {} could not be read: copy it to the other Mac yourself.",
@@ -1746,6 +1657,22 @@ impl TernaryShellApp {
                     self.apply_import(*plan);
                 }
                 DialogResult::Run(action) => self.actions.push(action),
+                DialogResult::RunAndClose(action) => {
+                    self.dialog = None;
+                    self.dialog_below = None;
+                    self.actions.push(action);
+                }
+            }
+        }
+        if let Some(about) = &mut self.about {
+            let status = self.updater.status(self.settings.last_update_check);
+            match about.show(ctx, status, self.settings.last_update_check) {
+                crate::ui::about::AboutResult::Open => {}
+                crate::ui::about::AboutResult::Close => self.about = None,
+                crate::ui::about::AboutResult::Run(action) => {
+                    self.about = None;
+                    self.actions.push(action);
+                }
             }
         }
         if let Some(action) = self.toasts.show(ctx) {
@@ -1888,6 +1815,7 @@ impl TernaryShellApp {
     fn install_update(&mut self, ctx: &egui::Context) {
         match self.updater.launch_installer() {
             Ok(()) => {
+                self.remember_for_reopen();
                 self.allow_close = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -1945,8 +1873,23 @@ impl TernaryShellApp {
                 ctx.request_repaint_after(wait);
             }
             for error in tab.new_forward_errors() {
-                self.toasts
-                    .error(tf("{}: port forwarding: {}", &[&tab.title(), &error]));
+                #[cfg(debug_assertions)]
+                eprintln!(
+                    "DEVTEST LOG: toast error: {}: port forwarding: {error}",
+                    tab.title()
+                );
+                let mut toast =
+                    Toast::new(ToastKind::Warn, tf("{}: port forwarding", &[&tab.title()]))
+                        .icon(icons::PLUGS, None)
+                        .detail(error)
+                        .sticky();
+                if self.store.bookmark(tab.bookmark.id).is_some() {
+                    toast = toast.button(
+                        t("Edit forwards…"),
+                        ToastDo::Run(Action::EditBookmark(tab.bookmark.id)),
+                    );
+                }
+                self.toasts.add(toast);
             }
         }
     }
@@ -2239,19 +2182,12 @@ impl TernaryShellApp {
             self.toasts.info(text);
         }
         self.overlays(&ctx);
+        let sessions = self.tabs.iter().filter(|t| t.is_active()).count();
         if let crate::ui::update_ui::UpdateEvent::Restart =
-            self.updater.show_dialog(&ctx, &mut self.settings)
+            self.updater.show_dialog(&ctx, &mut self.settings, sessions)
         {
-            match self.quit_warning() {
-                Some(details) => {
-                    self.dialog = Some(dialogs::confirm_details(
-                        t("Restart to update?"),
-                        t("TernaryShell restarts and opens your connections again.").to_string(),
-                        details,
-                        t("Restart"),
-                        ConfirmAction::RestartForUpdate,
-                    ))
-                }
+            match self.quit_rows() {
+                Some(rows) => self.dialog = Some(self.restart_dialog(rows)),
                 None => self.install_update(&ctx),
             }
         }

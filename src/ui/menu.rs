@@ -6,7 +6,7 @@ use std::sync::mpsc;
 
 use eframe::egui;
 use muda::accelerator::{Accelerator, Code, Modifiers};
-use muda::{AboutMetadata, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
+use muda::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 
 use super::actions::Action;
 use crate::bookmarks::transfer::ExportScope;
@@ -36,15 +36,8 @@ impl AppMenu {
         let shift_cmd = CMD | Modifiers::SHIFT;
         let alt_cmd = CMD | Modifiers::ALT;
 
-        let about = PredefinedMenuItem::about(
-            Some(t("About TernaryShell")),
-            Some(AboutMetadata {
-                name: Some("TernaryShell".into()),
-                version: Some(env!("CARGO_PKG_VERSION").into()),
-                comments: Some(t("Lightweight SSH and SFTP client").into()),
-                ..Default::default()
-            }),
-        );
+        // TernaryShell's own About (the same on every system), not the standard panel.
+        let about = item(t("About TernaryShell"), None, Action::About);
         let settings = item(t("Settings…"), acc(CMD, Code::Comma), Action::Settings);
         let updates = item(t("Check for Updates…"), None, Action::CheckForUpdates);
         let quit = item(t("Quit TernaryShell"), acc(CMD, Code::KeyQ), Action::Quit);

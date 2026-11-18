@@ -1790,6 +1790,61 @@ const ID: &[(&str, &str)] = &[
     // ===== end [files] =====
 
     // ===== Redesign 3.0: dialogs, notifications, menus, platform [dialogs] =====
+    (
+        "Built with Rust, egui, alacritty_terminal and russh.",
+        "Dibuat dengan Rust, egui, alacritty_terminal, dan russh.",
+    ),
+    (
+        "Code signature and bundle id",
+        "Tanda tangan kode dan bundle id",
+    ),
+    ("Connection settings and tags", "Pengaturan koneksi dan tag"),
+    (
+        "Connection settings, tags and {} forward(s)",
+        "Pengaturan koneksi, tag, dan {} forward",
+    ),
+    ("Copy version info", "Salin info versi"),
+    ("Each gets a new shell", "Masing-masing mendapat shell baru"),
+    ("License", "Lisensi"),
+    ("No telemetry.", "Tanpa telemetri."),
+    ("Package contents", "Isi paket"),
+    (
+        "Partial files are removed, on the server too.",
+        "File yang belum selesai dihapus, di server juga.",
+    ),
+    (
+        "Pasted key and passphrase in {}",
+        "Key yang ditempel dan passphrase di {}",
+    ),
+    ("Review", "Tinjau"),
+    ("Running `{}`", "Menjalankan `{}`"),
+    ("SHA-256 matches GitHub", "SHA-256 cocok dengan GitHub"),
+    ("Saved passphrase in {}", "Passphrase tersimpan di {}"),
+    ("Saved password in {}", "Password tersimpan di {}"),
+    ("Size matches ({})", "Ukuran cocok ({})"),
+    (
+        "TernaryShell quits, installs the new version and opens again.",
+        "TernaryShell keluar, memasang versi baru, lalu terbuka lagi.",
+    ),
+    (
+        "The server, its files and `~/.ssh` keys",
+        "Server, file-nya, dan key `~/.ssh`",
+    ),
+    ("Top level", "Tingkat teratas"),
+    ("Up to date", "Sudah terbaru"),
+    ("Verified download", "Unduhan terverifikasi"),
+    ("What's new", "Yang baru"),
+    (
+        "are closed; they reconnect after the restart.",
+        "ditutup; tersambung lagi setelah restart.",
+    ),
+    ("checked {}", "dicek {}"),
+    ("keep it open", "tetap buka"),
+    ("not touched", "tidak disentuh"),
+    ("removed", "dihapus"),
+    ("{} d ago", "{} hari lalu"),
+    ("{} panes", "{} pane"),
+    ("{}: port forwarding", "{}: port forwarding"),
     // ===== end [dialogs] =====
 ];
 
