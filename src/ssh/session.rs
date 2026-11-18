@@ -70,6 +70,8 @@ pub struct ConnectSpec {
 #[derive(Debug)]
 pub enum PaneInput {
     Data(Vec<u8>),
+    /// The terminal's own answers to the shell's queries: never held back.
+    Reply(Vec<u8>),
     Resize {
         cols: u32,
         rows: u32,
@@ -1847,6 +1849,11 @@ async fn open_sftp_root(
 
 // ----- shells ---------------------------------------------------------------------------------
 
+/// How long the shell's output must pause before the start folder and startup commands are
+/// typed, and the longest they wait for that.
+const SETUP_QUIET: std::time::Duration = std::time::Duration::from_millis(200);
+const SETUP_MAX: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Shell-quotes a directory for `cd`, keeping a leading `~/` expandable.
 pub fn cd_command(dir: &str) -> String {
     let quote = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
@@ -1924,7 +1931,9 @@ async fn run_shell(handle: Arc<SshHandle>, pane: PaneStart, ctx: Context) {
     let (mut reader, writer) = channel.split();
     let writer: Arc<ChannelWriteHalf<Msg>> = Arc::new(writer);
 
-    // Start folder and startup commands go out before anything typed while connecting.
+    // Start folder and startup commands go out before anything typed while connecting, once
+    // the shell has drawn its prompt (its output paused for SETUP_QUIET, or SETUP_MAX at the
+    // latest): sent earlier, the terminal echoes them above the login banner as well.
     let mut setup = String::new();
     if !start_dir.trim().is_empty() {
         setup.push_str(&format!("{}\r", cd_command(&start_dir)));
@@ -1932,17 +1941,48 @@ async fn run_shell(handle: Arc<SshHandle>, pane: PaneStart, ctx: Context) {
     for line in startup_command.lines().filter(|l| !l.trim().is_empty()) {
         setup.push_str(&format!("{line}\r"));
     }
-    if !setup.is_empty() {
-        let _ = writer.data_bytes(setup.into_bytes()).await;
+    let (setup_tx, setup_rx) = oneshot::channel::<()>();
+    let mut setup_tx = Some(setup_tx);
+    let setup_latest = tokio::time::Instant::now() + SETUP_MAX;
+    let mut setup_due = setup_latest;
+    if setup.is_empty() {
+        let _ = setup_tx.take().map(|tx| tx.send(()));
     }
 
     // Writer: input, resizes and parser replies. Runs separately so a full remote window
-    // never stops output from being read.
+    // never stops output from being read. Typed input waits behind the setup.
     let w = writer.clone();
     let write_task = tokio::spawn(async move {
-        while let Some(input) = input_rx.recv().await {
+        let mut setup_rx = Some(setup_rx);
+        let mut held: Vec<Vec<u8>> = Vec::new();
+        loop {
+            let input = tokio::select! {
+                biased;
+                _ = async { setup_rx.as_mut().expect("guarded").await }, if setup_rx.is_some() => {
+                    setup_rx = None;
+                    if !setup.is_empty() && w.data_bytes(std::mem::take(&mut setup).into_bytes()).await.is_err() {
+                        break;
+                    }
+                    let mut failed = false;
+                    for bytes in held.drain(..) {
+                        failed |= w.data_bytes(bytes).await.is_err();
+                    }
+                    if failed {
+                        break;
+                    }
+                    continue;
+                }
+                input = input_rx.recv() => match input {
+                    Some(input) => input,
+                    None => break,
+                },
+            };
             let r = match input {
-                PaneInput::Data(bytes) => w.data_bytes(bytes).await,
+                PaneInput::Data(bytes) if setup_rx.is_some() => {
+                    held.push(bytes);
+                    Ok(())
+                }
+                PaneInput::Data(bytes) | PaneInput::Reply(bytes) => w.data_bytes(bytes).await,
                 PaneInput::Resize {
                     cols,
                     rows,
@@ -1985,7 +2025,10 @@ async fn run_shell(handle: Arc<SshHandle>, pane: PaneStart, ctx: Context) {
                     }
                     let (reply, repaint) = feeder.lock().feed(&data);
                     if !reply.is_empty() {
-                        let _ = input_tx.send(PaneInput::Data(reply));
+                        let _ = input_tx.send(PaneInput::Reply(reply));
+                    }
+                    if setup_tx.is_some() {
+                        setup_due = (tokio::time::Instant::now() + SETUP_QUIET).min(setup_latest);
                     }
                     if repaint {
                         ctx.request_repaint();
@@ -2002,9 +2045,12 @@ async fn run_shell(handle: Arc<SshHandle>, pane: PaneStart, ctx: Context) {
             _ = sleep => {
                 let reply = feeder.lock().flush_sync();
                 if !reply.is_empty() {
-                    let _ = input_tx.send(PaneInput::Data(reply));
+                    let _ = input_tx.send(PaneInput::Reply(reply));
                 }
                 ctx.request_repaint();
+            }
+            _ = tokio::time::sleep_until(setup_due), if setup_tx.is_some() => {
+                let _ = setup_tx.take().map(|tx| tx.send(()));
             }
         }
     }
