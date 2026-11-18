@@ -206,7 +206,7 @@ impl Tab {
             focused: pane_id,
             sftp: None,
             show_sftp: false,
-            sftp_split: 0.45,
+            sftp_split: 0.68,
             prompt: PromptInput::default(),
             input_watch: None,
             forward_errors_seen: Vec::new(),

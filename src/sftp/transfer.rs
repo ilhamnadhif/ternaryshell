@@ -100,6 +100,11 @@ impl Transfer {
         self.cancel.load(Ordering::Relaxed)
     }
 
+    /// When it finished (done, failed or cancelled).
+    pub fn finished_at(&self) -> Option<Instant> {
+        *self.finished.lock()
+    }
+
     pub fn state(&self) -> TransferState {
         self.state.lock().clone()
     }

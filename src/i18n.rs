@@ -1762,6 +1762,39 @@ const ID: &[(&str, &str)] = &[
     // ===== end [editor] =====
 
     // ===== Redesign 3.0: Files and the remote editor [files] =====
+    ("Back to Files", "Kembali ke Files"),
+    ("Browsing as root (sudo)", "Menjelajah sebagai root (sudo)"),
+    ("Download to {}", "Unduh ke {}"),
+    ("Files", "Files"),
+    ("Fill the tab", "Penuhi tab"),
+    (
+        "New size and date first, the one on {} after the arrow.",
+        "Ukuran dan tanggal baru di depan, yang ada di {} setelah panah.",
+    ),
+    ("Show terminal", "Tampilkan terminal"),
+    (
+        "The name is selected without its extension.",
+        "Nama dipilih tanpa ekstensinya.",
+    ),
+    (
+        "You'll get a notification when it's done.",
+        "Anda akan mendapat notifikasi saat selesai.",
+    ),
+    ("click to type a path", "klik untuk mengetik path"),
+    ("just now", "baru saja"),
+    (
+        "sudo on {} needs a password.",
+        "sudo di {} memerlukan password.",
+    ),
+    ("the terminal stays as {}", "terminal tetap sebagai {}"),
+    ("to {}", "ke {}"),
+    ("today", "hari ini"),
+    ("try Root", "coba Root"),
+    ("{} h {} min", "{} jam {} menit"),
+    ("{} min", "{} menit"),
+    ("{} of {}", "{} dari {}"),
+    ("{} on {}", "{} di {}"),
+    ("{} s", "{} detik"),
     // ===== end [files] =====
 
     // ===== Redesign 3.0: dialogs, notifications, menus, platform [dialogs] =====
