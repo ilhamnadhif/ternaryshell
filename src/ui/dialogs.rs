@@ -1034,12 +1034,9 @@ fn preview(
                 .collect();
             rows.push((t("Forwards"), ports.join(", "), None));
         }
-        let mut tags: Vec<String> = Vec::new();
-        if let Some(l) = store.label_of(b).filter(|l| !l.tag().is_empty()) {
-            tags.push(l.tag());
-        }
-        tags.extend(b.tags.iter().take(4).cloned());
-        if !tags.is_empty() {
+        // Only the connection's own tags: its label shows as its group.
+        if !b.tags.is_empty() {
+            let tags: Vec<&str> = b.tags.iter().take(4).map(String::as_str).collect();
             rows.push((t("Tags"), tags.join(", "), None));
         }
         let open = data.open.get(&b.id).copied().filter(|n| *n > 0).map(|n| {
