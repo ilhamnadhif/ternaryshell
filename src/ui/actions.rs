@@ -18,6 +18,11 @@ pub enum Action {
         parent: Option<Uuid>,
     },
     RenameGroup(Uuid),
+    /// Sets a connection's own environment label (`None` inherits its group's).
+    SetBookmarkLabel {
+        id: Uuid,
+        label: Option<crate::bookmarks::Label>,
+    },
     DeleteGroup(Uuid),
     QuickConnect,
     /// Opens the connection editor for an address typed in the palette.
@@ -68,6 +73,8 @@ pub enum Action {
     SendQuickCommand(Uuid),
     /// The n-th quick command (⌃1–⌃9).
     SendQuickCommandAt(usize),
+    /// Saves text selected in the terminal as a new quick command (pasted, not run).
+    SaveQuickCommand(String),
     // import / export
     Import,
     ImportSshConfig,

@@ -159,11 +159,13 @@ impl TernaryShellApp {
         self.conn_steps.retain(|id, _| ids.contains(id));
     }
 
-    /// The canvas card: its fill and ring, the session or the Start page, the status strip.
+    /// The canvas card: its fill and ring, the session or the Start page, the status strip,
+    /// and a 2 px line in the session's environment label colour along its top edge.
     pub(super) fn canvas(&mut self, ui: &mut Ui) {
         let p = style::pal(ui);
         let dark = ui.visuals().dark_mode;
         let card = ui.max_rect();
+        let radius = CornerRadius::same(super::chrome::CANVAS_R);
         let fill = if self.tabs.is_empty() {
             p.canvas
         } else {
@@ -174,13 +176,11 @@ impl TernaryShellApp {
                 offset: [0, 1],
                 blur: 3,
                 spread: 0,
-                color: Color32::from_black_alpha(13),
+                color: Color32::from_black_alpha(10),
             };
-            ui.painter()
-                .add(shadow.as_shape(card, CornerRadius::same(style::RADIUS_LG)));
+            ui.painter().add(shadow.as_shape(card, radius));
         }
-        ui.painter()
-            .rect_filled(card, CornerRadius::same(style::RADIUS_LG), fill);
+        ui.painter().rect_filled(card, radius, fill);
         if self.tabs.is_empty() {
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(card));
             self.start_page(&mut child);
@@ -190,14 +190,29 @@ impl TernaryShellApp {
             let body = egui::Rect::from_min_max(card.min, pos2(card.right(), status.top()));
             self.session(ui, body, fill);
             self.status_strip(ui, status, fill);
+            if let Some(tab) = self.tabs.get(self.active) {
+                let saved = self
+                    .store
+                    .bookmark(tab.bookmark.id)
+                    .unwrap_or(&tab.bookmark);
+                if let Some(l) = self.store.label_of(saved) {
+                    let edge =
+                        egui::Rect::from_min_max(card.min, pos2(card.right(), card.top() + 2.0));
+                    ui.painter().rect_filled(
+                        edge,
+                        0.0,
+                        style::label_color(l.color, dark).gamma_multiply(0.9),
+                    );
+                }
+            }
         }
         let painter = ui.painter();
-        kit::round_corners(painter, card, style::RADIUS_LG as f32, p.chrome);
+        kit::round_corners(painter, card, super::chrome::CANVAS_R as f32, p.chrome);
         painter.rect_stroke(
             card,
-            CornerRadius::same(style::RADIUS_LG),
+            radius,
             Stroke::new(1.0, p.card_ring),
-            StrokeKind::Inside,
+            StrokeKind::Outside,
         );
     }
 
@@ -327,6 +342,9 @@ impl TernaryShellApp {
             if resp.reconnect {
                 self.actions.push(Action::RestartPane(pane_id));
             }
+            if let Some(action) = resp.action {
+                self.actions.push(action);
+            }
             // An ended shell: why, and what Enter / ⌘R do, under its last output (a dropped
             // connection has its own bar instead).
             if !alive
@@ -352,9 +370,10 @@ impl TernaryShellApp {
             }
             // The panes that don't have the keyboard are dimmed.
             if multi && !focused_pane {
-                ui.painter().rect_filled(rect, 0.0, style::soft(fill, 0.42));
+                ui.painter().rect_filled(rect, 0.0, style::soft(fill, 0.38));
             }
-            if multi && !modal_open {
+            // A pane's × shows while the pointer is over the pane.
+            if multi && !modal_open && ui.rect_contains_pointer(rect) {
                 let close_rect = egui::Rect::from_min_size(
                     pos2(rect.right() - 8.0 - 22.0, rect.top() + 8.0),
                     vec2(22.0, 22.0),

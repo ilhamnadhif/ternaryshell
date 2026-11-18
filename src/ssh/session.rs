@@ -1382,6 +1382,7 @@ async fn run_connection(
         ),
     };
     set_state(&shared, &ctx, ConnState::Connected);
+    measure_latency(&handle, &shared, &ctx, spec.keepalive_secs, &flags.cancel);
     if !spec.bookmark.forwards.is_empty() {
         super::forward::start(
             handle.clone(),
@@ -1547,6 +1548,53 @@ fn probe(
             let _ = lost.send(reason);
         }
         ctx.request_repaint();
+    });
+}
+
+/// Measures the round trip to the server for the status bar: a ping right after connecting,
+/// then one per keepalive interval (none when keepalives are off). Only a change of the shown
+/// value repaints, so an idle window stays idle.
+fn measure_latency(
+    handle: &Arc<SshHandle>,
+    shared: &Arc<Mutex<ConnShared>>,
+    ctx: &Context,
+    keepalive_secs: u64,
+    cancel: &CancellationToken,
+) {
+    let (handle, shared, ctx, cancel) =
+        (handle.clone(), shared.clone(), ctx.clone(), cancel.clone());
+    tokio::spawn(async move {
+        let mut samples: Vec<Duration> = Vec::with_capacity(3);
+        loop {
+            let start = Instant::now();
+            let ping = tokio::time::timeout(Duration::from_secs(10), handle.send_ping());
+            let ok = tokio::select! {
+                r = ping => matches!(r, Ok(Ok(()))),
+                _ = cancel.cancelled() => return,
+            };
+            if ok {
+                if samples.len() == 3 {
+                    samples.remove(0);
+                }
+                samples.push(start.elapsed());
+                let avg = samples.iter().sum::<Duration>() / samples.len() as u32;
+                let mut s = shared.lock();
+                let changed = s.latency.map(|l| l.as_millis()) != Some(avg.as_millis());
+                s.latency = Some(avg);
+                drop(s);
+                if changed {
+                    ctx.request_repaint();
+                }
+            }
+            if keepalive_secs == 0 {
+                return;
+            }
+            let wait = Duration::from_secs(keepalive_secs.clamp(10, 60));
+            tokio::select! {
+                _ = tokio::time::sleep(wait) => {}
+                _ = cancel.cancelled() => return,
+            }
+        }
     });
 }
 

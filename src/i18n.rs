@@ -1750,6 +1750,31 @@ const ID: &[(&str, &str)] = &[
     // ===== end [foundation] =====
 
     // ===== Redesign 3.0: main window, sidebar, Home [main] =====
+    ("Files", "Files"),
+    ("Files Panel", "Panel Files"),
+    ("runs at once", "langsung jalan"),
+    ("pasted first", "ditempel dulu"),
+    ("Label", "Label"),
+    ("Inherit from {}", "Ikuti {}"),
+    ("No Label", "Tanpa Label"),
+    ("Red", "Merah"),
+    ("Orange", "Oranye"),
+    ("Yellow", "Kuning"),
+    ("Green", "Hijau"),
+    ("Teal", "Toska"),
+    ("Blue", "Biru"),
+    ("Violet", "Ungu"),
+    ("Pink", "Merah muda"),
+    ("Grey", "Abu-abu"),
+    ("Save as Quick Command…", "Simpan sebagai Quick Command…"),
+    ("Round trip to the server", "Waktu bolak-balik ke server"),
+    ("{} · {} failing", "{} · {} gagal"),
+    ("{}% · {} files", "{}% · {} file"),
+    (
+        "The server forwards its port {} here",
+        "Server meneruskan port {} miliknya ke sini",
+    ),
+    ("root (sudo) in Files", "root (sudo) di Files"),
     // ===== end [main] =====
 
     // ===== Redesign 3.0: sidebar and Home [sidebar] =====

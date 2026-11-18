@@ -181,7 +181,7 @@ pub use chrome::{address_with_port, forward_rule};
 /// Height of the title row (traffic lights, tabs, the session toolbar).
 const TITLE_H: f32 = 44.0;
 /// Height of the status strip along the bottom of the canvas card.
-const STATUS_H: f32 = 26.0;
+const STATUS_H: f32 = 28.0;
 
 impl TernaryShellApp {
     /// `targets` are command-line arguments: bookmark names or `user@host[:port]`.
@@ -1189,6 +1189,24 @@ impl TernaryShellApp {
                 }
             }
             Action::ToggleTheme => self.toggle_theme(ctx),
+            Action::SetBookmarkLabel { id, label } => {
+                if let Some(b) = self.store.bookmark_mut(id) {
+                    b.label = label;
+                    self.save_store();
+                }
+            }
+            Action::SaveQuickCommand(text) => {
+                let command = text.trim_end_matches(['\r', '\n']).to_string();
+                if !command.trim().is_empty() {
+                    let first = command.lines().next().unwrap_or_default().trim();
+                    let name: String = first.chars().take(32).collect();
+                    let mut qc = crate::settings::QuickCommand::new(&name, &command);
+                    qc.run = false;
+                    self.settings.quick_commands.push(qc);
+                    self.settings_page = Some(crate::ui::dialogs::SettingsTab::QuickCommands);
+                    self.run_action(ctx, Action::Settings);
+                }
+            }
             Action::SendQuickCommandAt(i) => {
                 if let Some(qc) = self.settings.quick_commands.get(i) {
                     let id = qc.id;

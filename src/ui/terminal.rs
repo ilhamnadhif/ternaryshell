@@ -105,6 +105,8 @@ pub struct TermResponse {
     pub split: Option<super::layout::SplitDir>,
     /// Where the cursor's cell is, when it is on screen (an ended session's hint goes there).
     pub cursor_cell: Option<Rect>,
+    /// A command chosen in the pane's menu (text size, save as quick command).
+    pub action: Option<super::actions::Action>,
 }
 
 pub fn cell_size(ctx: &egui::Context, font_size: f32) -> Vec2 {
@@ -1210,8 +1212,34 @@ pub fn show(
             ui.memory_mut(|m| m.request_focus(id));
             ui.close();
         }
-        if kit::menu_item(ui, Some(icons::LIST), crate::i18n::t("Select All"), None).clicked() {
+        let select_all_key = cfg!(target_os = "macos").then_some("⌘A");
+        if kit::menu_item(
+            ui,
+            Some(icons::SELECTION_ALL),
+            crate::i18n::t("Select All"),
+            select_all_key,
+        )
+        .clicked()
+        {
             select_all(shared);
+            ui.close();
+        }
+        kit::menu_sep(ui);
+        if ui
+            .add_enabled_ui(has_sel, |ui| {
+                kit::menu_item(
+                    ui,
+                    Some(icons::CLIPBOARD_TEXT),
+                    crate::i18n::t("Save as Quick Command…"),
+                    None,
+                )
+            })
+            .inner
+            .clicked()
+        {
+            if let Some(text) = shared.term.lock().selection_to_string() {
+                out.action = Some(super::actions::Action::SaveQuickCommand(text));
+            }
             ui.close();
         }
         kit::menu_sep(ui);
@@ -1238,6 +1266,23 @@ pub fn show(
             ui.close();
         }
         kit::menu_sep(ui);
+        for (label, sc, action) in [
+            (
+                crate::i18n::t("Bigger Text"),
+                S::Bigger,
+                super::actions::Action::FontBigger,
+            ),
+            (
+                crate::i18n::t("Smaller Text"),
+                S::Smaller,
+                super::actions::Action::FontSmaller,
+            ),
+        ] {
+            if kit::menu_item(ui, Some(icons::TEXT_AA), label, Some(&sc.label())).clicked() {
+                out.action = Some(action);
+                ui.close();
+            }
+        }
         if kit::menu_item(
             ui,
             Some(icons::BROOM),

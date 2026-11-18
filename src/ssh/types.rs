@@ -153,6 +153,8 @@ pub struct ConnShared {
     pub via: Option<String>,
     /// The connection's port forwards and how they are doing.
     pub forwards: Vec<ForwardStatus>,
+    /// Round trip to the server (a keepalive with a reply), averaged over the last few.
+    pub latency: Option<std::time::Duration>,
 }
 
 #[derive(Clone, Debug)]
@@ -173,6 +175,7 @@ impl Default for ConnShared {
             checking_since: None,
             via: None,
             forwards: Vec::new(),
+            latency: None,
         }
     }
 }
