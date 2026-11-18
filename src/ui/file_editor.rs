@@ -1224,9 +1224,12 @@ fn save_width(ui: &Ui, label: &str) -> f32 {
 }
 
 /// Which lines differ from the saved text: 1 changed, 2 added (0 unchanged). The lines that
-/// match at the start and at the end are unchanged; in between, as many as were there are
-/// changed and the rest added — cheap, and right for the usual edit of a config.
+/// match at the start and at the end are skipped; the lines in between are compared with a
+/// longest-common-subsequence diff, so two edits far apart mark two lines, not everything
+/// between them. In each run of differing lines, as many as were removed count as changed and
+/// the rest as added. A very large middle (beyond `LCS_CELLS`) is marked as a whole instead.
 fn line_marks(text: &str, saved: &str) -> Vec<u8> {
+    const LCS_CELLS: usize = 1_000_000;
     let new: Vec<&str> = text.split('\n').collect();
     let old: Vec<&str> = saved.split('\n').collect();
     let prefix = new.iter().zip(&old).take_while(|(a, b)| a == b).count();
@@ -1239,11 +1242,51 @@ fn line_marks(text: &str, saved: &str) -> Vec<u8> {
         .take_while(|(a, b)| a == b)
         .count();
     let mut marks = vec![0u8; new.len()];
-    let new_mid = new.len() - prefix - suffix;
-    let old_mid = old.len() - prefix - suffix;
-    for (i, m) in marks[prefix..prefix + new_mid].iter_mut().enumerate() {
-        *m = if i < old_mid { 1 } else { 2 };
+    let nm = &new[prefix..new.len() - suffix];
+    let om = &old[prefix..old.len() - suffix];
+    let (n, m) = (nm.len(), om.len());
+    // One run of differing lines: `added` new lines against `removed` old ones.
+    let mut mark_run = |start: usize, added: usize, removed: usize| {
+        for k in 0..added {
+            marks[prefix + start + k] = if k < removed { 1 } else { 2 };
+        }
+    };
+    if n == 0 {
+        return marks;
     }
+    if m == 0 || (n + 1) * (m + 1) > LCS_CELLS {
+        mark_run(0, n, m);
+        return marks;
+    }
+    // lcs[i][j]: the longest common subsequence of nm[i..] and om[j..].
+    let w = m + 1;
+    let mut lcs = vec![0u32; (n + 1) * w];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            lcs[i * w + j] = if nm[i] == om[j] {
+                lcs[(i + 1) * w + j + 1] + 1
+            } else {
+                lcs[(i + 1) * w + j].max(lcs[i * w + j + 1])
+            };
+        }
+    }
+    let (mut i, mut j) = (0, 0);
+    let (mut run_start, mut removed) = (0, 0);
+    while i < n && j < m {
+        if nm[i] == om[j] {
+            mark_run(run_start, i - run_start, removed);
+            i += 1;
+            j += 1;
+            run_start = i;
+            removed = 0;
+        } else if lcs[(i + 1) * w + j] >= lcs[i * w + j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+            removed += 1;
+        }
+    }
+    mark_run(run_start, n - run_start, removed + (m - j));
     marks
 }
 
@@ -1521,4 +1564,31 @@ fn find_comment(line: &str) -> Option<usize> {
         prev = c;
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::line_marks;
+
+    #[test]
+    fn marks_only_the_lines_that_changed() {
+        let saved = "a\nb\nc\nd\ne\nf";
+        assert_eq!(line_marks(saved, saved), vec![0; 6]);
+        // Two edits far apart: two lines, not everything between them.
+        assert_eq!(
+            line_marks("a\nB\nc\nd\nE\nf", saved),
+            vec![0, 1, 0, 0, 1, 0]
+        );
+        // An added line in the middle.
+        assert_eq!(
+            line_marks("a\nb\nx\nc\nd\ne\nf", saved),
+            vec![0, 0, 2, 0, 0, 0, 0]
+        );
+        // A removed line marks nothing that is left, a replaced pair plus one more.
+        assert_eq!(line_marks("a\nb\nd\ne\nf", saved), vec![0; 5]);
+        assert_eq!(
+            line_marks("a\nX\nY\nZ\nd\ne\nf", saved),
+            vec![0, 1, 1, 2, 0, 0, 0]
+        );
+    }
 }

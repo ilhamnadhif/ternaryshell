@@ -1771,6 +1771,7 @@ const ID: &[(&str, &str)] = &[
     ("Round trip to the server", "Waktu bolak-balik ke server"),
     ("{} · {} failing", "{} · {} gagal"),
     ("{}% · {} files", "{}% · {} file"),
+    ("{}% · 1 file", "{}% · 1 file"),
     (
         "The server forwards its port {} here",
         "Server meneruskan port {} miliknya ke sini",

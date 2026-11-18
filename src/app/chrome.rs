@@ -1198,13 +1198,12 @@ impl TernaryShellApp {
             }
             if let Some(pr) = &progress {
                 let files = pr.files_total.max(1);
-                let text = tf(
-                    "{}% · {} files",
-                    &[
-                        &((pr.fraction() * 100.0).floor() as u32).to_string(),
-                        &files.to_string(),
-                    ],
-                );
+                let pct = ((pr.fraction() * 100.0).floor() as u32).to_string();
+                let text = if files == 1 {
+                    tf("{}% · 1 file", &[&pct])
+                } else {
+                    tf("{}% · {} files", &[&pct, &files.to_string()])
+                };
                 let r = status_seg(
                     ui,
                     SegLead::Ring(pr.fraction()),
