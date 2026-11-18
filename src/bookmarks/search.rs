@@ -59,12 +59,13 @@ fn boundary_bonus(t: &[char], i: usize) -> i32 {
 }
 
 /// Best score of one search term against a bookmark's fields; the name counts most.
-fn term_score(term: &str, b: &Bookmark, group_path: &str) -> Option<i32> {
-    let fields: [(&str, i32); 4] = [
+fn term_score(term: &str, b: &Bookmark, group_path: &str, label: &str) -> Option<i32> {
+    let fields: [(&str, i32); 5] = [
         (&b.name, 3),
         (&b.host, 2),
         (&b.username, 1),
         (group_path, 1),
+        (label, 1),
     ];
     let mut best: Option<i32> = None;
     for (text, weight) in fields {
@@ -111,6 +112,40 @@ pub fn match_positions(query: &str, text: &str) -> Vec<usize> {
     out
 }
 
+/// Why a bookmark matched `query`, for the right side of its row in the results: its address
+/// when the name or the address matched, `#tag` when a tag did, otherwise its group. With the
+/// characters (by index) the query matched there.
+pub fn match_reason(query: &str, b: &Bookmark, group_path: &str) -> (String, Vec<usize>) {
+    let terms: Vec<&str> = query.split_whitespace().collect();
+    let address = b.address();
+    let name = b.display_name();
+    if terms.iter().all(|t| fuzzy_score(t, &name).is_some()) {
+        return (address, Vec::new());
+    }
+    // A term that only a tag explains: show that tag.
+    for tag in &b.tags {
+        let explains = terms.iter().any(|t| {
+            fuzzy_score(t, tag).is_some()
+                && fuzzy_score(t, &name).is_none()
+                && fuzzy_score(t, &address).is_none()
+        });
+        if explains {
+            let hits = match_positions(query, tag)
+                .into_iter()
+                .map(|i| i + 1)
+                .collect();
+            return (format!("#{tag}"), hits);
+        }
+    }
+    if terms.iter().any(|t| fuzzy_score(t, &address).is_some()) {
+        return (address.clone(), match_positions(query, &address));
+    }
+    if !group_path.is_empty() {
+        return (group_path.to_string(), match_positions(query, group_path));
+    }
+    (address, Vec::new())
+}
+
 /// Bookmarks matching every whitespace-separated term in `query`, best first. An empty query
 /// returns all bookmarks in store order.
 pub fn search(store: &BookmarkStore, query: &str) -> Vec<Uuid> {
@@ -121,10 +156,11 @@ pub fn search(store: &BookmarkStore, query: &str) -> Vec<Uuid> {
     let mut hits: Vec<(i32, usize, Uuid)> = Vec::new();
     for (idx, b) in store.bookmarks.iter().enumerate() {
         let path = store.group_path(b.group);
+        let label = store.label_of(b).map(|l| l.tag()).unwrap_or_default();
         let mut total = 0;
         let mut all = true;
         for term in &terms {
-            match term_score(term, b, &path) {
+            match term_score(term, b, &path, &label) {
                 Some(s) => total += s,
                 None => {
                     all = false;
@@ -179,5 +215,13 @@ mod tests {
         assert_eq!(names("web")[0], "web 1");
         assert_eq!(names("").len(), 3);
         assert!(names("nomatch").is_empty());
+
+        let web = s.bookmark(search(&s, "web 1")[0]).unwrap().clone();
+        assert_eq!(match_reason("web", &web, "Production").0, web.address());
+        assert_eq!(
+            match_reason("ngi", &web, "Production"),
+            ("#nginx".into(), vec![1, 2, 3])
+        );
+        assert_eq!(match_reason("10.0", &web, "Production").0, "10.0.0.1");
     }
 }

@@ -14,6 +14,18 @@ pub enum Action {
     DuplicateBookmark(Uuid),
     DeleteBookmark(Uuid),
     Connect(Uuid),
+    /// Connects and opens the Files panel in the new tab (⇧↩ in the sidebar, Files on Home).
+    OpenFiles(Uuid),
+    /// Sets or clears a group's environment label.
+    SetGroupLabel {
+        id: Uuid,
+        label: Option<crate::bookmarks::Label>,
+    },
+    /// Sets a connection's own label, or (`None`) lets it inherit its group's.
+    SetBookmarkLabel {
+        id: Uuid,
+        label: Option<crate::bookmarks::Label>,
+    },
     NewGroup {
         parent: Option<Uuid>,
     },
