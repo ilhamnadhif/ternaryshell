@@ -126,8 +126,6 @@ pub struct TernaryShellApp {
     editor_section: Option<crate::ui::editor::Section>,
     /// The window is full screen (no room for the traffic lights).
     fullscreen: bool,
-    /// Hosts in ~/.ssh/config, counted once for the welcome page.
-    ssh_config_hosts: Option<usize>,
     /// Home's state (hosts of ~/.ssh/config not imported yet).
     home: home::HomeState,
     /// The steps each connection went through, for its progress card.
@@ -304,7 +302,6 @@ impl TernaryShellApp {
             settings_page: None,
             editor_section: None,
             fullscreen: false,
-            ssh_config_hosts: None,
             home: Default::default(),
             conn_steps: HashMap::new(),
             #[cfg(target_os = "macos")]

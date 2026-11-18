@@ -1853,6 +1853,27 @@ const ID: &[(&str, &str)] = &[
     ("Import & export", "Impor & ekspor"),
     ("label text", "teks label"),
     ("Last", "Terakhir"),
+    ("No connections yet.", "Belum ada koneksi."),
+    ("Add your first server", "Tambahkan server pertama Anda"),
+    (
+        "Connections you add show up in the sidebar. Passwords and keys are kept in {}.",
+        "Koneksi yang Anda tambahkan muncul di sidebar. Password dan key disimpan di {}.",
+    ),
+    (
+        "Import ~/.ssh/config ({} hosts)",
+        "Impor ~/.ssh/config ({} host)",
+    ),
+    ("Import a File…", "Impor File…"),
+    ("Search or type", "Cari atau ketik"),
+    ("Import…", "Impor…"),
+    (
+        "{} in ~/.ssh/config isn't in TernaryShell yet.",
+        "{} di ~/.ssh/config belum ada di TernaryShell.",
+    ),
+    (
+        "{} hosts in ~/.ssh/config aren't in TernaryShell yet.",
+        "{} host di ~/.ssh/config belum ada di TernaryShell.",
+    ),
     // ===== end [sidebar] =====
 
     // ===== Redesign 3.0: connecting, prompts, command palette [connect] =====

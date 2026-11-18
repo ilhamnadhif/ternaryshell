@@ -500,7 +500,8 @@ impl Sidebar {
     fn filter_field(&mut self, ui: &mut Ui, rect: Rect, count: Option<usize>) -> egui::Response {
         let p = style::pal(ui);
         let id = egui::Id::new("sidebar-search");
-        let keys = cfg!(target_os = "macos").then_some("⌘F");
+        // Redesign 3.1: no keycap in the field; ⌘F is in the menu.
+        let keys: Option<&str> = None;
         let right_w = if self.search.is_empty() {
             keys.map_or(0.0, |k| key_width(ui.painter(), k) + 6.0)
         } else {
@@ -541,7 +542,7 @@ impl Sidebar {
                         }))
                         .font(style::regular(style::BODY))
                         .hint_text(
-                            egui::RichText::new(t("Filter hosts"))
+                            egui::RichText::new(t("Filter"))
                                 .font(style::regular(style::BODY))
                                 .color(p.text_faint),
                         )
@@ -697,35 +698,6 @@ impl Sidebar {
                 self.host_row(ui, cx, hit.id, 0, Some(hit), i == self.search_index);
                 i += 1;
             }
-        }
-        if hits.count > 0 {
-            ui.add_space(14.0);
-            ui.horizontal(|ui| {
-                ui.add_space(10.0);
-                ui.spacing_mut().item_spacing.x = 6.0;
-                let hint = |ui: &mut Ui, keys: &[&str], text: &str| {
-                    for k in keys {
-                        let w = key_width(ui.painter(), k);
-                        let (r, _) = ui.allocate_exact_size(vec2(w, 18.0), Sense::hover());
-                        paint_key(ui.painter(), r.left_center(), k, &p, false);
-                    }
-                    ui.label(
-                        egui::RichText::new(text)
-                            .font(style::regular(style::SMALL))
-                            .color(p.text_faint),
-                    );
-                };
-                ui.spacing_mut().item_spacing.x = 3.0;
-                hint(ui, &["↑", "↓"], "");
-                ui.spacing_mut().item_spacing.x = 6.0;
-                ui.label(
-                    egui::RichText::new(t("select"))
-                        .font(style::regular(style::SMALL))
-                        .color(p.text_faint),
-                );
-                hint(ui, &["↩"], t("connect"));
-                hint(ui, &["⇧↩"], t("files"));
-            });
         }
         self.hits = Some(hits);
     }
@@ -1739,39 +1711,17 @@ impl Sidebar {
     }
 
     /// No connections: a tile, a title and what will appear here.
+    /// No connections yet: one quiet line (Redesign 3.1); the canvas explains what to do.
     fn empty_state(&mut self, ui: &mut Ui) {
         let p = style::pal(ui);
         let area = ui.available_rect_before_wrap();
-        let cx = area.center().x;
-        let mut y = area.top() + 60.0;
-        let painter = ui.painter();
-        let tile = Rect::from_center_size(pos2(cx, y + 16.0), vec2(32.0, 32.0));
-        painter.rect_filled(tile, CornerRadius::same(9), p.hover);
-        painter.text(
-            tile.center(),
-            Align2::CENTER_CENTER,
-            icons::HARD_DRIVES,
-            style::icon_font(17.0),
-            p.text_muted,
-        );
-        y += 32.0 + 8.0 + 4.0;
-        painter.text(
-            pos2(cx, y),
-            Align2::CENTER_TOP,
-            t("No connections yet"),
-            style::semibold(style::BODY),
-            p.text,
-        );
-        y += 18.0 + 8.0;
-        let mut job = egui::text::LayoutJob::simple(
-            t("Servers you add show up here, grouped the way you like.").to_string(),
-            style::regular(style::SMALL),
+        ui.painter().text(
+            pos2(area.left() + 14.0, area.top() + 18.0),
+            Align2::LEFT_TOP,
+            t("No connections yet."),
+            style::regular(12.5),
             p.text_faint,
-            area.width() - 36.0,
         );
-        job.halign = egui::Align::Center;
-        let g = painter.layout_job(job);
-        painter.galley(pos2(cx, y), g, p.text_faint);
     }
 
     /// The hover card of the connection under the pointer (after a moment), kept open while
@@ -1825,7 +1775,6 @@ impl Sidebar {
     fn hover_card(&self, ctx: &egui::Context, cx: &mut Ctx, id: Uuid, top: f32) -> Option<Rect> {
         let b = cx.store.bookmark(id)?;
         let store = cx.store;
-        let mut actions = Vec::new();
         let resp = egui::Area::new(egui::Id::new("sidebar-hover-card"))
             .order(Order::Foreground)
             .fixed_pos(pos2(cx.right - 12.0, top - 8.0))
@@ -1837,41 +1786,19 @@ impl Sidebar {
                         ui.set_width(CARD_W - 28.0);
                         ui.spacing_mut().item_spacing.y = 12.0;
                         ui.spacing_mut().interact_size.y = 0.0;
-                        let label = store.label_of(b);
-                        let lc = label_rgb(label, p.dark);
-                        // Glyph, name + label, address.
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 10.0;
-                            let status = cx.live.get(&id).map(|l| match l {
-                                Live::Connected => p.ok,
-                                Live::Connecting => p.warn,
-                                Live::Failed => p.err,
-                            });
-                            kit::host_glyph(
-                                ui,
-                                28.0,
-                                kit::host_icon(b.host_icon()),
-                                lc,
-                                status,
-                                p.raised,
+                        // Name and address (Redesign 3.1: text only).
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            ui.label(
+                                egui::RichText::new(b.display_name())
+                                    .font(style::semibold(style::BODY))
+                                    .color(p.text),
                             );
-                            ui.vertical(|ui| {
-                                ui.spacing_mut().item_spacing.y = 2.0;
-                                ui.horizontal(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 6.0;
-                                    ui.label(
-                                        egui::RichText::new(b.display_name())
-                                            .font(style::semibold(style::BODY))
-                                            .color(p.text),
-                                    );
-                                    kit::label_tag(ui, label, false);
-                                });
-                                ui.label(
-                                    egui::RichText::new(crate::app::address_with_port(b))
-                                        .font(style::mono(11.0))
-                                        .color(p.text_faint),
-                                );
-                            });
+                            ui.label(
+                                egui::RichText::new(crate::app::address_with_port(b))
+                                    .font(style::mono(11.0))
+                                    .color(p.text_faint),
+                            );
                         });
                         // The details.
                         let login = match &b.auth {
@@ -1932,30 +1859,7 @@ impl Sidebar {
                                 }
                                 if !b.tags.is_empty() {
                                     key(ui, t("Tags"));
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-                                        for tag in &b.tags {
-                                            let g = ui.painter().layout_no_wrap(
-                                                tag.clone(),
-                                                style::regular(style::SMALL),
-                                                p.text_muted,
-                                            );
-                                            let (r, _) = ui.allocate_exact_size(
-                                                vec2(g.size().x + 16.0, 22.0),
-                                                Sense::hover(),
-                                            );
-                                            ui.painter().rect_filled(
-                                                r,
-                                                CornerRadius::same(5),
-                                                p.hover,
-                                            );
-                                            ui.painter().galley(
-                                                r.center() - g.size() / 2.0,
-                                                g,
-                                                p.text_muted,
-                                            );
-                                        }
-                                    });
+                                    val(ui, &b.tags.join(", "));
                                     ui.end_row();
                                 }
                                 if last.is_some() || tabs > 0 {
@@ -1995,55 +1899,9 @@ impl Sidebar {
                                 .wrap(),
                             );
                         }
-                        // Actions.
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 6.0;
-                            if kit::button_kbd(
-                                ui,
-                                kit::Kind::Primary,
-                                None,
-                                t("Connect"),
-                                Some("↩"),
-                                true,
-                                false,
-                            )
-                            .clicked()
-                            {
-                                actions.push(Action::Connect(id));
-                            }
-                            if kit::button_ex(
-                                ui,
-                                kit::Kind::Secondary,
-                                Some(icons::FOLDER_SIMPLE),
-                                t("Files"),
-                                true,
-                            )
-                            .clicked()
-                            {
-                                actions.push(Action::OpenFiles(id));
-                            }
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if kit::icon_button_ex(
-                                        ui,
-                                        icons::PENCIL_SIMPLE,
-                                        t("Edit…"),
-                                        false,
-                                        24.0,
-                                    )
-                                    .clicked()
-                                    {
-                                        actions.push(Action::EditBookmark(id));
-                                    }
-                                },
-                            );
-                        });
                     });
             });
-        let closing = !actions.is_empty();
-        cx.actions.extend(actions);
-        (!closing).then_some(resp.response.rect)
+        Some(resp.response.rect)
     }
 
     /// The keys of the tree while it has the keyboard, for the selected item.
