@@ -2167,7 +2167,6 @@ const ID: &[(&str, &str)] = &[
     ("Back to Files", "Kembali ke Files"),
     ("Browsing as root (sudo)", "Menjelajah sebagai root (sudo)"),
     ("Download to {}", "Unduh ke {}"),
-    ("Files", "Files"),
     ("Fill the tab", "Penuhi tab"),
     (
         "New size and date first, the one on {} after the arrow.",
