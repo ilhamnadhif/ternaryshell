@@ -14,15 +14,22 @@ pub enum Action {
     DuplicateBookmark(Uuid),
     DeleteBookmark(Uuid),
     Connect(Uuid),
-    NewGroup {
-        parent: Option<Uuid>,
+    /// Connects and opens the Files panel in the new tab (⇧↩ in the sidebar, Files on Home).
+    OpenFiles(Uuid),
+    /// Sets or clears a group's environment label.
+    SetGroupLabel {
+        id: Uuid,
+        label: Option<crate::bookmarks::Label>,
     },
-    RenameGroup(Uuid),
-    /// Sets a connection's own environment label (`None` inherits its group's).
+    /// Sets a connection's own label, or (`None`) lets it inherit its group's.
     SetBookmarkLabel {
         id: Uuid,
         label: Option<crate::bookmarks::Label>,
     },
+    NewGroup {
+        parent: Option<Uuid>,
+    },
+    RenameGroup(Uuid),
     DeleteGroup(Uuid),
     QuickConnect,
     /// Opens the connection editor for an address typed in the palette.

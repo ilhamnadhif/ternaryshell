@@ -128,6 +128,8 @@ pub struct TernaryShellApp {
     fullscreen: bool,
     /// Hosts in ~/.ssh/config, counted once for the welcome page.
     ssh_config_hosts: Option<usize>,
+    /// Home's state (hosts of ~/.ssh/config not imported yet).
+    home: home::HomeState,
     /// The steps each connection went through, for its progress card.
     conn_steps: HashMap<u64, canvas::StepTrack>,
     /// The window size the traffic lights were last placed for (macOS).
@@ -179,8 +181,9 @@ fn adhoc_bookmark(target: &str) -> Option<Bookmark> {
 mod canvas;
 mod chrome;
 mod confirms;
+mod home;
 
-pub use chrome::{address_with_port, forward_rule};
+pub use chrome::{address_with_port, ago, forward_rule};
 
 /// Height of the title row (traffic lights, tabs, the session toolbar).
 const TITLE_H: f32 = 44.0;
@@ -302,6 +305,7 @@ impl TernaryShellApp {
             editor_section: None,
             fullscreen: false,
             ssh_config_hosts: None,
+            home: Default::default(),
             conn_steps: HashMap::new(),
             #[cfg(target_os = "macos")]
             traffic_placed: None,
@@ -775,6 +779,13 @@ impl TernaryShellApp {
         let tab_mods = keys::tab_number_modifiers();
         for (i, key) in digits.iter().enumerate() {
             if ctx.input_mut(|inp| inp.consume_shortcut(&KeyboardShortcut::new(tab_mods, *key))) {
+                // With no tab open (Home), ⌘1–⌘6 open the recent connections on its cards.
+                if self.tabs.is_empty() {
+                    if let Some((id, _)) = self.home_recent().get(i) {
+                        self.actions.push(Action::Connect(*id));
+                    }
+                    continue;
+                }
                 let idx = if i == 8 {
                     self.tabs.len().saturating_sub(1)
                 } else {
@@ -1046,6 +1057,26 @@ impl TernaryShellApp {
                     self.open_tab(ctx, b);
                 }
             }
+            Action::OpenFiles(id) => {
+                if let Some(b) = self.store.bookmark(id).cloned() {
+                    self.sidebar.selected = Some(id);
+                    self.settings.touch_recent(id);
+                    self.open_tab(ctx, b);
+                    if let Some(tab) = self.tabs.last_mut() {
+                        tab.show_sftp = true;
+                    }
+                }
+            }
+            Action::SetGroupLabel { id, label } => {
+                self.store.set_group_label(id, label);
+                self.save_store();
+            }
+            Action::SetBookmarkLabel { id, label } => {
+                if let Some(b) = self.store.bookmark_mut(id) {
+                    b.label = label;
+                    self.save_store();
+                }
+            }
             Action::NewGroup { parent } => {
                 let context = match parent {
                     Some(g) => tf("in {}", &[&self.store.group_path(Some(g))]),
@@ -1110,12 +1141,6 @@ impl TernaryShellApp {
                 }
             }
             Action::ToggleTheme => self.toggle_theme(ctx),
-            Action::SetBookmarkLabel { id, label } => {
-                if let Some(b) = self.store.bookmark_mut(id) {
-                    b.label = label;
-                    self.save_store();
-                }
-            }
             Action::SaveQuickCommand(text) => {
                 let command = text.trim_end_matches(['\r', '\n']).to_string();
                 if !command.trim().is_empty() {
@@ -2125,6 +2150,9 @@ impl TernaryShellApp {
         #[cfg(target_os = "macos")]
         self.place_traffic_lights(&ctx, frame);
         self.track_steps();
+        if self.sidebar.recent != self.settings.recent {
+            self.sidebar.recent = self.settings.recent.clone();
+        }
         // Panels are laid out with the root Ui's item spacing between them; keep them flush and
         // restore normal spacing inside each panel.
         let spacing = ui.spacing().item_spacing;

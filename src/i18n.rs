@@ -1750,7 +1750,7 @@ const ID: &[(&str, &str)] = &[
     // ===== end [foundation] =====
 
     // ===== Redesign 3.0: main window, sidebar, Home [main] =====
-    ("Files", "Files"),
+    ("Files", "File"),
     ("Files Panel", "Panel Files"),
     ("runs at once", "langsung jalan"),
     ("pasted first", "ditempel dulu"),
@@ -1778,6 +1778,80 @@ const ID: &[(&str, &str)] = &[
     // ===== end [main] =====
 
     // ===== Redesign 3.0: sidebar and Home [sidebar] =====
+    ("1 host", "1 host"),
+    (
+        "1 host found, ready to import.",
+        "1 host ditemukan, siap diimpor.",
+    ),
+    (
+        "1 new host in ~/.ssh/config",
+        "1 host baru di ~/.ssh/config",
+    ),
+    ("1 tab open", "1 tab terbuka"),
+    ("{} tabs open", "{} tab terbuka"),
+    ("{} hosts", "{} host"),
+    (
+        "{} hosts found, ready to import.",
+        "{} host ditemukan, siap diimpor.",
+    ),
+    (
+        "{} new hosts in ~/.ssh/config",
+        "{} host baru di ~/.ssh/config",
+    ),
+    (
+        "{} isn't in TernaryShell yet.",
+        "{} belum ada di TernaryShell.",
+    ),
+    (
+        "{} aren't in TernaryShell yet.",
+        "{} belum ada di TernaryShell.",
+    ),
+    ("{} and {}", "{} dan {}"),
+    ("{} and {} more", "{} dan {} lainnya"),
+    ("Good morning", "Selamat pagi"),
+    ("Good morning, {}", "Selamat pagi, {}"),
+    ("Good afternoon", "Selamat siang"),
+    ("Good afternoon, {}", "Selamat siang, {}"),
+    ("Good evening", "Selamat malam"),
+    ("Good evening, {}", "Selamat malam, {}"),
+    ("Monday", "Senin"),
+    ("Tuesday", "Selasa"),
+    ("Wednesday", "Rabu"),
+    ("Thursday", "Kamis"),
+    ("Friday", "Jumat"),
+    ("Saturday", "Sabtu"),
+    ("Sunday", "Minggu"),
+    ("January", "Januari"),
+    ("February", "Februari"),
+    ("March", "Maret"),
+    ("April", "April"),
+    ("June", "Juni"),
+    ("July", "Juli"),
+    ("August", "Agustus"),
+    ("September", "September"),
+    ("October", "Oktober"),
+    ("November", "November"),
+    ("December", "Desember"),
+    (
+        "Search connections and commands, or type",
+        "Cari koneksi dan perintah, atau ketik",
+    ),
+    ("Groups", "Grup"),
+    ("Review & Import", "Tinjau & Impor"),
+    ("Not Now", "Nanti Saja"),
+    ("open recent", "buka terbaru"),
+    (
+        "Passwords and keys are saved in {}, not in TernaryShell's files.",
+        "Password dan key disimpan di {}, bukan di file TernaryShell.",
+    ),
+    ("Filter hosts", "Saring host"),
+    ("Ungrouped", "Tanpa grup"),
+    ("select", "pilih"),
+    ("files", "file"),
+    ("Open Files", "Buka File"),
+    ("Import & export", "Impor & ekspor"),
+    ("label text", "teks label"),
+    ("Last", "Terakhir"),
     // ===== end [sidebar] =====
 
     // ===== Redesign 3.0: connecting, prompts, command palette [connect] =====
