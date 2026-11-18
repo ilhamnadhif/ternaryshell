@@ -1854,6 +1854,10 @@ const ID: &[(&str, &str)] = &[
     ("label text", "teks label"),
     ("Last", "Terakhir"),
     ("No connections yet.", "Belum ada koneksi."),
+    (
+        "Import ~/.ssh/config (1 host)",
+        "Impor ~/.ssh/config (1 host)",
+    ),
     ("Add your first server", "Tambahkan server pertama Anda"),
     (
         "Connections you add show up in the sidebar. Passwords and keys are kept in {}.",
@@ -2195,14 +2199,7 @@ const ID: &[(&str, &str)] = &[
         "Key tetap di agent (ssh-add, 1Password, Secretive).",
     ),
     ("Nothing to import.", "Tidak ada yang diimpor."),
-    (
-        "The file will have {}, {} and {}.",
-        "File akan berisi {}, {} dan {}.",
-    ),
-    (
-        "The file will have {}, {}, {}, {} and {}.",
-        "File akan berisi {}, {}, {}, {} dan {}.",
-    ),
+    ("The file will have {}.", "File akan berisi {}."),
     (
         "The key is kept in {}, not on disk.",
         "Key disimpan di {}, bukan di disk.",

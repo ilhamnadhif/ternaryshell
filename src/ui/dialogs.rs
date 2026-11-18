@@ -1984,19 +1984,32 @@ impl ExportDialog {
                 let conns = count(list.len(), t("1 connection"), "{} connections");
                 let grps = count(groups.len(), t("1 group with its label"), "{} groups with their labels");
                 let fwds = count(forwards, t("1 forward"), "{} forwards");
-                let sentence = match &self.secrets {
-                    Some(map) => {
-                        let pw = list.iter().filter(|b| map.get(&b.id).is_some_and(|s| s.0)).count();
-                        let keys = list
-                            .iter()
-                            .filter(|b| map.get(&b.id).is_some_and(|s| s.1) || matches!(b.auth, crate::bookmarks::Auth::Key { .. }))
-                            .count();
-                        let pws = count(pw, t("1 password"), "{} passwords");
-                        let ks = count(keys, t("1 key"), "{} keys");
-                        tf("The file will have {}, {}, {}, {} and {}.", &[&conns, &grps, &fwds, &pws, &ks])
+                // Zero counts are left out ("2 forwards", never "0 passwords").
+                let mut parts = vec![conns];
+                if !groups.is_empty() {
+                    parts.push(grps);
+                }
+                if forwards > 0 {
+                    parts.push(fwds);
+                }
+                if let Some(map) = &self.secrets {
+                    let pw = list.iter().filter(|b| map.get(&b.id).is_some_and(|s| s.0)).count();
+                    let keys = list
+                        .iter()
+                        .filter(|b| map.get(&b.id).is_some_and(|s| s.1) || matches!(b.auth, crate::bookmarks::Auth::Key { .. }))
+                        .count();
+                    if pw > 0 {
+                        parts.push(count(pw, t("1 password"), "{} passwords"));
                     }
-                    None => tf("The file will have {}, {} and {}.", &[&conns, &grps, &fwds]),
+                    if keys > 0 {
+                        parts.push(count(keys, t("1 key"), "{} keys"));
+                    }
+                }
+                let what = match parts.split_last() {
+                    Some((last, rest)) if !rest.is_empty() => tf("{} and {}", &[&rest.join(", "), last]),
+                    _ => parts.concat(),
                 };
+                let sentence = tf("The file will have {}.", &[&what]);
                 let sentence = RichText::new(sentence).font(style::regular(style::BODY)).color(p.text_muted);
                 if self.secrets.is_some() {
                     ui.add(egui::Label::new(sentence).wrap());
