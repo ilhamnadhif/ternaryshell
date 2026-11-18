@@ -284,6 +284,9 @@ pub struct Editor {
     clear_passphrase: bool,
     /// Why saving failed (and where), or an error from the Keychain.
     problem: Option<Problem>,
+    /// What the form held when `problem` was found: once it changes, the message is put away
+    /// (the next save checks again).
+    problem_inputs: u64,
     focus_first: bool,
     key_files: Vec<String>,
     auth: AuthKind,
@@ -394,6 +397,7 @@ impl Editor {
             clear_password: false,
             clear_passphrase: false,
             problem: None,
+            problem_inputs: 0,
             focus_first: true,
             key_files,
             auth,
@@ -431,7 +435,26 @@ impl Editor {
             section: Section::Login,
             forward: None,
         });
+        self.problem_inputs = self.inputs_hash();
         self.section = Section::Login;
+    }
+
+    /// A fingerprint of the fields a save checks (the forwards are checked as they are typed).
+    fn inputs_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (
+            &self.draft.name,
+            &self.draft.host,
+            &self.port_text,
+            &self.draft.username,
+            self.auth,
+            &self.key_path,
+            &self.key_text,
+            &self.agent_socket,
+        )
+            .hash(&mut h);
+        h.finish()
     }
 
     /// The connection started for "Test Connection".
@@ -496,6 +519,7 @@ impl Editor {
             Err(p) => {
                 self.section = p.section;
                 self.problem = Some(p);
+                self.problem_inputs = self.inputs_hash();
                 false
             }
         }
@@ -725,6 +749,12 @@ impl Editor {
             664.0f32.min(screen.height() - 40.0),
         );
         let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
+        // A mistake in a field goes away as soon as the form is edited.
+        if self.problem.as_ref().is_some_and(|p| p.forward.is_none())
+            && self.inputs_hash() != self.problem_inputs
+        {
+            self.problem = None;
+        }
         let forward_problems = self.forward_problems();
         // A forward mistake that is fixed no longer holds saving back.
         if self
