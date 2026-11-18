@@ -1,5 +1,5 @@
 //! The confirmations the app asks (close a tab, delete, quit, reconnect, restart to update),
-//! with what each one affects spelled out row by row.
+//! with what each one affects said in plain sentences, with real numbers.
 
 use std::time::Duration;
 
@@ -11,18 +11,16 @@ use crate::i18n::{t, tf};
 use crate::paths;
 use crate::sftp::entry::human_size;
 use crate::ui::actions::Action;
-use crate::ui::confirm::{ConfirmExtra, ConfirmRow, GroupTree, HostChip};
+use crate::ui::confirm::{ConfirmExtra, ConfirmRow};
 use crate::ui::dialogs::{self, ConfirmAction, Dialog};
-use crate::ui::style::Tone;
 use crate::ui::tabs::{Tab, cwd_from_title};
-use crate::ui::{icons, kit};
 
-/// The key cap of Quit: pressing the shortcut again quits.
-pub fn quit_keys() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "⌘Q"
-    } else {
-        "Ctrl+Shift+Q"
+/// Clauses as one sentence: "A.", "A, and B.", "A, B, and C."
+fn sentence(clauses: &[String]) -> String {
+    match clauses {
+        [] => String::new(),
+        [a] => format!("{a}."),
+        [rest @ .., last] => tf("{}, and {}.", &[&rest.join(", "), last]),
     }
 }
 
@@ -83,180 +81,117 @@ impl TernaryShellApp {
         }
     }
 
-    /// The label and address under a confirmation's title.
-    fn sub_of(&self, b: &crate::bookmarks::Bookmark) -> ConfirmExtra {
-        ConfirmExtra {
-            sub: Some((self.store.label_of(b).cloned(), b.address())),
-            ..Default::default()
-        }
-    }
-
-    fn chip(&self, tab: &Tab) -> HostChip {
-        HostChip {
-            name: tab.title(),
-            icon: kit::host_icon(tab.bookmark.host_icon()),
-            color: self.store.label_of(&tab.bookmark).map(|l| l.color),
-        }
-    }
-
     /// "Close web-01?" when it is connected, transfers files or has unsaved edits.
     pub(super) fn close_tab_dialog(&self, tab: &Tab) -> Dialog {
         let transfers = tab.running_transfers();
         let unsaved = tab.unsaved_file();
         let other = transfers > 0 || unsaved.is_some();
-        let mut rows = Vec::new();
+        let mut clauses = Vec::new();
         if tab.is_active() {
-            let mut row = ConfirmRow::new(icons::TERMINAL, t("The session is still running"))
-                .tone(if other { Tone::Warn } else { Tone::Neutral });
-            if let Some(program) = tab
-                .panes
-                .iter()
-                .filter(|p| p.is_live())
-                .filter_map(|p| p.title())
-                .find_map(|title| running_program(&title))
-            {
-                row = row.detail(tf("Running `{}`", &[&program]));
-            }
-            rows.push(row);
-        }
-        if transfers > 0 {
-            rows.push(self.transfers_row(tab, transfers, Tone::Err));
-        }
-        if let Some(file) = &unsaved {
-            rows.push(
-                ConfirmRow::new(icons::PENCIL_SIMPLE, tf("{} has unsaved changes", &[file]))
-                    .tone(Tone::Err),
+            clauses.push(
+                match tab
+                    .panes
+                    .iter()
+                    .filter(|p| p.is_live())
+                    .filter_map(|p| p.title())
+                    .find_map(|title| running_program(&title))
+                {
+                    Some(program) => tf("The session is still running `{}`", &[&program]),
+                    None => t("The session is still running").to_string(),
+                },
             );
         }
-        let extra = ConfirmExtra {
-            icon: Some((
-                icons::TERMINAL_WINDOW,
-                if other { Tone::Warn } else { Tone::Neutral },
-            )),
-            escape: Some(t("keep it open").to_string()),
-            ..self.sub_of(&tab.bookmark)
-        };
+        if transfers > 0 {
+            clauses.push(self.transfers_clause(tab, transfers));
+        }
+        if let Some(file) = &unsaved {
+            clauses.push(tf("{} has unsaved changes", &[file]));
+        }
         // Only the plain "it's connected" question can be turned off; lost transfers and
         // edits are always asked about.
         dialogs::confirm_rows(
             &tf("Close {}?", &[&tab.title()]),
-            String::new(),
-            rows,
+            sentence(&clauses),
+            Vec::new(),
             t("Close Tab"),
             ConfirmAction::CloseTab(tab.id),
-            extra,
+            ConfirmExtra::default(),
             !other,
         )
     }
 
-    fn transfers_row(&self, tab: &Tab, transfers: usize, tone: Tone) -> ConfirmRow {
-        let mut row = ConfirmRow::new(
-            icons::ARROWS_DOWN_UP,
-            tf(
-                "{} transfer(s) will be cancelled",
-                &[&transfers.to_string()],
-            ),
-        )
-        .tone(tone)
-        .detail(t("Partial files are removed, on the server too."));
-        if let Some(s) = tab.transfer_progress()
-            && s.bytes_total > 0
-        {
-            row = row.right(human_size(s.bytes_total));
+    /// "2 transfers (1.2 GB) will be cancelled".
+    fn transfers_clause(&self, tab: &Tab, transfers: usize) -> String {
+        let n = transfers.to_string();
+        let size = tab
+            .transfer_progress()
+            .filter(|s| s.bytes_total > 0)
+            .map(|s| human_size(s.bytes_total));
+        match (transfers, size) {
+            (1, Some(size)) => tf("1 transfer ({}) will be cancelled", &[&size]),
+            (1, None) => t("1 transfer will be cancelled").to_string(),
+            (_, Some(size)) => tf("{} transfers ({}) will be cancelled", &[&n, &size]),
+            (_, None) => tf("{} transfers will be cancelled", &[&n]),
         }
-        row
     }
 
     /// "Delete “web-02”?": what goes, and that the server is not touched.
     pub(super) fn delete_bookmark_dialog(&self, id: Uuid) -> Option<Dialog> {
         let b = self.store.bookmark(id)?;
-        let mut rows = Vec::new();
-        let settings = if b.forwards.is_empty() {
-            t("Connection settings and tags").to_string()
-        } else {
-            tf(
-                "Connection settings, tags and {} forward(s)",
-                &[&b.forwards.len().to_string()],
-            )
+        let here = crate::platform::this_computer();
+        let goes = match &b.auth {
+            Auth::Password => tf(
+                "The connection and its saved password are removed from {}.",
+                &[here],
+            ),
+            Auth::Key { .. } => tf(
+                "The connection and its saved passphrase are removed from {}.",
+                &[here],
+            ),
+            Auth::KeychainKey => tf(
+                "The connection and its pasted key are removed from {}.",
+                &[here],
+            ),
+            Auth::Agent { .. } => tf("The connection is removed from {}.", &[here]),
         };
-        rows.push(
-            ConfirmRow::new(icons::HARD_DRIVES, settings)
-                .tone(Tone::Err)
-                .right(t("removed")),
-        );
-        let keychain = crate::platform::keychain();
-        let secret = match &b.auth {
-            Auth::Password => Some(tf("Saved password in {}", &[keychain])),
-            Auth::Key { .. } => Some(tf("Saved passphrase in {}", &[keychain])),
-            Auth::KeychainKey => Some(tf("Pasted key and passphrase in {}", &[keychain])),
-            Auth::Agent { .. } => None,
-        };
-        if let Some(s) = secret {
-            rows.push(
-                ConfirmRow::new(icons::KEY, s)
-                    .tone(Tone::Err)
-                    .right(t("removed")),
-            );
-        }
-        rows.push(
-            ConfirmRow::new(
-                icons::SHIELD_CHECK,
-                t("The server, its files and `~/.ssh` keys"),
-            )
-            .tone(Tone::Ok)
-            .right(t("not touched")),
-        );
         Some(dialogs::confirm_rows(
             &tf("Delete “{}”?", &[&b.display_name()]),
-            tf(
-                "The connection and its saved password are removed from {}. The server isn't touched.",
-                &[crate::platform::this_computer()],
+            format!(
+                "{goes} {}",
+                t("The server and your keys in `~/.ssh` are not touched.")
             ),
-            rows,
+            Vec::new(),
             t("Delete"),
             ConfirmAction::DeleteBookmark(id),
-            self.sub_of(b),
+            ConfirmExtra::default(),
             false,
         ))
     }
 
-    /// "Delete group?": the group and what moves up one level, before and after.
+    /// "Delete the group?": only the group goes, its contents move up one level.
     pub(super) fn delete_group_dialog(&self, id: Uuid) -> Option<Dialog> {
         let g = self.store.group(id)?;
-        const SHOWN: usize = 6;
-        let mut items: Vec<(String, &'static str, bool)> = self
-            .store
-            .child_groups(Some(id))
-            .map(|c| (c.name.clone(), icons::FOLDER_SIMPLE, true))
-            .collect();
-        items.extend(
-            self.store
-                .bookmarks_in(Some(id))
-                .map(|b| (b.display_name(), kit::host_icon(b.host_icon()), false)),
-        );
-        let more = items.len().saturating_sub(SHOWN);
-        items.truncate(SHOWN);
         let count = self.store.bookmarks_in(Some(id)).count();
-        let tree = GroupTree {
-            name: g.name.clone(),
-            color: self.store.group_label(Some(id)).map(|l| l.color),
-            parent: g.parent.map(|p| self.store.group_path(Some(p))),
-            items,
-            more,
+        let subgroups = self.store.child_groups(Some(id)).count();
+        let message = match (count, subgroups) {
+            (0, 0) => t("The group is empty. Nothing else is deleted.").to_string(),
+            (1, 0) => t("Only the group goes. Its connection moves up one level.").to_string(),
+            (n, 0) => tf(
+                "Only the group goes. Its {} connections move up one level.",
+                &[&n.to_string()],
+            ),
+            (n, _) => tf(
+                "Only the group goes. Its {} connection(s) and subgroups move up one level.",
+                &[&n.to_string()],
+            ),
         };
         Some(dialogs::confirm_rows(
-            &tf("Delete group “{}”?", &[&g.name]),
-            tf(
-                "Its {} connection(s) and subgroups move up one level. Nothing else is deleted.",
-                &[&count.to_string()],
-            ),
+            &tf("Delete the group “{}”?", &[&g.name]),
+            message,
             Vec::new(),
             t("Delete Group"),
             ConfirmAction::DeleteGroup(id),
-            ConfirmExtra {
-                tree: (!tree.items.is_empty()).then_some(tree),
-                ..Default::default()
-            },
+            ConfirmExtra::default(),
             false,
         ))
     }
@@ -268,13 +203,17 @@ impl TernaryShellApp {
         let transfers: usize = self.tabs.iter().map(Tab::running_transfers).sum();
         let mut rows = Vec::new();
         if !live.is_empty() && (self.settings.confirm_close_connected || transfers > 0) {
-            rows.push(
-                ConfirmRow::new(
-                    icons::TERMINAL_WINDOW,
-                    tf("{} open session(s)", &[&live.len().to_string()]),
-                )
-                .hosts(live.iter().take(6).map(|t| self.chip(t)).collect()),
-            );
+            const SHOWN: usize = 5;
+            let mut names: Vec<String> = live.iter().take(SHOWN).map(|t| t.title()).collect();
+            if live.len() > SHOWN {
+                names.push("…".to_string());
+            }
+            let names = names.join(", ");
+            rows.push(ConfirmRow::new(if live.len() == 1 {
+                tf("1 session: {}", &[&names])
+            } else {
+                tf("{} sessions: {}", &[&live.len().to_string(), &names])
+            }));
         }
         if transfers > 0 {
             let (done, total) = self
@@ -284,29 +223,24 @@ impl TernaryShellApp {
                 .fold((0u64, 0u64), |(d, t), s| {
                     (d + s.bytes_done, t + s.bytes_total)
                 });
-            let mut row = ConfirmRow::new(
-                icons::ARROWS_DOWN_UP,
-                tf(
-                    "{} transfer(s) will be cancelled",
-                    &[&transfers.to_string()],
+            let n = transfers.to_string();
+            let pct =
+                (total > 0).then(|| format!("{}", (done as f64 / total as f64 * 100.0).floor()));
+            rows.push(ConfirmRow::new(match (transfers, pct) {
+                (1, Some(pct)) => tf("1 transfer at {}% (partial files are removed)", &[&pct]),
+                (1, None) => t("1 transfer (partial files are removed)").to_string(),
+                (_, Some(pct)) => tf(
+                    "{} transfers at {}% (partial files are removed)",
+                    &[&n, &pct],
                 ),
-            )
-            .tone(Tone::Warn)
-            .detail(t("Partial files are removed, on the server too."));
-            if total > 0 {
-                row = row.right(format!("{}%", (done as f64 / total as f64 * 100.0).floor()));
-            }
-            rows.push(row);
+                (_, None) => tf("{} transfers (partial files are removed)", &[&n]),
+            }));
         }
         for (i, tab) in self.tabs.iter().enumerate() {
             if let Some(file) = tab.unsaved_file() {
                 rows.push(
-                    ConfirmRow::new(
-                        icons::PENCIL_SIMPLE,
-                        tf("{} on {} has unsaved changes", &[&file, &tab.title()]),
-                    )
-                    .tone(Tone::Err)
-                    .link(t("Review"), Action::SelectTab(i)),
+                    ConfirmRow::new(tf("{} on {}, not saved", &[&file, &tab.title()]))
+                        .link(t("Review"), Action::SelectTab(i)),
                 );
             }
         }
@@ -316,15 +250,11 @@ impl TernaryShellApp {
     pub(super) fn quit_dialog(&self, rows: Vec<ConfirmRow>) -> Dialog {
         dialogs::confirm_rows(
             t("Quit TernaryShell?"),
-            String::new(),
+            t("These will be closed:").to_string(),
             rows,
             t("Quit"),
             ConfirmAction::Quit,
-            ConfirmExtra {
-                keys: Some(quit_keys().to_string()),
-                width: Some(440.0),
-                ..Default::default()
-            },
+            ConfirmExtra { width: Some(440.0) },
             false,
         )
     }
@@ -332,42 +262,40 @@ impl TernaryShellApp {
     pub(super) fn restart_dialog(&self, rows: Vec<ConfirmRow>) -> Dialog {
         dialogs::confirm_rows(
             t("Restart to update?"),
-            t("TernaryShell restarts and opens your connections again.").to_string(),
+            format!(
+                "{} {}",
+                t("TernaryShell restarts and opens your connections again."),
+                t("These will be closed:")
+            ),
             rows,
             t("Restart"),
             ConfirmAction::RestartForUpdate,
-            ConfirmExtra {
-                width: Some(440.0),
-                ..Default::default()
-            },
+            ConfirmExtra { width: Some(440.0) },
             false,
         )
     }
 
     /// "Reconnect web-01?" while something runs in it.
     pub(super) fn reconnect_dialog(&self, tab: &Tab) -> Dialog {
-        let mut rows = Vec::new();
-        let panes = tab.panes.len();
-        if panes > 1 {
-            rows.push(
-                ConfirmRow::new(
-                    icons::SQUARE_SPLIT_HORIZONTAL,
-                    tf("{} panes", &[&panes.to_string()]),
-                )
-                .detail(t("Each gets a new shell")),
-            );
-        }
+        let mut message = match tab.panes.len() {
+            0 | 1 => t("The session is closed and opened again. Scrollback is kept.").to_string(),
+            2 => t("Both panes get a new shell. Scrollback is kept.").to_string(),
+            n => tf(
+                "All {} panes get a new shell. Scrollback is kept.",
+                &[&n.to_string()],
+            ),
+        };
         let transfers = tab.running_transfers();
         if transfers > 0 {
-            rows.push(self.transfers_row(tab, transfers, Tone::Err));
+            message = format!("{message} {}.", self.transfers_clause(tab, transfers));
         }
         dialogs::confirm_rows(
             &tf("Reconnect {}?", &[&tab.title()]),
-            t("The running sessions are closed and opened again. Scrollback is kept.").to_string(),
-            rows,
+            message,
+            Vec::new(),
             t("Reconnect"),
             ConfirmAction::Reconnect(tab.id),
-            self.sub_of(&tab.bookmark),
+            ConfirmExtra::default(),
             false,
         )
     }
@@ -424,7 +352,6 @@ impl TernaryShellApp {
                 );
                 self.toasts.add(
                     Toast::new(Kind::Warn, "db-primary: port forwarding")
-                        .icon(icons::PLUGS, None)
                         .detail("Port 6379 is in use on this Mac, so 6379 → redis.internal isn't listening.")
                         .button(t("Edit forwards…"), Do::Run(Action::Settings))
                         .quiet_button(t("Retry"), Do::Run(Action::Settings))
@@ -432,7 +359,6 @@ impl TernaryShellApp {
                 );
                 self.toasts.add(
                     Toast::new(Kind::Info, "Exported to connections.json")
-                        .icon(icons::EXPORT, None)
                         .detail("9 connections in ~/Downloads. Passwords and keys are included as plain text; delete it once it's imported.")
                         .button(crate::platform::reveal_label(), Do::Reveal(paths::data_dir().to_path_buf())),
                 );
@@ -440,7 +366,6 @@ impl TernaryShellApp {
                     Toast::new(Kind::Error, "Couldn't connect to worker-staging")
                         .detail("Connection timed out after 15 s. The host may be down or a firewall drops SSH.")
                         .button(t("Retry"), Do::Run(Action::Reconnect))
-                        .keys("⌘R")
                         .quiet_button(t("Copy Error"), Do::Copy("timed out".into())),
                 );
             }

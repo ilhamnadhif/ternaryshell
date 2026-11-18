@@ -88,16 +88,6 @@ impl Scope {
             Scope::Actions => t("Actions"),
         }
     }
-
-    fn icon(self) -> Option<&'static str> {
-        match self {
-            Scope::All => None,
-            Scope::Hosts => Some(icons::HARD_DRIVES),
-            Scope::Commands => Some(icons::LIGHTNING),
-            Scope::Tabs => Some(icons::CARDS),
-            Scope::Actions => Some(icons::COMMAND),
-        }
-    }
 }
 
 #[derive(Default)]
@@ -142,7 +132,7 @@ pub enum PaletteResult {
 const PALETTE_ROWS: usize = 50;
 const PALETTE_W: f32 = 720.0;
 const PREVIEW_W: f32 = 260.0;
-const BODY_H: f32 = 404.0;
+const BODY_H: f32 = 330.0;
 
 /// One row of the palette, in the order shown.
 #[derive(Clone)]
@@ -441,7 +431,7 @@ impl Palette {
                     self.index = self.index.saturating_sub(1);
                 }
 
-                // The query: 54 px, a magnifier, the text, ADDRESS when it is one.
+                // The query: 54 px, a magnifier, the text (mono when it is an address).
                 let (row, _) = ui.allocate_exact_size(vec2(PALETTE_W, 54.0), Sense::hover());
                 ui.painter().text(
                     pos2(row.left() + 16.0 + 9.5, row.center().y),
@@ -450,17 +440,7 @@ impl Palette {
                     style::icon_font(19.0),
                     p.text_faint,
                 );
-                let right_pad = if address.is_some() {
-                    let w = badge_at(
-                        ui.painter(),
-                        pos2(row.right() - 16.0, row.center().y),
-                        t("ADDRESS"),
-                        &p,
-                    );
-                    w + 26.0
-                } else {
-                    16.0
-                };
+                let right_pad = 16.0;
                 let mut edit_ui =
                     ui.new_child(egui::UiBuilder::new().max_rect(egui::Rect::from_min_max(
                         pos2(row.left() + 16.0 + 19.0 + 14.0, row.top()),
@@ -509,13 +489,19 @@ impl Palette {
                     });
                 }
 
-                // The scopes.
-                let (chips, _) = ui.allocate_exact_size(vec2(PALETTE_W, 32.0), Sense::hover());
-                let mut x = chips.left() + 12.0;
-                for scope in Scope::ALL {
-                    let w = scope_chip(
+                // The scopes: plain text, the selected one underlined (not while a typed address
+                // is offered: Tab still moves through them).
+                let typing_address =
+                    address.is_some() && matches!(self.scope, Scope::All | Scope::Hosts);
+                let (tabs, _) = ui.allocate_exact_size(
+                    vec2(PALETTE_W, if typing_address { 0.0 } else { 34.0 }),
+                    Sense::hover(),
+                );
+                let mut x = tabs.left() + 16.0;
+                for scope in Scope::ALL.into_iter().filter(|_| !typing_address) {
+                    let w = scope_tab(
                         ui,
-                        pos2(x, chips.top() + 8.0),
+                        pos2(x, tabs.top() + 10.0),
                         scope,
                         scope == self.scope,
                         &p,
@@ -525,7 +511,7 @@ impl Palette {
                         self.index = 0;
                         r.request_focus();
                     }
-                    x += w.0 + 4.0;
+                    x += w.0 + 14.0;
                 }
 
                 // The list and the preview beside it.
@@ -618,11 +604,7 @@ impl Palette {
                 let selected = flat.get(self.index).map(|(r, _)| (*r).clone());
                 let mut preview_ui =
                     ui.new_child(egui::UiBuilder::new().max_rect(preview_rect.shrink(16.0)));
-                if let Some(action) =
-                    preview(&mut preview_ui, selected.as_ref(), data, address.as_ref())
-                {
-                    picked = Some(action);
-                }
+                preview(&mut preview_ui, selected.as_ref(), data, address.as_ref());
 
                 // Keys.
                 if let Some(n) = number {
@@ -669,49 +651,6 @@ impl Palette {
                 } else if enter && total == 0 {
                     result = PaletteResult::Close;
                 }
-
-                // Key hints along the bottom.
-                let (foot, _) = ui.allocate_exact_size(vec2(PALETTE_W, 36.0), Sense::hover());
-                let painter = ui.painter();
-                painter.hline(foot.x_range(), foot.top() + 0.5, Stroke::new(1.0, p.border));
-                let cy = foot.center().y;
-                let hint = |x: f32, keys: &[&str], what: &str| -> f32 {
-                    let mut x = x;
-                    for k in keys {
-                        x += kit::paint_kbd_at(painter, pos2(x, cy), k, &p) + 3.0;
-                    }
-                    x += 3.0;
-                    let g = painter.layout_no_wrap(
-                        what.to_string(),
-                        style::regular(style::SMALL),
-                        p.text_faint,
-                    );
-                    let w = g.size().x;
-                    painter.galley(pos2(x, cy - g.size().y / 2.0), g, p.text_faint);
-                    x + w + 14.0
-                };
-                let mut x = foot.left() + 14.0;
-                x = hint(x, &["↑", "↓"], t("navigate"));
-                x = hint(x, &["↩"], t("open"));
-                x = hint(x, &[&mod_label("⇧↩", "Shift+Enter")], t("files"));
-                let _ = hint(x, &[&mod_label("⌘E", "Ctrl+E")], t("edit"));
-                // Right-aligned: tab scope, esc close.
-                let width = |keys: &str, what: &str| {
-                    let k = painter
-                        .layout_no_wrap(keys.into(), style::regular(style::XS), p.text_muted)
-                        .size()
-                        .x
-                        + 10.0;
-                    let w = painter
-                        .layout_no_wrap(what.into(), style::regular(style::SMALL), p.text_faint)
-                        .size()
-                        .x;
-                    k.max(18.0) + 6.0 + w
-                };
-                let esc_x = foot.right() - 14.0 - width("esc", t("close"));
-                let tab_x = esc_x - 14.0 - width("tab", t("scope"));
-                hint(tab_x, &["tab"], t("scope"));
-                hint(esc_x, &["esc"], t("close"));
             });
         if modal.should_close() && matches!(result, PaletteResult::Open) {
             result = PaletteResult::Close;
@@ -720,101 +659,47 @@ impl Palette {
     }
 }
 
-/// A small accent badge (`ADDRESS`) ending at `right`; returns its width.
-fn badge_at(painter: &egui::Painter, right: egui::Pos2, text: &str, p: &style::Palette) -> f32 {
-    let g = painter.layout_no_wrap(text.to_string(), style::semibold(10.5), p.accent_text);
-    let w = g.size().x + 12.0;
-    let rect = egui::Rect::from_min_max(
-        pos2(right.x - w, right.y - 9.0),
-        pos2(right.x, right.y + 9.0),
-    );
-    painter.rect_filled(rect, CornerRadius::same(5), p.accent_tint);
-    painter.galley(
-        pos2(rect.left() + 6.0, rect.center().y - g.size().y / 2.0),
-        g,
-        p.accent_text,
-    );
-    w
-}
-
-/// A scope chip at `pos` (24 px); returns its width and whether it was clicked.
-fn scope_chip(
+/// A scope at `pos` (22 px): its name, underlined when selected; returns its width and whether
+/// it was clicked.
+fn scope_tab(
     ui: &mut Ui,
     pos: egui::Pos2,
     scope: Scope,
     on: bool,
     p: &style::Palette,
 ) -> (f32, bool) {
-    let painter = ui.painter();
-    let g = painter.layout_no_wrap(
+    let g = ui.painter().layout_no_wrap(
         scope.label().to_string(),
         style::medium(style::SMALL),
         p.text,
     );
-    let icon_w = if scope.icon().is_some() {
-        15.0 + 6.0
-    } else {
-        0.0
-    };
-    let kbd_w = if scope == Scope::Actions {
-        6.0 + 15.0
-    } else {
-        0.0
-    };
-    let w = 10.0 + icon_w + g.size().x + kbd_w + 10.0;
-    let rect = egui::Rect::from_min_size(pos, vec2(w, 24.0));
+    let w = g.size().x;
+    let rect = egui::Rect::from_min_size(pos, vec2(w, 22.0));
     let resp = ui.interact(
         rect,
         egui::Id::new(("palette-scope", scope)),
         Sense::click(),
     );
-    let painter = ui.painter();
-    if on {
-        painter.rect_filled(rect, CornerRadius::same(12), p.accent_soft);
-    } else {
-        painter.rect_stroke(
-            rect,
-            CornerRadius::same(12),
-            Stroke::new(
-                1.0,
-                if resp.hovered() {
-                    p.border_strong
-                } else {
-                    p.border
-                },
-            ),
-            StrokeKind::Inside,
-        );
-    }
     let color = if on || resp.hovered() {
         p.text
     } else {
-        p.text_muted
+        p.text_faint
     };
-    let mut x = rect.left() + 10.0;
-    if let Some(icon) = scope.icon() {
-        painter.text(
-            pos2(x + 7.5, rect.center().y),
-            Align2::CENTER_CENTER,
-            icon,
-            style::icon_font(15.0),
-            color,
+    let painter = ui.painter();
+    painter.galley(
+        pos2(rect.left(), rect.center().y - g.size().y / 2.0),
+        g,
+        color,
+    );
+    if on {
+        painter.rect_filled(
+            egui::Rect::from_min_max(pos2(rect.left(), rect.bottom() - 2.0), rect.max),
+            0.0,
+            p.text,
         );
-        x += icon_w;
     }
-    let gw = g.size().x;
-    painter.galley(pos2(x, rect.center().y - g.size().y / 2.0), g, color);
-    x += gw;
-    if scope == Scope::Actions {
-        let cap = egui::Rect::from_min_size(pos2(x + 6.0, rect.center().y - 7.5), vec2(15.0, 15.0));
-        kit::paint_kbd(painter, cap, p);
-        painter.text(
-            cap.center(),
-            Align2::CENTER_CENTER,
-            ">",
-            style::regular(9.5),
-            p.text_muted,
-        );
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     (w, resp.clicked())
 }
@@ -859,8 +744,8 @@ fn substring_hits(text: &str, needle: &str) -> Vec<usize> {
     }
 }
 
-/// One palette row (38 px): a 26 px tile (the host's glyph, or the command's icon), the title,
-/// a faint detail, and on the right its key.
+/// One palette row (38 px): the host's glyph or the command's icon (plain), the title, a faint
+/// detail, and on the right its shortcut as plain text.
 fn palette_row(
     ui: &mut Ui,
     row: &Row,
@@ -885,21 +770,16 @@ fn palette_row(
     // The status dot is cut out of the row's own colour.
     let ring = over(p.sheet, row_fill);
     let tile = egui::Rect::from_min_size(
-        pos2(rect.left() + 10.0, rect.center().y - 13.0),
-        vec2(26.0, 26.0),
+        pos2(rect.left() + 10.0, rect.center().y - 10.0),
+        vec2(20.0, 20.0),
     );
-    let neutral_tile = |icon: &str, tone: Tone| {
-        let (fill, color) = match tone {
-            Tone::Accent => (p.accent_tint, p.accent_text),
-            _ => (p.hover, p.text_muted),
-        };
-        painter.rect_filled(tile, CornerRadius::same(7), fill);
+    let neutral_tile = |icon: &str| {
         painter.text(
             tile.center(),
             Align2::CENTER_CENTER,
             icon,
-            style::icon_font(14.0),
-            color,
+            style::icon_font(15.0),
+            p.text_faint,
         );
     };
     let store = data.store;
@@ -937,7 +817,7 @@ fn palette_row(
             (job, b.map(|b| b.address()).unwrap_or_default(), true, keys)
         }
         Row::ConnectTo(a) => {
-            neutral_tile(icons::ARROW_RIGHT, Tone::Accent);
+            neutral_tile(icons::ARROW_RIGHT);
             let mut job = egui::text::LayoutJob::default();
             let base = t("Connect to {}");
             let (before, after) = base.split_once("{}").unwrap_or((base, ""));
@@ -950,10 +830,10 @@ fn palette_row(
             job.append(before, 0.0, f(style::medium(style::BODY)));
             job.append(a, 0.0, f(style::medium(style::BODY)));
             job.append(after, 0.0, f(style::medium(style::BODY)));
-            (job, String::new(), false, vec!["↩".to_string()])
+            (job, String::new(), false, Vec::new())
         }
         Row::SaveAs(_) => {
-            neutral_tile(icons::FLOPPY_DISK, Tone::Neutral);
+            neutral_tile(icons::FLOPPY_DISK);
             let mut job = egui::text::LayoutJob::default();
             highlighted(
                 &mut job,
@@ -964,11 +844,11 @@ fn palette_row(
                 p.text,
                 p.text,
             );
-            (job, String::new(), false, vec![mod_label("⌘S", "Ctrl+S")])
+            (job, String::new(), false, Vec::new())
         }
         Row::Command(i) => {
             let c = &data.commands[*i];
-            neutral_tile(c.icon, Tone::Neutral);
+            neutral_tile(c.icon);
             let mut job = egui::text::LayoutJob::default();
             let hits = if query.is_empty() {
                 Vec::new()
@@ -1026,17 +906,17 @@ fn palette_row(
             (job, tab.address.clone(), true, keys)
         }
     };
-    // Keys on the right first.
+    // The shortcut on the right first, as plain text.
     let mut right = rect.right() - 10.0;
     for k in keys.iter().rev() {
-        let w = (painter
-            .layout_no_wrap(k.clone(), style::regular(style::XS), p.text_muted)
-            .size()
-            .x
-            + 10.0)
-            .max(18.0);
-        kit::paint_kbd_at(painter, pos2(right - w, rect.center().y), k, &p);
-        right -= w + 6.0;
+        let g = painter.layout_no_wrap(k.clone(), style::regular(style::SMALL), p.text_faint);
+        let w = g.size().x;
+        painter.galley(
+            pos2(right - w, rect.center().y - g.size().y / 2.0),
+            g,
+            p.text_faint,
+        );
+        right -= w + 8.0;
     }
     let clip = egui::Rect::from_min_max(rect.min, pos2(right - 6.0, rect.bottom()));
     let g = painter.layout_job(title);
@@ -1092,85 +972,42 @@ fn over(base: Color32, top: Color32) -> Color32 {
     Color32::from_rgb(mix(base.r(), tr), mix(base.g(), tg), mix(base.b(), tb))
 }
 
-/// The preview of the selected row, in the palette's right column. Returns a row to open when
-/// one of its buttons was clicked (and whether to open its files).
+/// The preview of the selected row, in the palette's right column: text only (the row itself
+/// opens with a click, Return or ⇧Return).
 fn preview(
     ui: &mut Ui,
     selected: Option<&Row>,
     data: &PaletteData,
     address: Option<&crate::bookmarks::model::Target>,
-) -> Option<(Row, bool)> {
+) {
     let p = style::pal(ui);
     let store = data.store;
-    let mut picked = None;
     ui.spacing_mut().item_spacing.y = 12.0;
-    let bottom_buttons = |ui: &mut Ui, n: usize| {
-        // Room for the buttons at the bottom.
-        let h = n as f32 * 30.0 + (n.saturating_sub(1)) as f32 * 6.0;
-        let space = ui.available_height() - h;
-        if space > 0.0 {
-            ui.add_space(space);
-        }
-    };
-    let full_button = wide_button;
     let host_id = match selected {
         Some(Row::Host(id)) => Some(*id),
         Some(Row::Tab(i)) => data.tabs.get(*i).map(|t| t.bookmark),
         _ => None,
     };
     if let Some(b) = host_id.and_then(|id| store.bookmark(id)) {
-        let label = store.label_of(b).cloned();
-        let label_color = label.as_ref().map(|l| style::label_color(l.color, p.dark));
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 10.0;
-            kit::host_glyph(
-                ui,
-                40.0,
-                kit::host_icon(b.host_icon()),
-                label_color,
-                data.live.contains(&b.id).then_some(p.ok),
-                if p.dark {
-                    Color32::from_rgb(0x1e, 0x1e, 0x1e)
-                } else {
-                    p.nav
-                },
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 3.0;
+            ui.add(
+                egui::Label::new(
+                    RichText::new(b.display_name())
+                        .font(style::semibold(14.0))
+                        .color(p.text),
+                )
+                .truncate(),
             );
-            ui.vertical(|ui| {
-                ui.spacing_mut().item_spacing.y = 4.0;
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(b.display_name())
-                            .font(style::semibold(14.0))
-                            .color(p.text),
-                    )
-                    .truncate(),
-                );
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(b.address())
-                            .font(style::mono(11.0))
-                            .color(p.text_faint),
-                    )
-                    .truncate(),
-                );
-            });
+            ui.add(
+                egui::Label::new(
+                    RichText::new(b.address())
+                        .font(style::mono(11.0))
+                        .color(p.text_faint),
+                )
+                .truncate(),
+            );
         });
-        let has_chips = label.as_ref().is_some_and(|l| !l.tag().is_empty()) || !b.tags.is_empty();
-        if has_chips {
-            let w = ui.available_width();
-            ui.allocate_ui_with_layout(
-                vec2(w, 22.0),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| {
-                    ui.set_clip_rect(ui.max_rect());
-                    ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
-                    kit::label_tag(ui, label.as_ref(), false);
-                    for tag in b.tags.iter().take(4) {
-                        tag_chip(ui, tag, &p);
-                    }
-                },
-            );
-        }
         let login = match &b.auth {
             crate::bookmarks::Auth::Password => t("Password").to_string(),
             crate::bookmarks::Auth::Key { path } => {
@@ -1180,11 +1017,12 @@ fn preview(
             crate::bookmarks::Auth::KeychainKey => t("Pasted key").to_string(),
             crate::bookmarks::Auth::Agent { .. } => t("SSH agent").to_string(),
         };
-        let mut rows: Vec<(&str, String, Option<Color32>)> = vec![(t("Login"), login, None)];
+        let mut rows: Vec<(&str, String, Option<Color32>)> = Vec::new();
         let group = store.group_path(b.group);
         if !group.is_empty() {
             rows.push((t("Group"), group, None));
         }
+        rows.push((t("Login"), login, None));
         if let Some(j) = b.jump.and_then(|j| store.bookmark(j)) {
             rows.push((t("Via"), j.display_name(), None));
         }
@@ -1194,46 +1032,44 @@ fn preview(
                 .iter()
                 .map(|f| f.listen_port.to_string())
                 .collect();
-            rows.push((
-                t("Forwards"),
-                format!("{} ({})", b.forwards.len(), ports.join(", ")),
-                None,
-            ));
+            rows.push((t("Forwards"), ports.join(", "), None));
         }
-        if let Some((_, when)) = data.recent.iter().find(|(id, _)| *id == b.id) {
-            rows.push((t("Last"), when.clone(), None));
+        let mut tags: Vec<String> = Vec::new();
+        if let Some(l) = store.label_of(b).filter(|l| !l.tag().is_empty()) {
+            tags.push(l.tag());
         }
-        if let Some(n) = data.open.get(&b.id).filter(|n| **n > 0) {
-            let text = if *n == 1 {
+        tags.extend(b.tags.iter().take(4).cloned());
+        if !tags.is_empty() {
+            rows.push((t("Tags"), tags.join(", "), None));
+        }
+        let open = data.open.get(&b.id).copied().filter(|n| *n > 0).map(|n| {
+            if n == 1 {
                 t("1 tab open").to_string()
             } else {
                 tf("{} tabs open", &[&n.to_string()])
-            };
-            rows.push((t("Open"), text, None));
+            }
+        });
+        let when = data
+            .recent
+            .iter()
+            .find(|(id, _)| *id == b.id)
+            .map(|(_, w)| w.clone());
+        match (when, open) {
+            (Some(w), Some(o)) => rows.push((t("Last"), format!("{w}, {o}"), None)),
+            (Some(w), None) => rows.push((t("Last"), w, None)),
+            (None, Some(o)) => rows.push((t("Open"), o, None)),
+            (None, None) => {}
         }
         kv(ui, &rows);
-        bottom_buttons(ui, 2);
-        ui.spacing_mut().item_spacing.y = 6.0;
-        let row = match selected {
-            Some(Row::Tab(i)) => Row::Tab(*i),
-            _ => Row::Host(b.id),
-        };
-        if full_button(ui, kit::Kind::Primary, t("Connect"), "↩") {
-            picked = Some((row, false));
-        }
-        if full_button(
-            ui,
-            kit::Kind::Secondary,
-            t("Open Files"),
-            &mod_label("⇧↩", "Shift+Enter"),
-        ) {
-            picked = Some((Row::Host(b.id), true));
-        }
-        return picked;
+        return;
     }
     match selected {
-        Some(Row::ConnectTo(a) | Row::SaveAs(a)) => {
-            ui.label(style::section_label(t("Not saved"), p.text_muted));
+        Some(Row::ConnectTo(_) | Row::SaveAs(_)) => {
+            ui.label(
+                RichText::new(t("Not saved"))
+                    .font(style::semibold(style::BODY))
+                    .color(p.text),
+            );
             if let Some(target) = address {
                 let rows: Vec<(&str, String, Option<Color32>)> = vec![
                     (
@@ -1259,187 +1095,46 @@ fn preview(
                         && (target.user.as_ref().is_some_and(|u| *u != b.username)
                             || target.port.unwrap_or(crate::bookmarks::DEFAULT_PORT) != b.port)
                 }) {
-                    kit::callout(
+                    style::hint(
                         ui,
-                        icons::INFO,
-                        Tone::Neutral,
-                        &tf(
-                            "Same host as {} on another user and port.",
+                        tf(
+                            "Same host as {}, with another user and port.",
                             &[&other.display_name()],
                         ),
                     );
                 }
             }
-            bottom_buttons(ui, 1);
-            if full_button(ui, kit::Kind::Primary, t("Connect"), "↩") {
-                picked = Some((Row::ConnectTo(a.clone()), false));
-            }
         }
         Some(Row::Command(i)) => {
             let c = &data.commands[*i];
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 10.0;
-                let (r, _) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
-                ui.painter().rect_filled(r, CornerRadius::same(11), p.hover);
-                ui.painter().text(
-                    r.center(),
-                    Align2::CENTER_CENTER,
-                    c.icon,
-                    style::icon_font(20.0),
-                    p.text_muted,
-                );
+            ui.add(
+                egui::Label::new(
+                    RichText::new(&c.label)
+                        .font(style::semibold(14.0))
+                        .color(p.text),
+                )
+                .wrap(),
+            );
+            if let Some(d) = &c.detail {
                 ui.add(
                     egui::Label::new(
-                        RichText::new(&c.label)
-                            .font(style::semibold(14.0))
-                            .color(p.text),
+                        RichText::new(d)
+                            .font(if c.quick {
+                                style::mono(11.5)
+                            } else {
+                                style::regular(style::SMALL)
+                            })
+                            .color(p.text_muted),
                     )
                     .wrap(),
                 );
-            });
-            if let Some(d) = &c.detail {
-                egui::Frame::NONE
-                    .fill(p.well)
-                    .stroke(Stroke::new(1.0, p.border))
-                    .corner_radius(CornerRadius::same(8))
-                    .inner_margin(egui::Margin::symmetric(10, 8))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(d)
-                                    .font(if c.quick {
-                                        style::mono(11.5)
-                                    } else {
-                                        style::regular(style::SMALL)
-                                    })
-                                    .color(p.text),
-                            )
-                            .wrap(),
-                        );
-                    });
             }
             if let Some(k) = &c.shortcut {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    ui.label(
-                        RichText::new(t("Shortcut"))
-                            .font(style::regular(style::SMALL))
-                            .color(p.text_faint),
-                    );
-                    kit::kbd(ui, k);
-                });
-            }
-            bottom_buttons(ui, 1);
-            if full_button(ui, kit::Kind::Primary, t("Run"), "↩") {
-                picked = Some((Row::Command(*i), false));
+                kv(ui, &[(t("Shortcut"), k.clone(), None)]);
             }
         }
         _ => {}
     }
-    picked
-}
-
-/// A button as wide as its column (30 px): the label and its key cap, centred.
-fn wide_button(ui: &mut Ui, kind: kit::Kind, text: &str, key: &str) -> bool {
-    let p = style::pal(ui);
-    let (rect, resp) =
-        ui.allocate_exact_size(vec2(ui.available_width(), style::CONTROL_H), Sense::click());
-    let hovered = resp.hovered();
-    let pressed = resp.is_pointer_button_down_on();
-    let primary = kind == kit::Kind::Primary;
-    let (fill, stroke, color) = if primary {
-        (
-            if pressed {
-                p.accent_press
-            } else if hovered {
-                p.accent_hover
-            } else {
-                p.accent
-            },
-            Stroke::NONE,
-            p.on_accent,
-        )
-    } else {
-        (
-            if pressed {
-                p.subtle
-            } else if hovered {
-                p.hover
-            } else {
-                p.button
-            },
-            Stroke::new(
-                1.0,
-                if hovered {
-                    p.border_strong
-                } else {
-                    p.button_border
-                },
-            ),
-            p.text,
-        )
-    };
-    let painter = ui.painter();
-    painter.rect(
-        rect,
-        CornerRadius::same(style::RADIUS),
-        fill,
-        stroke,
-        StrokeKind::Inside,
-    );
-    if primary {
-        painter.hline(
-            rect.x_range().shrink(3.0),
-            rect.top() + 0.5,
-            Stroke::new(1.0, Color32::from_white_alpha(36)),
-        );
-    }
-    let g = painter.layout_no_wrap(text.to_string(), style::medium(style::BODY), color);
-    let k = painter.layout_no_wrap(key.to_string(), style::regular(style::XS), color);
-    let kw = (k.size().x + 10.0).max(20.0);
-    let total = g.size().x + 6.0 + kw;
-    let x = rect.center().x - total / 2.0;
-    let gw = g.size().x;
-    painter.galley(pos2(x, rect.center().y - g.size().y / 2.0), g, color);
-    let cap = egui::Rect::from_min_size(pos2(x + gw + 6.0, rect.center().y - 9.0), vec2(kw, 18.0));
-    painter.rect_filled(
-        cap,
-        CornerRadius::same(4),
-        if primary {
-            Color32::from_white_alpha(36)
-        } else {
-            p.hover
-        },
-    );
-    painter.galley(
-        cap.center() - k.size() / 2.0,
-        k,
-        if primary {
-            color.gamma_multiply(0.85)
-        } else {
-            p.text_faint
-        },
-    );
-    if hovered {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    resp.clicked()
-}
-
-/// A tag chip (22 px, square corners).
-fn tag_chip(ui: &mut Ui, text: &str, p: &style::Palette) {
-    let g =
-        ui.painter()
-            .layout_no_wrap(text.to_string(), style::regular(style::SMALL), p.text_muted);
-    let (rect, _) = ui.allocate_exact_size(vec2(g.size().x + 16.0, 22.0), Sense::hover());
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same(5), p.hover);
-    ui.painter().galley(
-        pos2(rect.left() + 8.0, rect.center().y - g.size().y / 2.0),
-        g,
-        p.text_muted,
-    );
 }
 
 /// Label / value rows of the preview (12 px; labels in a 74 px column).
@@ -1511,7 +1206,7 @@ pub enum Dialog {
     Confirm {
         title: String,
         message: String,
-        /// What is affected, one row each (running programs, transfers, edits, what is kept).
+        /// What is at stake, as a short list (Quit: sessions, transfers, unsaved files).
         details: Vec<ConfirmRow>,
         button: String,
         action: ConfirmAction,
@@ -1519,7 +1214,7 @@ pub enum Dialog {
         shown_at: Option<Instant>,
         /// "Don't ask again" (ticked or not), for closing a connected tab.
         dont_ask: Option<bool>,
-        /// The header line, the before → after tree, the keys.
+        /// The width.
         extra: Box<ConfirmExtra>,
     },
     GroupName {
@@ -1596,7 +1291,7 @@ pub fn confirm_close(
     )
 }
 
-/// A confirmation with everything: rows, the header line or tree, and "Don't ask again".
+/// A confirmation with everything: the list, the width, and "Don't ask again".
 pub fn confirm_rows(
     title: &str,
     message: String,
@@ -1654,25 +1349,17 @@ impl Dialog {
                     action,
                     ConfirmAction::Reconnect(_) | ConfirmAction::RestartForUpdate
                 );
-                let (icon, tone) = extra.icon.unwrap_or(match action {
-                    ConfirmAction::DeleteBookmark(_) => (icons::TRASH, Tone::Err),
-                    ConfirmAction::DeleteGroup(_) => (icons::FOLDER_MINUS, Tone::Warn),
-                    ConfirmAction::CloseTab(_) => (icons::TERMINAL_WINDOW, Tone::Neutral),
-                    ConfirmAction::Reconnect(_) => (icons::ARROWS_CLOCKWISE, Tone::Accent),
-                    ConfirmAction::RestartForUpdate => (icons::ARROW_CIRCLE_UP, Tone::Accent),
-                    ConfirmAction::Quit => (icons::POWER, Tone::Neutral),
-                });
                 let width = extra.width.unwrap_or(420.0);
                 let modal = style::modal(ctx, id).show(ctx, |ui| {
                     ui.set_width(width);
                     ui.spacing_mut().item_spacing.y = 0.0;
                     let p = style::pal(ui);
-                    confirm::header(ui, icon, tone, title, extra.sub.as_ref());
+                    confirm::header(ui, title);
                     egui::Frame::NONE
                         .inner_margin(egui::Margin {
                             left: 20,
                             right: 20,
-                            top: 14,
+                            top: 8,
                             bottom: 16,
                         })
                         .show(ui, |ui| {
@@ -1686,13 +1373,11 @@ impl Dialog {
                                 }
                                 ui.add(egui::Label::new(job).wrap());
                             }
-                            if let Some(tree) = &extra.tree {
-                                confirm::tree(ui, tree);
-                            }
-                            if !details.is_empty()
-                                && let Some(a) = confirm::rows_card(ui, details)
-                            {
-                                result = DialogResult::RunAndClose(a);
+                            if !details.is_empty() {
+                                ui.add_space(8.0);
+                                if let Some(a) = confirm::list(ui, details) {
+                                    result = DialogResult::RunAndClose(a);
+                                }
                             }
                             if let Some(ticked) = dont_ask {
                                 let r = style::checkbox(
@@ -1708,10 +1393,7 @@ impl Dialog {
                                 }
                             }
                         });
-                    let escape = extra.escape.as_deref().unwrap_or(t("to cancel"));
-                    let keys = extra.keys.as_deref().unwrap_or("↩");
-                    let (ok, cancel) =
-                        confirm::footer(ui, escape, button.as_str(), keys, destructive);
+                    let (ok, cancel) = confirm::footer(ui, button.as_str(), destructive);
                     #[cfg(debug_assertions)]
                     crate::devtest::record("confirm-ok", ok.rect);
                     #[cfg(debug_assertions)]
