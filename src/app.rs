@@ -1021,7 +1021,17 @@ impl TernaryShellApp {
         }
     }
 
-    fn open_tab(&mut self, ctx: &egui::Context, bookmark: Bookmark) {
+    fn open_tab(&mut self, ctx: &egui::Context, mut bookmark: Bookmark) {
+        // Another tab's connection to this host already runs its forwards: a second one would
+        // only find their ports taken (and say so in two error toasts).
+        if !bookmark.forwards.is_empty()
+            && matches!(
+                self.live_map().get(&bookmark.id),
+                Some(Live::Connected | Live::Connecting)
+            )
+        {
+            bookmark.forwards.clear();
+        }
         let size = self
             .tabs
             .get(self.active)
