@@ -1752,6 +1752,9 @@ const ID: &[(&str, &str)] = &[
     // ===== Redesign 3.0: main window, sidebar, Home [main] =====
     // ===== end [main] =====
 
+    // ===== Redesign 3.0: sidebar and Home [sidebar] =====
+    // ===== end [sidebar] =====
+
     // ===== Redesign 3.0: connecting, prompts, command palette [connect] =====
     // ===== end [connect] =====
 

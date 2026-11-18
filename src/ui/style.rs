@@ -215,6 +215,7 @@ struct AccentSet {
     line: Color32,
 }
 
+#[allow(clippy::too_many_arguments)]
 const fn accent_set(
     accent: u32,
     hover: u32,

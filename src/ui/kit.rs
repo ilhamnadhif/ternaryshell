@@ -1884,16 +1884,6 @@ pub fn dashed_rect(painter: &egui::Painter, rect: Rect, radius: f32, stroke: Str
     painter.extend(egui::Shape::dashed_line(&points, stroke, 7.0, 5.0));
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn labels_with_icons() {
-        assert_eq!(with_icon("+", "New"), "+  New");
-    }
-}
-
 // ---------------------------------------------------------------------------------------------
 // Host identity (Redesign 3.0): the host glyph, environment tags and label dots
 // ---------------------------------------------------------------------------------------------
@@ -2075,4 +2065,14 @@ pub fn paint_selected_row(painter: &egui::Painter, rect: Rect, p: &Palette) {
         egui::pos2(rect.left() + 2.0, rect.bottom() - 7.0),
     );
     painter.rect_filled(bar, CornerRadius::same(1), p.accent);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn labels_with_icons() {
+        assert_eq!(with_icon("+", "New"), "+  New");
+    }
 }
