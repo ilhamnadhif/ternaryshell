@@ -109,29 +109,17 @@ pub fn paint_nav(painter: &egui::Painter, nav: Rect, p: &Palette) {
     painter.vline(nav.right() - 0.5, nav.y_range(), Stroke::new(1.0, p.border));
 }
 
-/// A sheet's header: title (16 px semibold), subtitle (13 px muted), and a close button at the
-/// top right. Lays itself out in `rect` (its height comes from the text). Returns whether close
-/// was clicked.
-pub fn sheet_head(ui: &mut Ui, left: f32, top: f32, right: f32, title: &str, sub: &str) -> bool {
+/// A sheet's header: the title (16 px semibold) and a close button at the top right (Redesign
+/// 3.1: no subtitle). Returns whether close was clicked.
+pub fn sheet_head(ui: &mut Ui, left: f32, top: f32, right: f32, title: &str) -> bool {
     let p = style::pal(ui);
     let painter = ui.painter();
     let title_g = painter.layout_no_wrap(title.to_string(), style::semibold(16.0), p.text);
-    // CSS line boxes: 16 px × 1.4 and 13 px × 1.4.
+    // CSS line box: 16 px × 1.4.
     painter.galley(
         pos2(left, top + (22.4 - title_g.size().y) / 2.0),
         title_g,
         p.text,
-    );
-    let sub_g = painter.layout(
-        sub.to_string(),
-        style::regular(style::BODY),
-        p.text_muted,
-        right - left - 40.0,
-    );
-    painter.galley(
-        pos2(left, top + 22.4 + 3.0 + (18.2 - 16.0) / 2.0),
-        sub_g,
-        p.text_muted,
     );
     let close = Rect::from_min_size(pos2(right - 24.0, top - 1.0), vec2(24.0, 24.0));
     let r = ui.interact(close, egui::Id::new(("sheet-close", title)), Sense::click());
@@ -172,7 +160,7 @@ pub fn card_fill(p: &Palette) -> Color32 {
     }
 }
 
-/// A group of settings: an uppercase title (with optional controls on its right, such as a
+/// A group of settings: a title in sentence case (with optional controls on its right, such as a
 /// segmented switch) and a card holding rows (see [`row`]). The rows are drawn by `add`, which
 /// gets a [`Rows`] to count them so hairlines go between rows only.
 pub fn group(
@@ -196,21 +184,20 @@ pub fn group_q(
     let h = if title_right.is_some() { 26.0 } else { 15.4 };
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), h), Sense::hover());
     let mut job = highlight(
-        &title.to_uppercase(),
+        title,
         query,
-        style::semibold(style::XS),
-        p.text_faint,
+        style::semibold(style::SMALL),
+        p.text_muted,
         p.accent_text,
     );
     for section in &mut job.sections {
-        section.format.extra_letter_spacing = 0.66;
-        section.format.font_id = style::semibold(style::XS);
+        section.format.font_id = style::semibold(style::SMALL);
     }
     let g = ui.painter().layout_job(job);
     ui.painter().galley(
         pos2(r.left() + 2.0, r.center().y - g.size().y / 2.0),
         g,
-        p.text_faint,
+        p.text_muted,
     );
     if let Some(f) = title_right {
         let mut right = ui.new_child(
@@ -234,12 +221,11 @@ pub fn group_q(
     let _ = frame;
 }
 
-/// An uppercase section title: 11 px semibold, faint, tracked out.
+/// A section title: 12 px semibold, muted, in sentence case (Redesign 3.1).
 pub fn overline(text: &str, p: &Palette) -> RichText {
-    RichText::new(text.to_uppercase())
-        .font(style::semibold(style::XS))
-        .color(p.text_faint)
-        .extra_letter_spacing(0.66)
+    RichText::new(text)
+        .font(style::semibold(style::SMALL))
+        .color(p.text_muted)
 }
 
 /// Counts the rows of a [`group`] card.

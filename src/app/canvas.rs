@@ -256,7 +256,7 @@ impl TernaryShellApp {
         let state = tab.state();
         // A remote file open in the editor fills the canvas.
         if let Some(panel) = tab.sftp.as_mut().filter(|s| s.editor_open()) {
-            panel.show_editor(ui, body, &rt, files_ident.3.clone());
+            panel.show_editor(ui, body, &rt);
             return;
         }
         let (has_prompt, checking, was_connected) = {

@@ -1880,7 +1880,7 @@ impl ExportDialog {
             ui.set_width(600.0);
             ui.spacing_mut().item_spacing.y = 0.0;
             let p = style::pal(ui);
-            if dialog_head(ui, icons::EXPORT, t("Export connections"), Some(egui::WidgetText::from(RichText::new(t("A JSON file you can import on another computer.")).font(style::regular(style::BODY)).color(p.text_muted))), true) {
+            if dialog_head(ui, t("Export connections"), None, true) {
                 result = DialogResult::Close;
             }
             egui::Frame::NONE.inner_margin(egui::Margin { left: 20, right: 20, top: 14, bottom: 18 }).show(ui, |ui| {
@@ -1893,7 +1893,7 @@ impl ExportDialog {
                 if scope_option(ui, self.scope == ExportScope::All, t("All connections"), &tf("{} connections in {} groups", &[&store.bookmarks.len().to_string(), &groups_used.to_string()]), |_| {}).clicked() {
                     self.scope = ExportScope::All;
                 }
-                ui.add_space(8.0);
+                ui.add_space(2.0);
                 // One group.
                 let group = match &self.scope {
                     ExportScope::Group(g) => Some(*g),
@@ -1928,7 +1928,7 @@ impl ExportDialog {
                 if one.clicked() && group.is_none() && let Some(g) = store.groups.first() {
                     self.scope = ExportScope::Group(g.id);
                 }
-                ui.add_space(8.0);
+                ui.add_space(2.0);
                 // Selected.
                 let selected_mode = matches!(self.scope, ExportScope::Selected(_));
                 let n = self.picked.len();
@@ -1979,31 +1979,38 @@ impl ExportDialog {
                     }
                 }
                 let forwards: usize = list.iter().map(|b| b.forwards.len()).sum();
-                ui.label(forms::label(t("The file will include"), &p));
-                ui.add_space(6.0);
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-                    let count = |n: usize, one: &str, many: &'static str| if n == 1 { one.to_string() } else { tf(many, &[&n.to_string()]) };
-                    kit::chip(ui, Some(icons::HARD_DRIVES), &count(list.len(), t("1 connection"), "{} connections"), false);
-                    kit::chip(ui, Some(icons::FOLDERS), &count(groups.len(), t("1 group & labels"), "{} groups & labels"), false);
-                    kit::chip(ui, Some(icons::ARROWS_LEFT_RIGHT), &count(forwards, t("1 forward"), "{} forwards"), false);
-                    match &self.secrets {
-                        Some(map) => {
-                            let pw = list.iter().filter(|b| map.get(&b.id).is_some_and(|s| s.0)).count();
-                            let keys = list
-                                .iter()
-                                .filter(|b| map.get(&b.id).is_some_and(|s| s.1) || matches!(b.auth, crate::bookmarks::Auth::Key { .. }))
-                                .count();
-                            kit::chip(ui, Some(icons::PASSWORD), &count(pw, t("1 password"), "{} passwords"), false);
-                            kit::chip(ui, Some(icons::KEY), &count(keys, t("1 key"), "{} keys"), false);
-                        }
-                        None => {
-                            kit::spinner(ui, 12.0);
-                        }
+                // What the file holds, as one sentence.
+                let count = |n: usize, one: &str, many: &'static str| if n == 1 { one.to_string() } else { tf(many, &[&n.to_string()]) };
+                let conns = count(list.len(), t("1 connection"), "{} connections");
+                let grps = count(groups.len(), t("1 group with its label"), "{} groups with their labels");
+                let fwds = count(forwards, t("1 forward"), "{} forwards");
+                let sentence = match &self.secrets {
+                    Some(map) => {
+                        let pw = list.iter().filter(|b| map.get(&b.id).is_some_and(|s| s.0)).count();
+                        let keys = list
+                            .iter()
+                            .filter(|b| map.get(&b.id).is_some_and(|s| s.1) || matches!(b.auth, crate::bookmarks::Auth::Key { .. }))
+                            .count();
+                        let pws = count(pw, t("1 password"), "{} passwords");
+                        let ks = count(keys, t("1 key"), "{} keys");
+                        tf("The file will have {}, {}, {}, {} and {}.", &[&conns, &grps, &fwds, &pws, &ks])
                     }
-                });
+                    None => tf("The file will have {}, {} and {}.", &[&conns, &grps, &fwds]),
+                };
+                let sentence = RichText::new(sentence).font(style::regular(style::BODY)).color(p.text_muted);
+                if self.secrets.is_some() {
+                    ui.add(egui::Label::new(sentence).wrap());
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        ui.label(sentence);
+                        kit::spinner(ui, 12.0);
+                    });
+                }
                 ui.add_space(14.0);
-                kit::callout_rich(ui, icons::WARNING_OCTAGON, Tone::Err, |ui| {
+                // Redesign 3.1: the warning keeps its faint red box, without an icon.
+                egui::Frame::NONE.fill(style::soft(p.err, 0.07)).corner_radius(CornerRadius::same(style::RADIUS)).inner_margin(egui::Margin::symmetric(12, 9)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
                     let mut job = egui::text::LayoutJob::default();
                     job.append(t("Passwords and keys are included as plain text."), 0.0, egui::TextFormat::simple(style::semibold(style::SMALL), p.text));
                     job.append("\n", 0.0, egui::TextFormat::simple(style::regular(style::SMALL), p.text));
@@ -2015,10 +2022,8 @@ impl ExportDialog {
                     style::hint_tone(ui, e.as_str(), Tone::Err);
                 }
             });
-            dialog_foot(ui, |ui| {
-                ui.label(RichText::new(tf("schema {} · versioned JSON", &[&crate::bookmarks::transfer::EXPORT_SCHEMA_VERSION.to_string()])).font(style::regular(style::SMALL)).color(p.text_faint));
-            }, |ui| {
-                let go = kit::button_kbd(ui, kit::Kind::Primary, None, t("Export…"), Some("↩"), false, false).clicked() || enter;
+            dialog_foot(ui, |_| {}, |ui| {
+                let go = kit::primary(ui, t("Export…")).clicked() || enter;
                 if go {
                     if matches!(&self.scope, ExportScope::Selected(ids) if ids.is_empty()) {
                         self.error = Some(t("Select at least one connection.").into());
@@ -2038,15 +2043,9 @@ impl ExportDialog {
     }
 }
 
-/// A dialog's header (Redesign 3.0): a 32 px icon tile, the title (16 px) and what is under it,
-/// and a close button. Returns whether close was clicked.
-fn dialog_head(
-    ui: &mut Ui,
-    icon: &str,
-    title: &str,
-    sub: Option<egui::WidgetText>,
-    close: bool,
-) -> bool {
+/// A dialog's header (Redesign 3.1): the title (16 px), what is under it and a close button; no
+/// icon tile. Returns whether close was clicked.
+fn dialog_head(ui: &mut Ui, title: &str, sub: Option<egui::WidgetText>, close: bool) -> bool {
     let p = style::pal(ui);
     let mut closed = false;
     egui::Frame::NONE
@@ -2060,7 +2059,6 @@ fn dialog_head(
             ui.set_width(ui.available_width());
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 12.0;
-                kit::icon_tile(ui, icon, Tone::Accent, 32.0);
                 let w = ui.available_width() - if close { 36.0 } else { 0.0 };
                 ui.allocate_ui_with_layout(
                     vec2(w, 10.0),
@@ -2095,18 +2093,9 @@ fn dialog_foot(ui: &mut Ui, left: impl FnOnce(&mut Ui), right: impl FnOnce(&mut 
     let p = style::pal(ui);
     let width = ui.available_width();
     let (r, _) = ui.allocate_exact_size(vec2(width, 55.0), Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(
-        r,
-        CornerRadius {
-            nw: 0,
-            ne: 0,
-            sw: style::RADIUS_XL,
-            se: style::RADIUS_XL,
-        },
-        p.footer,
-    );
-    painter.hline(r.x_range(), r.top() + 0.5, Stroke::new(1.0, p.border));
+    // Redesign 3.1: no band behind the footer, only the line above it.
+    ui.painter()
+        .hline(r.x_range(), r.top() + 0.5, Stroke::new(1.0, p.border));
     let inner = r.shrink2(vec2(16.0, 12.0));
     let mut l = ui.new_child(
         egui::UiBuilder::new()
@@ -2134,20 +2123,19 @@ fn scope_option(
 ) -> egui::Response {
     let p = style::pal(ui);
     let width = ui.available_width();
-    let (rect, resp) =
-        ui.allocate_exact_size(vec2(width, 22.0 + 17.4 + 0.0 + 18.0), Sense::click());
+    // Redesign 3.1: a plain radio row, no card around it.
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, 12.0 + 18.2 + 16.8), Sense::click());
     let painter = ui.painter();
-    if !on && resp.hovered() {
-        painter.rect_filled(rect, CornerRadius::same(10), p.hover);
+    if resp.hovered() {
+        painter.rect_filled(rect, CornerRadius::same(6), p.hover);
     }
-    forms::choice_outline(painter, rect, 10, on, &p);
     kit::paint_radio(
         painter,
-        pos2(rect.left() + 12.0 + 8.0, rect.center().y),
+        pos2(rect.left() + 2.0 + 8.0, rect.center().y),
         on,
         &p,
     );
-    let x = rect.left() + 12.0 + 16.0 + 12.0;
+    let x = rect.left() + 2.0 + 16.0 + 12.0;
     painter.text(
         pos2(x, rect.center().y - 9.0),
         Align2::LEFT_CENTER,
@@ -2321,20 +2309,17 @@ impl ImportDialog {
             ui.spacing_mut().item_spacing.y = 0.0;
             let p = style::pal(ui);
             let kind = match self.plan.kind {
-                SourceKind::TernaryShell => "TernaryShell",
-                SourceKind::Electerm => "Electerm",
-                SourceKind::SshConfig => "SSH config",
+                SourceKind::TernaryShell => t("a TernaryShell export"),
+                SourceKind::Electerm => t("an Electerm export"),
+                SourceKind::SshConfig => t("an SSH config"),
             };
             let groups: HashSet<&str> = self.plan.items.iter().map(|i| i.group_path.as_str()).filter(|g| !g.is_empty()).collect();
-            let mut sub = egui::text::LayoutJob::default();
-            sub.append(&format!("{}  ", icons::FILE_CODE), 0.0, egui::TextFormat::simple(style::icon_font(13.0), p.text_muted));
-            sub.append(&self.source, 0.0, egui::TextFormat::simple(style::mono(11.5), p.text));
-            sub.append(
-                &format!("     {kind} · {}", tf("{} connections in {} groups", &[&self.plan.items.len().to_string(), &groups.len().to_string()])),
-                0.0,
-                egui::TextFormat::simple(style::regular(style::SMALL), p.text_faint),
+            let sub = tf(
+                "{}, {} with {} connections in {} groups",
+                &[&self.source, kind, &self.plan.items.len().to_string(), &groups.len().to_string()],
             );
-            if dialog_head(ui, icons::TRAY_ARROW_DOWN, t("Import connections"), Some(sub.into()), true) {
+            let sub = RichText::new(sub).font(style::regular(style::BODY)).color(p.text_muted);
+            if dialog_head(ui, t("Import connections"), Some(sub.into()), true) {
                 result = DialogResult::Close;
             }
             egui::Frame::NONE.inner_margin(egui::Margin { left: 20, right: 20, top: 14, bottom: 18 }).show(ui, |ui| {
@@ -2345,27 +2330,21 @@ impl ImportDialog {
                 let changed = self.plan.items.iter().filter(|i| matches!(i.status, ItemStatus::Conflict { matched_by: MatchedBy::Id, .. })).count();
                 let here = self.plan.items.iter().filter(|i| matches!(i.status, ItemStatus::Identical { .. })).count();
                 let conflicts = self.plan.items.iter().filter(|i| matches!(i.status, ItemStatus::Conflict { matched_by: MatchedBy::Endpoint, .. })).count();
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    let w = (ui.available_width() - 24.0) / 4.0;
-                    for (n, icon, label, color, warn) in [
-                        (new, icons::PLUS_CIRCLE, t("new"), p.ok, false),
-                        (changed, icons::ARROWS_CLOCKWISE, t("changed"), p.accent_text, false),
-                        (here, icons::CHECK, t("already here"), p.text_faint, false),
-                        (conflicts, icons::WARNING, if conflicts == 1 { t("conflict") } else { t("conflicts") }, p.warn, true),
-                    ] {
-                        let (r, _) = ui.allocate_exact_size(vec2(w, 58.0), Sense::hover());
-                        let painter = ui.painter();
-                        if warn && n > 0 {
-                            painter.rect_filled(r, CornerRadius::same(10), p.tone_soft(Tone::Warn));
-                        } else {
-                            painter.rect_stroke(r, CornerRadius::same(10), Stroke::new(1.0, p.border), StrokeKind::Inside);
-                        }
-                        painter.text(pos2(r.left() + 12.0, r.top() + 10.0 + 12.0), Align2::LEFT_CENTER, n.to_string(), style::semibold(20.0), color);
-                        painter.text(pos2(r.left() + 12.0 + 7.0, r.bottom() - 10.0 - 8.0), Align2::CENTER_CENTER, icon, style::icon_font(13.0), p.text_muted);
-                        painter.text(pos2(r.left() + 12.0 + 14.0 + 6.0, r.bottom() - 10.0 - 8.0), Align2::LEFT_CENTER, label, style::regular(style::SMALL), p.text_muted);
-                    }
-                });
+                let mut parts: Vec<String> = Vec::new();
+                if new > 0 {
+                    parts.push(tf("{} new", &[&new.to_string()]));
+                }
+                if changed > 0 {
+                    parts.push(tf("{} changed", &[&changed.to_string()]));
+                }
+                if here > 0 {
+                    parts.push(tf("{} already here", &[&here.to_string()]));
+                }
+                if conflicts > 0 {
+                    parts.push(if conflicts == 1 { t("1 conflict").to_string() } else { tf("{} conflicts", &[&conflicts.to_string()]) });
+                }
+                let summary = if parts.is_empty() { t("Nothing to import.").to_string() } else { format!("{}.", parts.join(", ")) };
+                ui.label(RichText::new(summary).font(style::regular(style::BODY)).color(p.text_muted));
                 for w in &self.plan.warnings {
                     ui.add_space(12.0);
                     kit::callout(ui, icons::WARNING, Tone::Warn, w);
@@ -2402,7 +2381,7 @@ impl ImportDialog {
                 let diffs = self.diffs.clone().unwrap_or_default();
                 egui::Frame::NONE
                     .stroke(Stroke::new(1.0, p.border))
-                    .corner_radius(CornerRadius::same(10))
+                    .corner_radius(CornerRadius::same(8))
                     .show(ui, |ui| {
                         ui.set_width(width);
                         egui::ScrollArea::vertical().max_height(list_h).auto_shrink([false, true]).show(ui, |ui| {
@@ -2413,7 +2392,6 @@ impl ImportDialog {
                                 let count = self.plan.items.iter().filter(|i| &i.group_path == path).count();
                                 let (r, _) = ui.allocate_exact_size(vec2(width, 30.0), Sense::hover());
                                 let painter = ui.painter();
-                                painter.rect_filled(r, if first { CornerRadius { nw: 9, ne: 9, sw: 0, se: 0 } } else { CornerRadius::ZERO }, p.hover);
                                 if !first {
                                     painter.hline(r.x_range(), r.top() + 0.5, Stroke::new(1.0, p.line_soft));
                                 }
@@ -2445,9 +2423,9 @@ impl ImportDialog {
                 if commands > 0 {
                     ui.add_space(14.0);
                     let r = egui::Frame::NONE
-                        .fill(p.tone_soft(Tone::Warn))
-                        .corner_radius(CornerRadius::same(style::RADIUS_MD))
-                        .inner_margin(egui::Margin::symmetric(12, 10))
+                        .fill(style::soft(p.warn, 0.07))
+                        .corner_radius(CornerRadius::same(style::RADIUS))
+                        .inner_margin(egui::Margin::symmetric(12, 9))
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
                             ui.horizontal_top(|ui| {
@@ -2521,7 +2499,6 @@ impl ImportDialog {
             let p = style::pal(ui);
             dialog_head(
                 ui,
-                icons::LOCK_KEY,
                 t("Unlock passwords and keys"),
                 Some(RichText::new(t("This file contains encrypted passwords and keys. Enter the export passphrase to import them, or continue without them.")).font(style::regular(style::BODY)).color(p.text_muted).into()),
                 false,
@@ -2597,7 +2574,7 @@ impl ImportDialog {
 }
 
 /// A connection in the import list: a checkbox (whether it is imported), its glyph, name,
-/// address and what will happen; a conflict is tinted and shows what differs.
+/// address and what will happen in coloured words; a conflict shows what differs.
 fn import_row(
     ui: &mut Ui,
     i: usize,
@@ -2627,9 +2604,6 @@ fn import_row(
     let h = if show_diff { 40.0 + 20.0 } else { 40.0 };
     let (r, _) = ui.allocate_exact_size(vec2(width, h), Sense::hover());
     let painter = ui.painter();
-    if conflict {
-        painter.rect_filled(r, 0.0, p.tone_soft(Tone::Warn));
-    }
     painter.hline(r.x_range(), r.top() + 0.5, Stroke::new(1.0, p.line_soft));
     let row = egui::Rect::from_min_size(r.min, vec2(width, 40.0));
     let cy = row.center().y;
@@ -2768,7 +2742,7 @@ fn import_row(
                 true,
             );
             item.resolution = res;
-            kit::badge(&mut right, t("Conflict"), Tone::Warn, Some(icons::WARNING))
+            kit::badge(&mut right, t("Conflict"), Tone::Warn, None)
                 .on_hover_text(t("same host, port and user"));
         }
     }
@@ -3043,7 +3017,10 @@ impl SettingsDialog {
                 p.text,
             );
             let search_r = egui::Rect::from_min_size(
-                pos2(nav.left() + 10.0, nav.top() + 16.0 + 2.0 + 21.0 + 12.0 + 2.0),
+                pos2(
+                    nav.left() + 10.0,
+                    nav.top() + 16.0 + 2.0 + 21.0 + 12.0 + 2.0,
+                ),
                 vec2(nav.width() - 20.0, 28.0),
             );
             let mut search_ui = ui.new_child(egui::UiBuilder::new().max_rect(search_r));
@@ -3059,10 +3036,18 @@ impl SettingsDialog {
             crate::devtest::record("settings-search", sr.rect);
             let _ = sr;
             let pages = [
-                (SettingsTab::General, icons::SLIDERS_HORIZONTAL, t("General")),
+                (
+                    SettingsTab::General,
+                    icons::SLIDERS_HORIZONTAL,
+                    t("General"),
+                ),
                 (SettingsTab::Appearance, icons::PALETTE, t("Appearance")),
                 (SettingsTab::Terminal, icons::TERMINAL_WINDOW, t("Terminal")),
-                (SettingsTab::QuickCommands, icons::LIGHTNING, t("Quick Commands")),
+                (
+                    SettingsTab::QuickCommands,
+                    icons::LIGHTNING,
+                    t("Quick Commands"),
+                ),
                 (SettingsTab::Shortcuts, icons::KEYBOARD, t("Shortcuts")),
             ];
             let searching = !self.query.trim().is_empty();
@@ -3100,7 +3085,8 @@ impl SettingsDialog {
                 }
             }
             // A search that has nothing on this page moves to the first page that has.
-            if searching && counts[self.tab as usize] == 0
+            if searching
+                && counts[self.tab as usize] == 0
                 && let Some(first) = SettingsTab::ALL.iter().find(|t| counts[**t as usize] > 0)
                 && ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Text(_))))
             {
@@ -3121,32 +3107,23 @@ impl SettingsDialog {
                 style::regular(style::SMALL),
                 p.accent_text,
             );
-            let link_r = egui::Rect::from_min_size(
-                pos2(foot_x, foot_top + 19.2),
-                vec2(g.size().x, 19.2),
-            );
+            let link_r =
+                egui::Rect::from_min_size(pos2(foot_x, foot_top + 19.2), vec2(g.size().x, 19.2));
             let link = ui.interact(link_r, egui::Id::new("settings-check"), Sense::click());
             ui.painter().galley(
                 pos2(foot_x, link_r.center().y - g.size().y / 2.0),
                 g,
-                if link.hovered() { p.accent } else { p.accent_text },
+                if link.hovered() {
+                    p.accent
+                } else {
+                    p.accent_text
+                },
             );
             if link.clicked() {
                 result = DialogResult::Run(Action::CheckForUpdates);
             }
             // The page.
             let main = egui::Rect::from_min_max(pos2(nav.right(), full.top()), full.max);
-            let subtitle = match self.tab {
-                SettingsTab::General => t("Changes apply right away."),
-                SettingsTab::Appearance => t("How TernaryShell and its terminals look."),
-                SettingsTab::Terminal => t("Text, cursor and keyboard in every terminal."),
-                SettingsTab::QuickCommands => t(
-                    "Commands you send often, from ⚡ in the toolbar, the command palette, or ⌃1–⌃9.",
-                ),
-                SettingsTab::Shortcuts => {
-                    t("Every command is also in the menu and in the command palette.")
-                }
-            };
             let title = pages.iter().find(|x| x.0 == self.tab).map_or("", |x| x.2);
             if forms::sheet_head(
                 ui,
@@ -3154,12 +3131,11 @@ impl SettingsDialog {
                 main.top() + 20.0,
                 main.right() - 24.0,
                 title,
-                subtitle,
             ) {
                 result = DialogResult::Close;
             }
             let body = egui::Rect::from_min_max(
-                pos2(main.left(), main.top() + 20.0 + 22.4 + 3.0 + 18.2 + 4.0),
+                pos2(main.left(), main.top() + 20.0 + 22.4 + 4.0),
                 main.max,
             );
             let mut body_ui = ui.new_child(egui::UiBuilder::new().max_rect(body));
