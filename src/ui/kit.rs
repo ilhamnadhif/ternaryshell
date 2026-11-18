@@ -1447,19 +1447,15 @@ pub fn menu_item_ex(
             });
         let hl = enabled && (resp.hovered() || open || resp.has_focus());
         let painter = ui.painter();
+        // Hover and keyboard focus share the neutral fill (Redesign 3.0): the accent fill is
+        // kept for the command palette's default row.
         if hl {
-            painter.rect_filled(rect, CornerRadius::same(5), p.accent);
+            painter.rect_filled(rect, CornerRadius::same(style::RADIUS), p.hover);
         }
         let base = if danger { p.err } else { p.text };
         let fade = |c: Color32| if enabled { c } else { c.gamma_multiply(0.4) };
-        let text_color = fade(if hl { p.on_accent } else { base });
-        let icon_color = fade(if hl {
-            p.on_accent
-        } else if danger {
-            p.err
-        } else {
-            p.text_muted
-        });
+        let text_color = fade(base);
+        let icon_color = fade(if danger { p.err } else { p.text_muted });
         if let Some(i) = icon {
             painter.text(
                 pos2(rect.left() + 8.0 + 8.0, rect.center().y),
@@ -1482,20 +1478,15 @@ pub fn menu_item_ex(
                 Align2::CENTER_CENTER,
                 icons::CARET_RIGHT,
                 style::icon_font(12.0),
-                if hl { p.on_accent } else { p.text_faint },
+                p.text_faint,
             );
             right -= 20.0;
         }
         if let Some(g) = sc_g {
-            let color = if hl {
-                p.on_accent.gamma_multiply(0.9)
-            } else {
-                p.text_faint
-            };
             painter.galley(
                 pos2(right - g.size().x, rect.center().y - g.size().y / 2.0),
                 g,
-                fade(color),
+                fade(p.text_faint),
             );
         }
     }

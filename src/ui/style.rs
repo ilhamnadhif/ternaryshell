@@ -611,7 +611,7 @@ pub fn apply(ctx: &egui::Context, mode: ThemeMode) {
             // egui's ring around a focused text field (`Field` adds the soft halo).
             v.selection.stroke = Stroke::new(1.0, p.accent);
             v.window_corner_radius = CornerRadius::same(RADIUS_XL);
-            v.menu_corner_radius = CornerRadius::same(RADIUS_MD);
+            v.menu_corner_radius = CornerRadius::same(10);
             v.window_stroke = Stroke::new(
                 1.0,
                 if dark {
