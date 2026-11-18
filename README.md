@@ -32,7 +32,11 @@ memory with a session open.
   saves, and transfers that never leave half-written files behind.
 - **Automatic updates** from GitHub releases, with one click to install.
 - **macOS, Windows and Linux**, each with its own installers and shortcuts.
-- English and Indonesian UI, light and dark themes, no telemetry.
+- **Labels for environments**: give a group or a connection a colour and a short tag (`PROD` in red,
+  `STG` in yellow). It follows the host to its sidebar icon, its tabs, the edge of its terminal and the
+  status bar, so production is never mistaken for staging.
+- English and Indonesian UI, light and dark themes, six accent colours, a compact density, no
+  telemetry.
 
 ## Install
 
@@ -161,10 +165,15 @@ The data folder holds the connections, settings and known hosts.
   row. Each hop checks its own host key and logs in with its own method.
 - **Port forwarding** per connection, started when it connects: local (`-L`), remote (`-R`) and a
   SOCKS proxy (`-D`). The status bar shows the forwards and says when a port is already in use.
-- Nested groups, closed when TernaryShell opens; drag and drop to reorder or regroup.
+- Nested groups: top-level groups are sections of the sidebar, subgroups start closed; drag and
+  drop to reorder or regroup. Each connection shows an icon for its kind of machine (server,
+  database, bastion, Raspberry Pi…), picked from its tags or chosen in Edit Connection.
+- **Home**: with no tab open, your recent connections as cards (`⌘1`–`⌘6`, `Alt+1`–`Alt+6`), your
+  groups, and the hosts of `~/.ssh/config` that are not imported yet.
 - Fuzzy search over name, host, user, tags and group. Press Enter to connect.
-- `⌘K` (`Ctrl+Shift+K`) opens a command palette. Typing `user@host:port` there (IPv6 as `[::1]:22`) connects without
-  a saved connection.
+- `⌘K` (`Ctrl+Shift+K`) opens a command palette: connections, actions, quick commands and open tabs,
+  with details of the selected connection beside the list (Tab cycles the scopes, `>` lists actions).
+  Typing `user@host:port` there (IPv6 as `[::1]:22`) connects without a saved connection.
 - Open from the command line: `open -a TernaryShell --args web-01` or `--args deploy@10.0.0.5:2222`.
   TernaryShell runs as a single instance: launching it again opens the tab in the window that is already
   open.
@@ -186,16 +195,19 @@ The data folder holds the connections, settings and known hosts.
   scrollback.
 - Option as Meta on macOS (optional) and Alt as Meta on Windows and Linux, for readline and Emacs. It works with any keyboard layout, and only
   while a terminal has focus.
-- Quick commands (the lightning button), nine colour schemes, and a choice of fonts (or your own
-  font file).
+- Quick commands (the lightning button, `⌃1`–`⌃9` on macOS), nine colour schemes, and a choice of
+  fonts (or your own font file).
+- The status bar shows the connection, its jump host, the shell's folder (when the shell puts it in
+  the window title), port forwards, transfers and the round-trip time to the server.
 
 ### SFTP (`⇧⌘F`, `Ctrl+Shift+F`)
 
 ![Dual-pane SFTP with grouped toolbar buttons and the transfers popup](docs/screenshots/sftp.png)
 
-- Local and remote lists side by side, over the same SSH connection. Each side has two button
-  groups (**Up**, **Home**, **Refresh**, then **New folder** and **Show hidden files**) and a
-  full-width path field; the lists run to the bottom of the panel.
+- The **Files** panel: local and remote lists side by side, over the same SSH connection, under the
+  terminal or filling the tab. Each side has two button groups (**Up**, **Home**, **Refresh**, then
+  **New folder** and **Show hidden files**) and a path you can click or type; the lists run to the
+  bottom of the panel. A path selected in the terminal opens there with **Open in Files**.
 - **Upload, download, rename, delete (recursive), new folder, chmod.**
 - **Many files at once**: select with ⌘-click (Ctrl-click), ⇧-click or `⌘A` (`Ctrl+A`) over a list,
   then drag between the lists, drop files from Finder or Explorer, or use the right-click menu.
@@ -270,7 +282,7 @@ as Meta key** is on in Settings. Every command is also in the menu: the menu bar
 | Split right / down | `⌘D` / `⇧⌘D` | `Ctrl+Shift+D` / `Ctrl+Alt+Shift+D` |
 | Previous / next pane | `⌘[` / `⌘]` | `Ctrl+Shift+[` / `Ctrl+Shift+]` |
 | Sidebar | `⌘B` | `Ctrl+Shift+B` |
-| SFTP panel | `⇧⌘F` | `Ctrl+Shift+F` |
+| Files panel (SFTP) | `⇧⌘F` | `Ctrl+Shift+F` |
 | Text size | `⌘=` / `⌘-` / `⌘0` | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` |
 | Clear scrollback | `⌥⌘K` | `Ctrl+Shift+L` |
 | Scroll history | `⇧PageUp` / `⇧PageDown` / `⇧Home` / `⇧End` | the same |

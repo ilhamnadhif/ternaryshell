@@ -33,7 +33,11 @@ dalam ±0,1 detik, CPU 0% saat diam, dan memakai sekitar 70 MB memori dengan sat
   `@revoked`), penyimpanan yang aman, dan transfer yang tidak pernah meninggalkan file setengah jadi.
 - **Update otomatis** dari rilis GitHub, dipasang dengan satu klik.
 - **macOS, Windows, dan Linux**, masing-masing dengan installer dan pintasannya sendiri.
-- Antarmuka bahasa Inggris dan Indonesia, tema terang dan gelap, tanpa telemetri.
+- **Label untuk environment**: beri grup atau koneksi warna dan tag pendek (`PROD` merah, `STG`
+  kuning). Label ikut ke ikon host di sidebar, tab, tepi terminal, dan status bar, jadi production
+  tidak tertukar dengan staging.
+- Antarmuka bahasa Inggris dan Indonesia, tema terang dan gelap, enam warna aksen, mode ringkas,
+  tanpa telemetri.
 
 ## Instalasi
 
@@ -165,7 +169,11 @@ Folder data berisi koneksi, pengaturan, dan known hosts.
   berturut-turut. Setiap hop memeriksa host key-nya sendiri dan login dengan metodenya sendiri.
 - **Port forwarding** per koneksi, aktif saat tersambung: lokal (`-L`), remote (`-R`), dan proxy
   SOCKS (`-D`). Status bar menampilkan forward-nya dan memberi tahu kalau port sudah dipakai.
-- Grup bertingkat, tertutup saat TernaryShell dibuka; drag and drop untuk mengurutkan atau memindah grup.
+- Grup bertingkat: grup tingkat atas tampil sebagai seksi sidebar, subgrup tertutup saat dibuka;
+  drag and drop untuk mengurutkan atau memindah grup. Tiap koneksi punya ikon jenis mesin (server,
+  database, bastion, Raspberry Pi…), dipilih dari tag-nya atau di Edit Connection.
+- **Home**: saat tidak ada tab, koneksi terbaru tampil sebagai kartu (`⌘1`–`⌘6`, `Alt+1`–`Alt+6`),
+  grup Anda, dan host di `~/.ssh/config` yang belum diimpor.
 - Pencarian fuzzy pada nama, host, user, tag, dan grup. Tekan Enter untuk konek.
 - `⌘K` membuka palet perintah. Mengetik `user@host:port` di sana (IPv6 sebagai `[::1]:22`) langsung
   konek tanpa menyimpan koneksi.
@@ -189,15 +197,20 @@ Folder data berisi koneksi, pengaturan, dan known hosts.
   tab dan mempertahankan scrollback.
 - Option sebagai Meta di macOS (opsional) dan Alt sebagai Meta di Windows dan Linux, untuk readline dan Emacs. Bekerja dengan layout keyboard apa pun,
   dan hanya aktif saat terminal yang memegang keyboard.
-- Quick commands (tombol petir), sembilan skema warna, dan pilihan font (atau file font sendiri).
+- Quick commands (tombol petir, `⌃1`–`⌃9` di macOS), sembilan skema warna, dan pilihan font (atau
+  file font sendiri).
+- Status bar menampilkan koneksi, jump host, folder shell (bila shell menaruhnya di judul jendela),
+  port forward, transfer, dan waktu bolak-balik ke server.
 
 ### SFTP (`⇧⌘F`, `Ctrl+Shift+F`)
 
 ![SFTP dua panel dengan grup tombol toolbar dan popup transfer](docs/screenshots/sftp.png)
 
-- Daftar lokal dan remote berdampingan, di atas koneksi SSH yang sama. Tiap sisi punya dua grup
-  tombol (**Naik**, **Beranda**, **Muat ulang**, lalu **Folder baru** dan **Tampilkan file
-  tersembunyi**) dan kolom path selebar panel; daftar file memenuhi panel sampai ke bawah.
+- Panel **File**: daftar lokal dan remote berdampingan, di atas koneksi SSH yang sama, di bawah
+  terminal atau memenuhi tab. Tiap sisi punya dua grup tombol (**Naik**, **Beranda**, **Muat
+  ulang**, lalu **Folder baru** dan **Tampilkan file tersembunyi**) dan path yang bisa diklik atau
+  diketik; daftar file memenuhi panel sampai ke bawah. Path yang dipilih di terminal bisa dibuka di
+  sana lewat **Buka di File**.
 - **Upload, download, ganti nama, hapus (rekursif), folder baru, chmod.**
 - **Banyak file sekaligus**: pilih dengan ⌘-klik (Ctrl-klik), ⇧-klik, atau `⌘A` (`Ctrl+A`) saat
   kursor di atas daftar, lalu drag antar daftar, drop file dari Finder atau Explorer, atau pakai menu
@@ -271,7 +284,7 @@ Meta key** dinyalakan di Pengaturan. Semua perintah juga ada di menu: menu bar d
 | Split kanan / bawah | `⌘D` / `⇧⌘D` | `Ctrl+Shift+D` / `Ctrl+Alt+Shift+D` |
 | Pane sebelumnya / berikutnya | `⌘[` / `⌘]` | `Ctrl+Shift+[` / `Ctrl+Shift+]` |
 | Sidebar | `⌘B` | `Ctrl+Shift+B` |
-| Panel SFTP | `⇧⌘F` | `Ctrl+Shift+F` |
+| Panel File (SFTP) | `⇧⌘F` | `Ctrl+Shift+F` |
 | Ukuran teks | `⌘=` / `⌘-` / `⌘0` | `Ctrl+=` / `Ctrl+-` / `Ctrl+0` |
 | Hapus scrollback | `⌥⌘K` | `Ctrl+Shift+L` |
 | Gulir riwayat | `⇧PageUp` / `⇧PageDown` / `⇧Home` / `⇧End` | sama |
