@@ -168,8 +168,8 @@ The data folder holds the connections, settings and known hosts.
 - Nested groups: top-level groups are sections of the sidebar, subgroups start closed; drag and
   drop to reorder or regroup. Each connection shows an icon for its kind of machine (server,
   database, bastion, Raspberry Pi…), picked from its tags or chosen in Edit Connection.
-- **Home**: with no tab open, your recent connections as cards (`⌘1`–`⌘6`, `Alt+1`–`Alt+6`), your
-  groups, and the hosts of `~/.ssh/config` that are not imported yet.
+- **Home**: with no tab open, a search field and your recent connections (`⌘1`–`⌘6`,
+  `Alt+1`–`Alt+6`), and a line about hosts of `~/.ssh/config` that are not imported yet.
 - Fuzzy search over name, host, user, tags and group. Press Enter to connect.
 - `⌘K` (`Ctrl+Shift+K`) opens a command palette: connections, actions, quick commands and open tabs,
   with details of the selected connection beside the list (Tab cycles the scopes, `>` lists actions).

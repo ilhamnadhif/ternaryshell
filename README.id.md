@@ -172,8 +172,8 @@ Folder data berisi koneksi, pengaturan, dan known hosts.
 - Grup bertingkat: grup tingkat atas tampil sebagai seksi sidebar, subgrup tertutup saat dibuka;
   drag and drop untuk mengurutkan atau memindah grup. Tiap koneksi punya ikon jenis mesin (server,
   database, bastion, Raspberry Pi…), dipilih dari tag-nya atau di Edit Connection.
-- **Home**: saat tidak ada tab, koneksi terbaru tampil sebagai kartu (`⌘1`–`⌘6`, `Alt+1`–`Alt+6`),
-  grup Anda, dan host di `~/.ssh/config` yang belum diimpor.
+- **Home**: saat tidak ada tab, kolom cari dan daftar koneksi terbaru (`⌘1`–`⌘6`, `Alt+1`–`Alt+6`),
+  plus satu baris tentang host di `~/.ssh/config` yang belum diimpor.
 - Pencarian fuzzy pada nama, host, user, tag, dan grup. Tekan Enter untuk konek.
 - `⌘K` membuka palet perintah. Mengetik `user@host:port` di sana (IPv6 sebagai `[::1]:22`) langsung
   konek tanpa menyimpan koneksi.
