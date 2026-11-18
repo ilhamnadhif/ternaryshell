@@ -9,6 +9,8 @@ on:
   push:
     branches: [master]
     tags: ["v*"]
+    # The website alone doesn't need the app tested (path filters never apply to tags).
+    paths-ignore: ["site/**", ".github/workflows/pages.yml"]
   pull_request:
   workflow_dispatch:
 

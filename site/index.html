@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="en" class="no-js">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TernaryShell — a native SSH and SFTP client</title>
+<meta name="description" content="A native SSH and SFTP client for macOS, Windows and Linux, written in Rust. Labels keep production apart from staging, Files moves things over the same connection, and it opens in a tenth of a second. Free and open source.">
+<meta name="theme-color" content="#0a0a0a">
+<link rel="canonical" href="https://ilhamnadhif.github.io/ternaryshell/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="TernaryShell">
+<meta property="og:title" content="TernaryShell — which server are you on?">
+<meta property="og:description" content="A native SSH and SFTP client for macOS, Windows and Linux. Free and open source.">
+<meta property="og:url" content="https://ilhamnadhif.github.io/ternaryshell/">
+<meta property="og:image" content="https://ilhamnadhif.github.io/ternaryshell/assets/img/og.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://ilhamnadhif.github.io/ternaryshell/assets/img/og.jpg">
+<link rel="icon" href="assets/img/icon.svg" type="image/svg+xml">
+<link rel="icon" href="assets/img/favicon-64.png" type="image/png" sizes="64x64">
+<link rel="apple-touch-icon" href="assets/img/icon-180.png">
+<link rel="preload" href="assets/fonts/inter-600.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="assets/fonts/inter-400.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="assets/fonts/jbm-400.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="assets/site.css">
+<script>document.documentElement.classList.replace('no-js', 'js')</script>
+</head>
+<body>
+
+<!-- Icons: one stroke set, drawn on a 24 px grid like the app's. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-server" viewBox="0 0 24 24"><rect x="3.5" y="4" width="17" height="7" rx="1.5"/><rect x="3.5" y="13" width="17" height="7" rx="1.5"/><path d="M16.5 7.5h.01M16.5 16.5h.01"/></symbol>
+    <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7.5" ry="2.8"/><path d="M4.5 6v12c0 1.55 3.36 2.8 7.5 2.8s7.5-1.25 7.5-2.8V6M4.5 12c0 1.55 3.36 2.8 7.5 2.8s7.5-1.25 7.5-2.8"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3.2l7.5 2.8v5.6c0 4.3-3.1 7.9-7.5 9.2-4.4-1.3-7.5-4.9-7.5-9.2V6z"/><path d="M9 12l2.2 2.2L15.2 10"/></symbol>
+    <symbol id="i-shield-plain" viewBox="0 0 24 24"><path d="M12 3.2l7.5 2.8v5.6c0 4.3-3.1 7.9-7.5 9.2-4.4-1.3-7.5-4.9-7.5-9.2V6z"/></symbol>
+    <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/><rect x="9.5" y="9.5" width="5" height="5" rx=".5"/><path d="M9.5 3v3M14.5 3v3M9.5 18v3M14.5 18v3M3 9.5h3M3 14.5h3M18 9.5h3M18 14.5h3"/></symbol>
+    <symbol id="i-board" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="1.5"/><path d="M8 3.5v4.5l3 3v3.5M16 20.5v-4l-3-3"/><circle cx="11" cy="16" r="1.3"/><circle cx="16.5" cy="7.5" r="1.3"/></symbol>
+    <symbol id="i-drive" viewBox="0 0 24 24"><rect x="3" y="8" width="18" height="8" rx="1.5"/><path d="M16.5 12h.01M6.5 12h5"/></symbol>
+    <symbol id="i-desktop" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="12" rx="1.5"/><path d="M9 20h6M12 16.5V20"/></symbol>
+    <symbol id="i-laptop" viewBox="0 0 24 24"><path d="M5 16V6.5a1 1 0 011-1h12a1 1 0 011 1V16"/><path d="M3 16h18v1.5a1 1 0 01-1 1H4a1 1 0 01-1-1z"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3.5 6.5a1 1 0 011-1h4.6l2 2.2h8.4a1 1 0 011 1V18a1 1 0 01-1 1h-15a1 1 0 01-1-1z"/></symbol>
+    <symbol id="i-folder-plus" viewBox="0 0 24 24"><path d="M3.5 6.5a1 1 0 011-1h4.6l2 2.2h8.4a1 1 0 011 1V18a1 1 0 01-1 1h-15a1 1 0 01-1-1z"/><path d="M12 10.5v5M9.5 13h5"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M6.5 3.5H14l4 4v12.5a.5.5 0 01-.5.5h-11a.5.5 0 01-.5-.5V4a.5.5 0 01.5-.5z"/><path d="M14 3.5V8h4"/></symbol>
+    <symbol id="i-file-code" viewBox="0 0 24 24"><path d="M6.5 3.5H14l4 4v12.5a.5.5 0 01-.5.5h-11a.5.5 0 01-.5-.5V4a.5.5 0 01.5-.5z"/><path d="M14 3.5V8h4M10.3 12l-2 2 2 2M13.7 12l2 2-2 2"/></symbol>
+    <symbol id="i-file-zip" viewBox="0 0 24 24"><path d="M6.5 3.5H14l4 4v12.5a.5.5 0 01-.5.5h-11a.5.5 0 01-.5-.5V4a.5.5 0 01.5-.5z"/><path d="M14 3.5V8h4M10 6h1.5M10 9h1.5M10 12h1.5M10 15h1.5v2.5H10z"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 005.66 0l3-3A4 4 0 0013 5.34l-1 1M14 10a4 4 0 00-5.66 0l-3 3A4 4 0 0011 18.66l1-1"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.2M12 18.8V21M3 12h2.2M18.8 12H21M5.6 5.6l1.6 1.6M16.8 16.8l1.6 1.6M5.6 18.4l1.6-1.6M16.8 7.2l1.6-1.6"/></symbol>
+    <symbol id="i-tray" viewBox="0 0 24 24"><path d="M4 14v4.5a1 1 0 001 1h14a1 1 0 001-1V14"/><path d="M12 4v10.5M8 10.5l4 4 4-4"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M4 14v4.5a1 1 0 001 1h14a1 1 0 001-1V14"/><path d="M12 4v10.5M8 10.5l4 4 4-4"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M4 14v4.5a1 1 0 001 1h14a1 1 0 001-1V14"/><path d="M12 15V4.5M8 8.5l4-4 4 4"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 3L5.5 13.5h6L10.5 21 18.5 10.5h-6z"/></symbol>
+    <symbol id="i-columns" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="1.5"/><path d="M12 4.5v15"/></symbol>
+    <symbol id="i-sidebar" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="1.5"/><path d="M9 4.5v15"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></symbol>
+    <symbol id="i-caret-down" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5"/></symbol>
+    <symbol id="i-caret-right" viewBox="0 0 24 24"><path d="M10 7l5 5-5 5"/></symbol>
+    <symbol id="i-caret-up" viewBox="0 0 24 24"><path d="M7 14l5-5 5 5"/></symbol>
+    <symbol id="i-arrow-up" viewBox="0 0 24 24"><path d="M12 19V5M6 11l6-6 6 6"/></symbol>
+    <symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+    <symbol id="i-arrow-left" viewBox="0 0 24 24"><path d="M19 12H5M11 6l-6 6 6 6"/></symbol>
+    <symbol id="i-house" viewBox="0 0 24 24"><path d="M4.5 10.5L12 4.2l7.5 6.3V19.5h-5v-5.5h-5v5.5h-5z"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M19.5 12a7.5 7.5 0 11-2.2-5.3M19.5 4.5V9H15"/></symbol>
+    <symbol id="i-replay" viewBox="0 0 24 24"><path d="M4.5 12a7.5 7.5 0 102.2-5.3M4.5 4.5V9H9"/></symbol>
+    <symbol id="i-eye-slash" viewBox="0 0 24 24"><path d="M4 4l16 16M10.6 6.1c.5-.1.9-.1 1.4-.1 5 0 8.5 4.5 9 6-.25.75-1 2.1-2.4 3.4M6.6 7.6C4.6 8.9 3.4 10.9 3 12c.5 1.5 4 6 9 6 1.4 0 2.6-.3 3.7-.9M9.9 9.9a3 3 0 004.2 4.2"/></symbol>
+    <symbol id="i-arrows" viewBox="0 0 24 24"><path d="M4 8.5h15M15.5 5l3.5 3.5-3.5 3.5M20 15.5H5M8.5 12L5 15.5 8.5 19"/></symbol>
+    <symbol id="i-expand" viewBox="0 0 24 24"><path d="M14.5 4.5h5v5M9.5 19.5h-5v-5M19.5 4.5l-6 6M4.5 19.5l6-6"/></symbol>
+    <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12.5h4l2.2-5.5 4.6 10 2.2-4.5H21"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+    <symbol id="i-check-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M8.5 12.2l2.4 2.4 4.6-4.6"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11.5" height="11.5" rx="1.5"/><path d="M15.5 8.5V5.5A1.5 1.5 0 0014 4H5.5A1.5 1.5 0 004 5.5V14a1.5 1.5 0 001.5 1.5h3"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15.5" r="4"/><path d="M11 12.5L19.5 4M16.5 7l2.5 2.5M14.2 9.3l2 2"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="1.5"/><path d="M7.5 9.5l3 2.5-3 2.5M12.5 15h4"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="1.5"/><path d="M8.5 10.5v-3a3.5 3.5 0 017 0v3"/></symbol>
+    <symbol id="i-code" viewBox="0 0 24 24"><path d="M8.5 7L3.5 12l5 5M15.5 7l5 5-5 5"/></symbol>
+    <symbol id="i-user-x" viewBox="0 0 24 24"><circle cx="10" cy="8.5" r="4"/><path d="M3 20c.8-3.4 3.6-5.5 7-5.5 1.3 0 2.5.3 3.5.8M16 15l4.5 4.5M20.5 15L16 19.5"/></symbol>
+    <symbol id="i-keyboard" viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="1.5"/><path d="M7 10h.01M10.3 10h.01M13.7 10h.01M17 10h.01M7.5 14h9"/></symbol>
+    <symbol id="i-question" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M9.8 9.6a2.3 2.3 0 114.1 1.4c-.7.8-1.9 1.3-1.9 2.6M12 16.5h.01"/></symbol>
+    <symbol id="i-warning" viewBox="0 0 24 24"><path d="M12 4.2l8.8 15.3H3.2z"/><path d="M12 10v4M12 16.8h.01"/></symbol>
+    <symbol id="i-tag" viewBox="0 0 24 24"><path d="M3.5 4.5a1 1 0 011-1h6.6l9.4 9.4-7.6 7.6-9.4-9.4z"/><path d="M8 8h.01"/></symbol>
+    <symbol id="i-route" viewBox="0 0 24 24"><circle cx="6" cy="18" r="2.2"/><circle cx="18" cy="6" r="2.2"/><path d="M8.2 18H15a3 3 0 000-6H9a3 3 0 010-6h6.8"/></symbol>
+    <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M15.5 4.5l4 4L8.5 19.5H4.5v-4z"/><path d="M13 7l4 4"/></symbol>
+    <symbol id="i-github" viewBox="0 0 16 16"><path fill="currentColor" stroke="none" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></symbol>
+  </defs>
+</svg>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="nav" id="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="#top" aria-label="TernaryShell, back to top"><img src="assets/img/icon.svg" alt="" width="26" height="26">TernaryShell</a>
+    <nav class="nav-links" aria-label="Sections">
+      <a href="#features">Features</a>
+      <a href="#shortcuts">Shortcuts</a>
+      <a href="#install">Install</a>
+      <a href="#faq">FAQ</a>
+    </nav>
+    <div class="nav-r">
+      <a class="nav-gh" href="https://github.com/ilhamnadhif/ternaryshell"><svg class="i"><use href="#i-github"/></svg><span>GitHub</span></a>
+      <a class="pb pb-pri pb-sm" href="#install">Download</a>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+<div id="top"></div>
+
+<!-- ============================================================ hero -->
+<section class="hero">
+  <div class="field" aria-hidden="true">
+    <span class="lattice" style="--c:#f06b63;left:7%;top:150px"></span>
+    <span class="lattice" style="--c:#e2b445;left:88%;top:96px"></span>
+    <span class="lattice" style="--c:#4fbf85;left:84%;top:470px"></span>
+    <span class="lattice" style="--c:#5c9cf5;left:11%;top:560px"></span>
+  </div>
+  <div class="wrap hero-in">
+    <a class="announce" href="https://github.com/ilhamnadhif/ternaryshell/releases/latest" data-release-link>
+      <span class="dots" aria-hidden="true"><b></b><b></b><b></b></span>
+      <span><b>TernaryShell <span data-version>1.6.1</span></b> is out</span><span class="sep" aria-hidden="true"></span><span>What’s new</span><svg class="i"><use href="#i-arrow-right"/></svg>
+    </a>
+    <h1>Which server<br>are you on?</h1>
+    <p class="lede">A native SSH and SFTP client for macOS, Windows and Linux. <b class="c-prod">Production</b> shows in red and <b class="c-stg">staging</b> in yellow, from the sidebar to the edge of the terminal, so you know where you’re typing before you press Enter.</p>
+    <div class="cta">
+      <a class="pb pb-pri" href="#install" data-cta-main><svg class="i"><use href="#i-download"/></svg><span>Download for macOS</span></a>
+      <a class="pb pb-sec" href="https://github.com/ilhamnadhif/ternaryshell"><svg class="i"><use href="#i-github"/></svg>View on GitHub</a>
+    </div>
+    <p class="cta-note">Free and open source · <a href="#install" data-os-link="mac">macOS</a>, <a href="#install" data-os-link="win">Windows</a> and <a href="#install" data-os-link="linux">Linux</a></p>
+  </div>
+
+  <div class="demo" id="demo" role="region" aria-label="Live demo of TernaryShell with sample servers">
+    <div class="demo-bar">
+      <span class="live"><b></b>Live demo</span><span class="hint">· sample servers, running in this page</span>
+      <span class="sp"></span>
+      <button type="button" id="demo-replay"><svg class="i"><use href="#i-replay"/></svg>Replay</button>
+    </div>
+    <div class="demo-frame">
+      <div class="scaler" id="demo-scaler"><div class="scaled" id="demo-win"></div></div>
+      <img class="demo-still" src="assets/img/terminal.webp" alt="TernaryShell with saved connections grouped by environment, and a production server open in two panes" width="1600" height="1000" decoding="async">
+    </div>
+    <p class="coach" id="coach" aria-live="polite"><span>Click a server, press <span data-k="palette"><kbd>⌘</kbd><kbd>K</kbd></span>, or open Files.</span></p>
+  </div>
+</section>
+
+<!-- ============================================================ bring -->
+<section class="bring">
+  <div class="wrap bring-in rv">
+    <p class="bring-t">Bring what you already have. There is nothing to sign in to.</p>
+    <div class="bring-row">
+      <span class="chip"><span class="mono">~/.ssh/config</span></span>
+      <span class="chip">Electerm export</span>
+      <span class="chip"><span class="mono">ssh-agent</span></span>
+      <span class="chip">1Password</span>
+      <span class="chip">Secretive</span>
+      <span class="chip">YubiKey</span>
+      <span class="chip">Pageant</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ native -->
+<section class="sec" id="native">
+  <div class="wrap">
+    <div class="ch-head rv">
+      <div>
+        <div class="eyebrow"><svg class="i"><use href="#i-bolt"/></svg>Written in Rust</div>
+        <h2>Small, quick, <span class="q">and quiet.</span></h2>
+      </div>
+      <div class="ch-body">
+        <p>One binary, no Chromium and no Node.js underneath. TernaryShell draws its own window on the GPU, opens before you’ve looked away, and draws <b>nothing at all</b> while nothing changes.</p>
+      </div>
+    </div>
+    <div class="stats rv">
+      <div class="stat"><div class="n">0.1<small>s</small></div><div class="l">from launch to the first frame</div></div>
+      <div class="stat"><div class="n">0<small>%</small></div><div class="l">CPU while idle, even with tabs open</div></div>
+      <div class="stat"><div class="n">~70<small>MB</small></div><div class="l">of memory with an SSH session open</div></div>
+      <div class="stat"><div class="n">0</div><div class="l">accounts, trackers or telemetry</div></div>
+    </div>
+    <p class="foot rv">Measured on an Apple Silicon MacBook with the release build.</p>
+  </div>
+</section>
+
+<!-- ============================================================ labels -->
+<section class="sec" id="features">
+  <div class="wrap">
+    <div class="ch-head rv">
+      <div>
+        <div class="eyebrow"><svg class="i"><use href="#i-tag"/></svg>Labels</div>
+        <h2>Production looks <span class="q">like production.</span></h2>
+      </div>
+      <div class="ch-body">
+        <p>Give a group a colour and a short tag such as <b>PROD</b>. Every connection in it carries the label: a dot in the sidebar, a line under its tabs, a stripe along the top of its terminal and the tag in the status bar.</p>
+        <ul class="facts">
+          <li>Set it from the group’s menu, a tab’s menu or <b>Edit Connection</b>. A connection can override its group.</li>
+          <li>Nine colours. Icons stay neutral, so the colour only ever means <b>where you are</b>.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="envs rv" aria-label="The same window connected to production and to staging">
+      <div class="env" style="--l:#f06b63">
+        <div class="env-tabs"><span class="env-tab on"><b class="dot"></b>web-01<span class="ul"></span></span><span class="env-tab"><b class="dot"></b>web-02<span class="ul"></span></span></div>
+        <div class="env-term"><span class="p">deploy@web-01</span>:<span class="d">/srv/app</span>$ systemctl restart nginx<span class="cur"></span></div>
+        <div class="env-status"><span class="tagp">PROD</span><span class="ok"><b></b>Connected</span><span class="mono">deploy@10.0.1.21</span><span class="sp"></span><span>2 forwards</span><span>4 ms</span></div>
+      </div>
+      <div class="env" style="--l:#e2b445">
+        <div class="env-tabs"><span class="env-tab on"><b class="dot"></b>api-staging<span class="ul"></span></span></div>
+        <div class="env-term"><span class="p">deploy@api-staging</span>:<span class="d">~</span>$ systemctl restart nginx<span class="cur"></span></div>
+        <div class="env-status"><span class="tagp">STG</span><span class="ok"><b></b>Connected</span><span class="mono">deploy@10.1.0.5</span><span class="sp"></span><span>11 ms</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ terminal -->
+<section class="sec">
+  <div class="wrap">
+    <div class="ch-head rv">
+      <div>
+        <div class="eyebrow"><span data-k="split"><kbd>⌘</kbd><kbd>D</kbd></span>Terminal</div>
+        <h2>A real terminal <span class="q">that notices.</span></h2>
+      </div>
+      <div class="ch-body">
+        <p>Split panes share their tab’s SSH connection. When the network changes under you, a VPN going up, another Wi-Fi, the Mac waking up, TernaryShell checks the server and says so <b>within seconds</b> instead of freezing.</p>
+        <ul class="facts">
+          <li>Built on alacritty_terminal: <b>24-bit colour</b>, mouse reporting for vim, htop and tmux, IME, CJK, and box drawing that joins up.</li>
+          <li><b>Reconnect</b> keeps the scrollback; Enter in an ended pane starts a new shell there.</li>
+        </ul>
+      </div>
+    </div>
+    <figure class="shot rv">
+      <img src="assets/img/terminal.webp" alt="Two panes over one connection to web-01: a directory listing on the left, a deploy script on the right" width="1600" height="1000" loading="lazy" decoding="async">
+      <span class="pin b" style="--x:24%;--y:5.2%"><i tabindex="0">1</i><span>The red line under the tab: this is <b>production</b>.</span></span>
+      <span class="pin" style="--x:59.4%;--y:30%"><i tabindex="0">2</i><span>Two panes, <b>one connection</b>. <span data-k="split"><kbd>⌘</kbd><kbd>D</kbd></span> splits.</span></span>
+      <span class="pin" style="--x:22%;--y:93.6%"><i tabindex="0">3</i><span>The tag, the address, forwards and the round trip to the server.</span></span>
+      <figcaption><b></b>The real app, on macOS</figcaption>
+    </figure>
+    <ol class="pins-legend">
+      <li><b>1</b> The red line under the tab: this is production.</li>
+      <li><b>2</b> Two panes, one connection.</li>
+      <li><b>3</b> The tag, the address, forwards and the round trip to the server.</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============================================================ files -->
+<section class="sec">
+  <div class="wrap">
+    <div class="ch-head rv">
+      <div>
+        <div class="eyebrow"><span data-k="files"><kbd>⇧</kbd><kbd>⌘</kbd><kbd>F</kbd></span>Files</div>
+        <h2>This machine and the server, <span class="q">side by side.</span></h2>
+      </div>
+      <div class="ch-body">
+        <p>The Files panel opens under the terminal, over the same connection. Drag between the two lists, drop from Finder or Explorer, and follow the batch: files done, speed and time left.</p>
+        <ul class="facts">
+          <li><b>Root</b> reopens the server side through sudo, for the files your user can’t touch. The terminal stays as you.</li>
+          <li>Files arrive under a temporary name and are renamed when complete. <b>Cancel, close or quit</b>, and no half-written file is left behind.</li>
+        </ul>
+      </div>
+    </div>
+    <figure class="shot rv">
+      <img src="assets/img/sftp.webp" alt="The Files panel under the terminal: this Mac on the left, the server on the right, with a 3.2 GB upload at 43 per cent" width="1600" height="1000" loading="lazy" decoding="async">
+      <span class="pin" style="--x:59.6%;--y:69.6%"><i tabindex="0">1</i><span>The whole batch at a glance, with <b>Cancel all</b>.</span></span>
+      <span class="pin r" style="--x:88.5%;--y:41%"><i tabindex="0">2</i><span><b>Root</b>: browse and transfer as root through sudo.</span></span>
+      <span class="pin r" style="--x:74.6%;--y:56.8%"><i tabindex="0">3</i><span>Symlinks say where they point.</span></span>
+      <figcaption><b></b>The real app, on macOS</figcaption>
+    </figure>
+    <ol class="pins-legend">
+      <li><b>1</b> The whole batch at a glance, with Cancel all.</li>
+      <li><b>2</b> Root: browse and transfer as root through sudo.</li>
+      <li><b>3</b> Symlinks say where they point.</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============================================================ editor -->
+<section class="sec">
+  <div class="wrap">
+    <div class="ch-head rv">
+      <div>
+        <div class="eyebrow"><span data-k="save"><kbd>⌘</kbd><kbd>S</kbd></span>Editor</div>
+        <h2>Change the config <span class="q">where it lives.</span></h2>
+      </div>
+      <div class="ch-body">
+        <p>Double-click a file on the server to edit it in place, with line numbers, syntax colours and marks on the lines you changed. <span data-k="save"><kbd>⌘</kbd><kbd>S</kbd></span> writes it back.</p>
+        <ul class="facts">
+          <li>The new content is written next to the file and swapped in, so a dropped connection <b>never leaves half a config</b>.</li>
+          <li>Line endings, a BOM and permissions are kept. If someone changed the file meanwhile, it tells you before saving.</li>
+        </ul>
+      </div>
+    </div>
+    <figure class="shot rv">
+      <img src="assets/img/editor.webp" alt="storefront.yml open in the remote editor with two changed lines marked and unsaved changes in the status bar" width="1600" height="1000" loading="lazy" decoding="async">
+      <span class="pin" style="--x:22.6%;--y:22.9%"><i tabindex="0">1</i><span>Only the lines you changed are marked.</span></span>
+      <span class="pin r b" style="--x:85.6%;--y:8.3%"><i tabindex="0">2</i><span>The path on the server, and <b>Save</b>.</span></span>
+      <figcaption><b></b>The real app, on macOS</figcaption>
+    </figure>
+    <ol class="pins-legend">
+      <li><b>1</b> Only the lines you changed are marked.</li>
+      <li><b>2</b> The path on the server, and Save.</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============================================================ details -->
+<section class="sec">
+  <div class="wrap">
+    <div class="rv">
+      <div class="eyebrow"><svg class="i"><use href="#i-route"/></svg>Connections</div>
+      <h2>The parts of SSH <span class="q">you actually use.</span></h2>
+    </div>
+    <div class="details">
+      <div class="det rv">
+        <div class="vis"><span class="mini"><svg class="i"><use href="#i-laptop"/></svg>This Mac<span class="t3">→</span>bastion<span class="t3">→</span><b>db-primary</b></span></div>
+        <h3>Jump hosts</h3>
+        <p>Reach a server through another saved one, like <span class="mono">ssh -J</span>, several in a row if you need. Each hop checks its own host key and logs in its own way.</p>
+      </div>
+      <div class="det rv">
+        <div class="vis vis-col"><span class="mini"><b class="g"></b><span class="mono">-L 18080 → localhost:80</span></span><span class="mini"><b class="g"></b><span class="mono">-D 11080</span><span class="t3">SOCKS proxy</span></span></div>
+        <h3>Port forwarding</h3>
+        <p>Local, remote and SOCKS forwards start with the connection. The status bar lists them, and a port that was taken gets a <b>Retry</b>.</p>
+      </div>
+      <div class="det rv">
+        <div class="vis"><span class="mini"><svg class="i g"><use href="#i-check-circle"/></svg><b>Agent found</b><span class="t3">· 1Password</span></span></div>
+        <h3>Keys, agents and the keychain</h3>
+        <p>Passwords and pasted keys live in the system keychain. Or log in through <span class="mono">ssh-add</span>, 1Password, Secretive, Bitwarden or a YubiKey; Pageant on Windows.</p>
+      </div>
+      <div class="det rv">
+        <div class="vis"><span class="mini fp"><span class="t3">ED25519</span><span class="mono">SHA256:xUw2pB1q 9cT0vRk3 Lm4sQe7Z</span></span></div>
+        <h3>Host keys, checked</h3>
+        <p>A new key is trusted with a click, never with Enter. A changed one shows the old fingerprints and waits until you say you checked. Hashed <span class="mono">known_hosts</span> and <span class="mono">@revoked</span> work.</p>
+      </div>
+      <div class="det rv">
+        <div class="vis"><span class="mini">2 new, 1 changed, 1 already here</span></div>
+        <h3>Import with a preview</h3>
+        <p><span class="mono">~/.ssh/config</span> and Electerm exports come in with groups, keys and forwards. You see what will be added, changed or skipped first; importing twice changes nothing.</p>
+      </div>
+      <div class="det rv">
+        <div class="vis"><span class="mini"><svg class="i"><use href="#i-check"/></svg>Updated to <span class="mono" data-version>1.6.1</span><span class="t3">· 3 sessions reconnected</span></span></div>
+        <h3>Updates that pick up where you were</h3>
+        <p>It checks GitHub at start, verifies the download’s SHA-256, installs, and reconnects the sessions that were open.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ shortcuts -->
+<section class="sec" id="shortcuts">
+  <div class="wrap">
+    <div class="keys-top rv">
+      <div>
+        <div class="eyebrow"><svg class="i"><use href="#i-keyboard"/></svg>Shortcuts</div>
+        <h2>Your hands <span class="q">stay on the keys.</span></h2>
+      </div>
+      <div class="seg-os" role="group" aria-label="Keyboard of">
+        <button type="button" data-keys="mac" aria-pressed="true">macOS</button>
+        <button type="button" data-keys="pc" aria-pressed="false">Windows &amp; Linux</button>
+      </div>
+    </div>
+    <div class="keygrid rv" id="keygrid"></div>
+    <p class="keys-note rv" id="keys-note">On Windows and Linux the app’s shortcuts use <kbd>Ctrl</kbd><kbd>Shift</kbd>, so every Ctrl+letter still reaches the remote shell.</p>
+  </div>
+</section>
+
+<!-- ============================================================ private -->
+<section class="sec">
+  <div class="wrap">
+    <div class="rv">
+      <div class="eyebrow"><svg class="i"><use href="#i-lock"/></svg>Private by design</div>
+      <h2>Your servers <span class="q">are your business.</span></h2>
+    </div>
+    <div class="trio rv">
+      <div><h3><svg class="i"><use href="#i-user-x"/></svg>No account</h3><p>Download it and connect. No sign-in, no plan, no trial, no cloud sync of your hosts.</p></div>
+      <div><h3><svg class="i"><use href="#i-eye-slash"/></svg>No telemetry</h3><p>Besides your own servers, TernaryShell talks to one place: GitHub, to check for updates. You can turn that off in Settings.</p></div>
+      <div><h3><svg class="i"><use href="#i-code"/></svg>Open source</h3><p>MIT licensed and built in the open with <a class="ul" href="https://github.com/emilk/egui">egui</a>, alacritty_terminal and russh. Read it, build it, change it.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ install -->
+<section class="sec" id="install">
+  <div class="wrap">
+    <div class="rv">
+      <div class="eyebrow"><svg class="i"><use href="#i-download"/></svg>Install</div>
+      <h2>A minute <span class="q">from here.</span></h2>
+      <p class="sub">TernaryShell keeps itself up to date after that. Then <kbd>+</kbd> in the sidebar adds a server, or Import brings in <span class="mono">~/.ssh/config</span>.</p>
+    </div>
+    <div class="inst rv">
+      <div class="tabs-os" role="tablist" aria-label="Operating system">
+        <button type="button" role="tab" id="tab-mac" aria-controls="os-mac" aria-selected="true">macOS</button>
+        <button type="button" role="tab" id="tab-win" aria-controls="os-win" aria-selected="false" tabindex="-1">Windows</button>
+        <button type="button" role="tab" id="tab-linux" aria-controls="os-linux" aria-selected="false" tabindex="-1">Linux</button>
+        <span class="ver">v<span data-version>1.6.1</span></span>
+      </div>
+
+      <div class="pane-os" role="tabpanel" id="os-mac" aria-labelledby="tab-mac">
+        <div class="step"><span class="no">1</span><div>
+          <h3>Run this in Terminal <span>recommended</span></h3>
+          <p>It downloads the latest release, installs <b>TernaryShell.app</b> into <b>/Applications</b> and opens it. Run it again to update. macOS 12 or later, Apple Silicon and Intel.</p>
+          <div class="cmd"><span class="ps">$</span><code id="cmd-mac">curl -fsSL https://raw.githubusercontent.com/ilhamnadhif/ternaryshell/master/scripts/install.sh | bash</code><button class="copy" type="button" data-copy="cmd-mac"><svg class="i"><use href="#i-copy"/></svg><span>Copy</span></button></div>
+        </div></div>
+        <div class="step"><span class="no">2</span><div>
+          <h3>Or download an installer</h3>
+          <div class="dls">
+            <a class="dl-b" data-asset="pkg" href="https://github.com/ilhamnadhif/ternaryshell/releases/latest"><svg class="i"><use href="#i-download"/></svg><span class="t"><b>Installer (.pkg)</b><span>Apple Silicon and Intel</span></span></a>
+            <a class="dl-b" data-asset="dmg" href="https://github.com/ilhamnadhif/ternaryshell/releases/latest"><svg class="i"><use href="#i-download"/></svg><span class="t"><b>Disk image (.dmg)</b><span>Drag to Applications</span></span></a>
+          </div>
+          <div class="note"><svg class="i"><use href="#i-warning"/></svg><span>The builds aren’t notarized by Apple yet, so macOS blocks a download from a browser. Click <b>Done</b>, then <b>System Settings → Privacy &amp; Security → Open Anyway</b>. The command above isn’t blocked.</span></div>
+        </div></div>
+        <div class="step"><span class="no">3</span><div>
+          <h3>Homebrew</h3>
+          <div class="cmd multi"><span class="ps">$</span><code id="cmd-brew">curl -fsSLO https://github.com/ilhamnadhif/ternaryshell/releases/latest/download/ternaryshell.rb
+brew install --cask ./ternaryshell.rb</code><button class="copy" type="button" data-copy="cmd-brew"><svg class="i"><use href="#i-copy"/></svg><span>Copy</span></button></div>
+        </div></div>
+      </div>
+
+      <div class="pane-os" role="tabpanel" id="os-win" aria-labelledby="tab-win" hidden>
+        <div class="step"><span class="no">1</span><div>
+          <h3>Download the installer</h3>
+          <p>Windows 10 (1809) or later, x64. It installs for your user without administrator rights, adds a Start menu entry, and can put <span class="mono">ternaryshell</span> on the PATH.</p>
+          <div class="dls">
+            <a class="dl-b hi" data-asset="win-setup" href="https://github.com/ilhamnadhif/ternaryshell/releases/latest"><svg class="i"><use href="#i-download"/></svg><span class="t"><b>Installer (.exe)</b><span>x64</span></span></a>
+            <a class="dl-b" data-asset="win-zip" href="https://github.com/ilhamnadhif/ternaryshell/releases/latest"><svg class="i"><use href="#i-file-zip"/></svg><span class="t"><b>Portable (.zip)</b><span>x64</span></span></a>
+          </div>
+          <div class="note"><svg class="i"><use href="#i-warning"/></svg><span>The builds aren’t code-signed yet, so SmartScreen warns about a new download once: <b>More info → Run anyway</b>.</span></div>
+        </div></div>
+        <div class="step"><span class="no">2</span><div>
+          <h3>Open a server from any terminal</h3>
+          <div class="cmd"><span class="ps">&gt;</span><code id="cmd-win">ternaryshell web-01</code><button class="copy" type="button" data-copy="cmd-win"><svg class="i"><use href="#i-copy"/></svg><span>Copy</span></button></div>
+          <p>A saved connection’s name, or <span class="mono">user@host:port</span> for one that isn’t saved.</p>
+        </div></div>
+      </div>
+
+      <div class="pane-os" role="tabpanel" id="os-linux" aria-labelledby="tab-linux" hidden>
+        <div class="step"><span class="no">1</span><div>
+          <h3>Pick your package</h3>
+          <div class="linux">
+            <div class="lx"><div class="w"><b>.deb</b><span>Debian, Ubuntu, Mint, Pop!_OS</span></div><div class="arch"><a data-asset="deb-x64" href="https://github.com/ilhamnadhif/ternaryshell/releases/latest">x86_64</a><a data-asset="deb-arm" href="https://github.com/ilhamnadhif/ternaryshell/releases/latest">ARM64</a></div></div>
+            <div class="lx"><div class="w"><b>.rpm</b><span>Fedora, RHEL, Rocky, AlmaLinux, openSUSE</span></div><div class="arch"><a data-asset="rpm-x64" href="https://github.com/ilhamnadhif/ternaryshell/releases/latest">x86_64</a><a data-asset="rpm-arm" href="https://github.com/ilhamnadhif/ternaryshell/releases/latest">ARM64</a></div></div>
+            <div class="lx"><div class="w"><b>AppImage</b><span>Any distribution</span></div><div class="arch"><a data-asset="appimage-x64" href="https://github.com/ilhamnadhif/ternaryshell/releases/latest">x86_64</a><a data-asset="appimage-arm" href="https://github.com/ilhamnadhif/ternaryshell/releases/latest">ARM64</a></div></div>
+            <div class="lx"><div class="w"><b>.tar.gz</b><span>Any distribution, into <span class="mono">~/.local</span></span></div><div class="arch"><a data-asset="tar-x64" href="https://github.com/ilhamnadhif/ternaryshell/releases/latest">x86_64</a><a data-asset="tar-arm" href="https://github.com/ilhamnadhif/ternaryshell/releases/latest">ARM64</a></div></div>
+          </div>
+        </div></div>
+        <div class="step"><span class="no">2</span><div>
+          <h3>Install it</h3>
+          <div class="cmd multi"><span class="ps">$</span><code id="cmd-linux">sudo apt install ./TernaryShell-<span data-version>1.6.1</span>-linux-amd64.deb     # Debian, Ubuntu
+sudo dnf install ./TernaryShell-<span data-version>1.6.1</span>-linux-x86_64.rpm    # Fedora, RHEL</code><button class="copy" type="button" data-copy="cmd-linux"><svg class="i"><use href="#i-copy"/></svg><span>Copy</span></button></div>
+          <p>X11 or Wayland with OpenGL (a software renderer is fine), glibc 2.28 or later. Saved passwords go to the Secret Service: GNOME Keyring, KWallet or KeePassXC.</p>
+        </div></div>
+      </div>
+
+      <div class="inst-f">
+        <span>Then: <kbd>+</kbd> in the sidebar, or Import for <span class="mono">~/.ssh/config</span> and Electerm.</span>
+        <span class="sp"></span>
+        <a href="https://github.com/ilhamnadhif/ternaryshell/releases" data-release-link>Release notes</a>
+        <a href="https://github.com/ilhamnadhif/ternaryshell#building-from-source">Build from source</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ faq -->
+<section class="sec" id="faq">
+  <div class="wrap faq-cols">
+    <div class="rv">
+      <div class="eyebrow"><svg class="i"><use href="#i-question"/></svg>FAQ</div>
+      <h2>Fair <span class="q">questions.</span></h2>
+      <p class="sub">Something else? <a class="ul" href="https://github.com/ilhamnadhif/ternaryshell/issues">Open an issue</a> with your version, system and the steps.</p>
+    </div>
+    <div class="faq-l rv">
+      <details><summary>Is it really free?<svg class="i"><use href="#i-plus"/></svg></summary><div class="a"><p>Yes. TernaryShell is MIT licensed, with no account, no paid tier and no trial.</p></div></details>
+      <details><summary>Where do my passwords and keys go?<svg class="i"><use href="#i-plus"/></svg></summary><div class="a"><p>Into the system’s keychain: the <b>macOS Keychain</b>, <b>Windows Credential Manager</b>, or the <b>Secret Service</b> on Linux. Never into TernaryShell’s own files, which hold only the connections, settings and known hosts, readable by your user alone.</p></div></details>
+      <details><summary>Does it send anything anywhere?<svg class="i"><use href="#i-plus"/></svg></summary><div class="a"><p>Only a check with GitHub for a new release, which you can turn off in <b>Settings → General</b>. There is no telemetry, and crash reports stay in a log folder on your machine.</p></div></details>
+      <details><summary><span>Can I bring my connections from Electerm or <span class="mono">~/.ssh/config</span>?</span><svg class="i"><use href="#i-plus"/></svg></summary><div class="a"><p>Yes. Import reads Electerm exports, with nested groups, passwords and pasted keys, and <span class="mono">~/.ssh/config</span>, including <span class="mono">ProxyJump</span>, forwards, <span class="mono">IdentityAgent</span> and <span class="mono">Include</span>. It shows what will be added, changed or skipped before anything is.</p></div></details>
+      <details><summary>How do I move everything to another computer?<svg class="i"><use href="#i-plus"/></svg></summary><div class="a"><p><b>Export</b> writes your connections, groups, labels and forwards to one JSON file, with the saved passwords and keys as plain text so the other machine can log in. Import it there, then delete the file.</p></div></details>
+      <details><summary>Why does my system warn me about it?<svg class="i"><use href="#i-plus"/></svg></summary><div class="a"><p>The builds aren’t notarized or code-signed yet. On macOS, the one-line installer isn’t blocked; with the <b>.dmg</b> or <b>.pkg</b>, use <b>Open Anyway</b> in Privacy &amp; Security. On Windows, SmartScreen asks once.</p></div></details>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ final -->
+<section class="final">
+  <div class="field" aria-hidden="true">
+    <span class="lattice" style="--c:#f06b63;left:14%;top:60px"></span>
+    <span class="lattice" style="--c:#4fbf85;left:80%;top:150px"></span>
+  </div>
+  <div class="wrap rv">
+    <img class="final-icon" src="assets/img/icon.svg" alt="" width="76" height="76">
+    <h2>Every server,<br><span class="q">one small window.</span></h2>
+    <div class="cta">
+      <a class="pb pb-pri" href="#install" data-cta-main><svg class="i"><use href="#i-download"/></svg><span>Download for macOS</span></a>
+      <a class="pb pb-sec" href="https://github.com/ilhamnadhif/ternaryshell"><svg class="i"><use href="#i-github"/></svg>View on GitHub</a>
+    </div>
+    <p class="cta-note">Free and open source · v<span data-version>1.6.1</span></p>
+  </div>
+</section>
+
+</main>
+
+<footer class="foot-site">
+  <div class="wrap foot-g">
+    <div>
+      <div class="brand"><img src="assets/img/icon.svg" alt="" width="22" height="22">TernaryShell</div>
+      <p>A native SSH and SFTP client for macOS, Windows and Linux, written in Rust. English and Bahasa Indonesia. MIT licensed.</p>
+    </div>
+    <div>
+      <h4>TernaryShell</h4>
+      <ul>
+        <li><a href="https://github.com/ilhamnadhif/ternaryshell">Source</a></li>
+        <li><a href="https://github.com/ilhamnadhif/ternaryshell/releases">Releases</a></li>
+        <li><a href="https://github.com/ilhamnadhif/ternaryshell/issues">Issues</a></li>
+        <li><a href="https://github.com/ilhamnadhif/ternaryshell/blob/master/README.id.md">README in Bahasa Indonesia</a></li>
+      </ul>
+    </div>
+    <div class="fam">
+      <h4>The Ternary family</h4>
+      <ul>
+        <li><a href="https://ilhamnadhif.github.io/ternarycode/">TernaryCode <span>· coding agents</span></a></li>
+        <li><a href="https://github.com/ilhamnadhif/ternarygrid">TernaryGrid <span>· SQL</span></a></li>
+        <li><a href="https://github.com/ilhamnadhif/ternarywire">TernaryWire <span>· API</span></a></li>
+      </ul>
+    </div>
+  </div>
+  <div class="wrap foot-b"><span>© 2026 ilhamnadhif</span><span class="sp"></span><a href="https://github.com/ilhamnadhif/ternaryshell/blob/master/LICENSE">MIT License</a></div>
+</footer>
+
+<script src="assets/site.js" defer></script>
+<script src="assets/demo.js" defer></script>
+</body>
+</html>
