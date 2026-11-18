@@ -6,7 +6,7 @@ TernaryShell is a native replacement for Electron-based SSH clients such as Elec
 no Chromium, no Node.js. It starts in about 0.1 s, idles at 0 % CPU and uses around 70 MB of
 memory with a session open.
 
-[Bahasa Indonesia](README.id.md)
+[Website](https://ilhamnadhif.github.io/ternaryshell/) · [Bahasa Indonesia](README.id.md)
 
 ![TernaryShell: saved connections, tabs and split panes over one SSH connection](docs/screenshots/terminal.png)
 

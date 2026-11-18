@@ -6,7 +6,7 @@ TernaryShell adalah pengganti native untuk klien SSH berbasis Electron seperti E
 binary kecil, tanpa Chromium dan tanpa Node.js. TernaryShell terbuka
 dalam ±0,1 detik, CPU 0% saat diam, dan memakai sekitar 70 MB memori dengan satu sesi terbuka.
 
-[English](README.md)
+[Situs web](https://ilhamnadhif.github.io/ternaryshell/) · [English](README.md)
 
 ![TernaryShell: koneksi tersimpan, tab, dan split pane dalam satu koneksi SSH](docs/screenshots/terminal.png)
 
