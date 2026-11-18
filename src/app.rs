@@ -1603,7 +1603,6 @@ impl TernaryShellApp {
                     .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
                 let folder = path.parent().map(paths::contract_tilde);
                 let mut toast = Toast::new(ToastKind::Info, tf("Exported to {}", &[&name]))
-                    .icon(icons::EXPORT, None)
                     .button(
                         crate::platform::reveal_label(),
                         ToastDo::Reveal(path.to_path_buf()),
@@ -2117,7 +2116,6 @@ impl TernaryShellApp {
                 );
                 let mut toast =
                     Toast::new(ToastKind::Warn, tf("{}: port forwarding", &[&tab.title()]))
-                        .icon(icons::PLUGS, None)
                         .detail(error)
                         .sticky();
                 if self.store.bookmark(tab.bookmark.id).is_some() {

@@ -1965,6 +1965,47 @@ const ID: &[(&str, &str)] = &[
     ),
     ("{} stopped answering.", "{} berhenti menjawab."),
     ("{} · different type", "{} · jenis berbeda"),
+    ("{} through {}", "{} lewat {}"),
+    ("through {}", "lewat {}"),
+    ("Verification code", "Kode verifikasi"),
+    ("The server asks:", "Server bertanya:"),
+    (
+        "To compare, run this on the server:",
+        "Untuk membandingkan, jalankan ini di server:",
+    ),
+    ("{}, a different type", "{}, jenis berbeda"),
+    (
+        "Same host as {}, with another user and port.",
+        "Host yang sama dengan {}, dengan user dan port lain.",
+    ),
+    (
+        "The server didn't answer on port {}. Check that it is running and reachable from this network; it may need a VPN or a [jump host].",
+        "Server tidak menjawab di port {}. Pastikan server berjalan dan bisa dijangkau dari jaringan ini; mungkin perlu VPN atau [jump host].",
+    ),
+    (
+        "{} could not be found. [Check the name], or use the server's IP address; some names only resolve over a VPN.",
+        "{} tidak ditemukan. [Periksa namanya], atau pakai alamat IP server; beberapa nama hanya dikenali lewat VPN.",
+    ),
+    (
+        "Nothing accepts SSH connections on port {}. The server may use [another port], or a firewall rejects the connection.",
+        "Tidak ada yang menerima koneksi SSH di port {}. Server mungkin memakai [port lain], atau firewall menolak koneksinya.",
+    ),
+    (
+        "The server's network can't be reached from {}. Check that you are online; a server on a private network needs a VPN or a [jump host].",
+        "Jaringan server tidak bisa dijangkau dari {}. Pastikan Anda online; server di jaringan privat perlu VPN atau [jump host].",
+    ),
+    (
+        "The server didn't accept the login for {}. Check that your key or password is allowed for this user, or try [another way to log in].",
+        "Server tidak menerima login untuk {}. Pastikan key atau password Anda diizinkan untuk user ini, atau coba [cara login lain].",
+    ),
+    (
+        "Check [the key file]: it must exist, be readable by this user, and be the private key (not the .pub file).",
+        "Periksa [file key-nya]: file itu harus ada, bisa dibaca oleh user ini, dan berupa private key (bukan file .pub).",
+    ),
+    (
+        "Press {} for a new shell, {} to reconnect the tab, or {} to close this pane.",
+        "Tekan {} untuk shell baru, {} untuk menyambung ulang tab, atau {} untuk menutup pane ini.",
+    ),
     // ===== end [connect] =====
 
     // ===== Redesign 3.0: Edit Connection, Settings, import & export [editor] =====
@@ -2255,6 +2296,106 @@ const ID: &[(&str, &str)] = &[
     ("{} d ago", "{} hari lalu"),
     ("{} panes", "{} pane"),
     ("{}: port forwarding", "{}: port forwarding"),
+    ("{}, and {}.", "{}, dan {}."),
+    (
+        "The session is still running `{}`",
+        "Sesi masih menjalankan `{}`",
+    ),
+    (
+        "1 transfer ({}) will be cancelled",
+        "1 transfer ({}) akan dibatalkan",
+    ),
+    ("1 transfer will be cancelled", "1 transfer akan dibatalkan"),
+    (
+        "{} transfers ({}) will be cancelled",
+        "{} transfer ({}) akan dibatalkan",
+    ),
+    (
+        "{} transfers will be cancelled",
+        "{} transfer akan dibatalkan",
+    ),
+    (
+        "The connection and its saved password are removed from {}.",
+        "Koneksi beserta password yang tersimpan dihapus dari {}.",
+    ),
+    (
+        "The connection and its saved passphrase are removed from {}.",
+        "Koneksi beserta passphrase yang tersimpan dihapus dari {}.",
+    ),
+    (
+        "The connection and its pasted key are removed from {}.",
+        "Koneksi beserta key yang ditempel dihapus dari {}.",
+    ),
+    (
+        "The connection is removed from {}.",
+        "Koneksi dihapus dari {}.",
+    ),
+    (
+        "The server and your keys in `~/.ssh` are not touched.",
+        "Server dan key Anda di `~/.ssh` tidak disentuh.",
+    ),
+    (
+        "The group is empty. Nothing else is deleted.",
+        "Grup ini kosong. Tidak ada hal lain yang dihapus.",
+    ),
+    (
+        "Only the group goes. Its connection moves up one level.",
+        "Hanya grupnya yang dihapus. Koneksi di dalamnya naik satu tingkat.",
+    ),
+    (
+        "Only the group goes. Its {} connections move up one level.",
+        "Hanya grupnya yang dihapus. {} koneksi di dalamnya naik satu tingkat.",
+    ),
+    (
+        "Only the group goes. Its {} connection(s) and subgroups move up one level.",
+        "Hanya grupnya yang dihapus. {} koneksi dan subgrup di dalamnya naik satu tingkat.",
+    ),
+    ("Delete the group “{}”?", "Hapus grup “{}”?"),
+    ("1 session: {}", "1 sesi: {}"),
+    ("{} sessions: {}", "{} sesi: {}"),
+    (
+        "1 transfer at {}% (partial files are removed)",
+        "1 transfer di {}% (file yang belum selesai dihapus)",
+    ),
+    (
+        "1 transfer (partial files are removed)",
+        "1 transfer (file yang belum selesai dihapus)",
+    ),
+    (
+        "{} transfers at {}% (partial files are removed)",
+        "{} transfer di {}% (file yang belum selesai dihapus)",
+    ),
+    (
+        "{} transfers (partial files are removed)",
+        "{} transfer (file yang belum selesai dihapus)",
+    ),
+    ("{} on {}, not saved", "{} di {}, belum disimpan"),
+    ("These will be closed:", "Yang akan ditutup:"),
+    (
+        "The session is closed and opened again. Scrollback is kept.",
+        "Sesi ditutup lalu dibuka lagi. Scrollback tetap ada.",
+    ),
+    (
+        "Both panes get a new shell. Scrollback is kept.",
+        "Kedua pane mendapat shell baru. Scrollback tetap ada.",
+    ),
+    (
+        "All {} panes get a new shell. Scrollback is kept.",
+        "Semua {} pane mendapat shell baru. Scrollback tetap ada.",
+    ),
+    ("You have {}.", "Versi Anda {}."),
+    (
+        "You have {}. The download is {}.",
+        "Versi Anda {}. Unduhannya {}.",
+    ),
+    (
+        "The open session reconnects after the restart.",
+        "Sesi yang terbuka tersambung lagi setelah restart.",
+    ),
+    (
+        "The {} open sessions reconnect after the restart.",
+        "{} sesi yang terbuka tersambung lagi setelah restart.",
+    ),
     // ===== end [dialogs] =====
 ];
 

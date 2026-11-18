@@ -537,19 +537,13 @@ impl Updater {
                     State::Error(e) => {
                         let e = e.clone();
                         ui.set_width(420.0);
-                        confirm::header(
-                            ui,
-                            icons::WARNING_CIRCLE,
-                            Tone::Err,
-                            t("Software Update"),
-                            None,
-                        );
+                        confirm::header(ui, t("Software Update"));
                         let p = style::pal(ui);
                         egui::Frame::NONE
                             .inner_margin(egui::Margin {
                                 left: 20,
                                 right: 20,
-                                top: 14,
+                                top: 8,
                                 bottom: 16,
                             })
                             .show(ui, |ui| {
@@ -562,7 +556,7 @@ impl Updater {
                                 if kit::button_ex(
                                     ui,
                                     kit::Kind::Ghost,
-                                    Some(icons::ARROW_SQUARE_OUT),
+                                    None,
                                     t("Open Releases Page"),
                                     true,
                                 )
@@ -575,18 +569,7 @@ impl Updater {
                                 }
                             },
                             |ui| {
-                                if kit::button_kbd(
-                                    ui,
-                                    kit::Kind::Primary,
-                                    None,
-                                    t("OK"),
-                                    Some("↩"),
-                                    false,
-                                    false,
-                                )
-                                .clicked()
-                                    || enter
-                                {
+                                if kit::primary(ui, t("OK")).clicked() || enter {
                                     close = true;
                                 }
                             },
@@ -642,8 +625,6 @@ impl Updater {
                             State::UpToDate => {
                                 ui.horizontal(|ui| {
                                     ui.spacing_mut().item_spacing.x = 12.0;
-                                    let (r, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
-                                    confirm::paint_tile(ui.painter(), r, icons::CHECK_CIRCLE, Tone::Ok, &p);
                                     let w = ui.available_width() - 50.0;
                                     ui.allocate_ui_with_layout(egui::vec2(w, 32.0), egui::Layout::top_down(egui::Align::Min), |ui| {
                                         ui.spacing_mut().item_spacing.y = 1.0;
@@ -710,9 +691,6 @@ impl Updater {
                             State::Ready(release, _) => {
                                 let version = release.version.clone();
                                 ui.horizontal_top(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 10.0;
-                                    let (r, _) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), egui::Sense::hover());
-                                    confirm::paint_tile(ui.painter(), r, icons::SEAL_CHECK, Tone::Ok, &p);
                                     ui.vertical(|ui| {
                                         ui.spacing_mut().item_spacing.y = 1.0;
                                         ui.label(RichText::new(tf("{} is ready to install", &[&version])).font(style::semibold(style::BODY)).color(p.text));
@@ -826,30 +804,6 @@ fn short_duration(secs: u64) -> String {
     }
 }
 
-/// "2026-11-16" → "Nov 16, 2026".
-fn release_date(date: &str) -> String {
-    let mut parts = date.split('-');
-    let (Some(y), Some(m), Some(d)) = (parts.next(), parts.next(), parts.next()) else {
-        return date.to_string();
-    };
-    let month = match m {
-        "01" => t("Jan"),
-        "02" => t("Feb"),
-        "03" => t("Mar"),
-        "04" => t("Apr"),
-        "05" => t("May"),
-        "06" => t("Jun"),
-        "07" => t("Jul"),
-        "08" => t("Aug"),
-        "09" => t("Sep"),
-        "10" => t("Oct"),
-        "11" => t("Nov"),
-        "12" => t("Dec"),
-        _ => return date.to_string(),
-    };
-    format!("{month} {}, {y}", d.trim_start_matches('0'))
-}
-
 /// The dialog for a new version: what it is, what's new, what installing does. Returns
 /// (install, close).
 fn available(
@@ -886,38 +840,29 @@ fn available(
                 icons::paint_logo(ui.painter(), r);
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 3.0;
-                    ui.label(
-                        RichText::new(tf("TernaryShell {} is available", &[&release.version]))
-                            .font(style::semibold(16.0))
-                            .color(p.text),
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(tf("TernaryShell {} is available", &[&release.version]))
+                                .font(style::semibold(16.0))
+                                .color(p.text),
+                        )
+                        .wrap(),
                     );
-                    let mut sub = vec![tf("You have {}", &[CURRENT])];
-                    if let Some(d) = &release.date {
-                        sub.push(tf("released {}", &[&release_date(d)]));
-                    }
-                    ui.label(
-                        RichText::new(sub.join(" · "))
-                            .font(style::regular(style::BODY))
-                            .color(p.text_muted),
+                    let line = match &release.download {
+                        Some(a) => tf(
+                            "You have {}. The download is {}.",
+                            &[CURRENT, &human_size(a.size)],
+                        ),
+                        None => tf("You have {}.", &[CURRENT]),
+                    };
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(line)
+                                .font(style::regular(style::BODY))
+                                .color(p.text_muted),
+                        )
+                        .wrap(),
                     );
-                    ui.add_space(7.0);
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 8.0;
-                        version_chip(ui, CURRENT, false);
-                        kit::icon(ui, icons::ARROW_RIGHT, 13.0, p.text_faint);
-                        version_chip(ui, &release.version, true);
-                        if let Some(a) = &release.download {
-                            confirm::small_badge(ui, &human_size(a.size), Tone::Neutral, None);
-                            if a.sha256.is_some() {
-                                confirm::small_badge(
-                                    ui,
-                                    t("Verified download"),
-                                    Tone::Ok,
-                                    Some(icons::SEAL_CHECK),
-                                );
-                            }
-                        }
-                    });
                 });
             });
         });
@@ -931,9 +876,8 @@ fn available(
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 12.0;
-            ui.label(style::section_label(t("What's new"), p.text_muted));
             release_notes(ui, &release.notes, notes_h);
-            callout(ui, sessions);
+            restart_note(ui, sessions);
             if !installable {
                 style::hint(ui, update::manual_reason());
             }
@@ -950,46 +894,19 @@ fn available(
     confirm::footer_with(
         ui,
         |ui| {
-            if kit::button_ex(
-                ui,
-                kit::Kind::Ghost,
-                Some(icons::ARROW_SQUARE_OUT),
-                t("View on GitHub"),
-                true,
-            )
-            .clicked()
-            {
+            if kit::button_ex(ui, kit::Kind::Ghost, None, t("View on GitHub"), true).clicked() {
                 update::open_page(&release.page);
             }
         },
         |ui| {
             if installable {
-                let r = kit::button_kbd(
-                    ui,
-                    kit::Kind::Primary,
-                    None,
-                    t("Install Update"),
-                    Some("↩"),
-                    false,
-                    false,
-                );
+                let r = kit::primary(ui, t("Install Update"));
                 #[cfg(debug_assertions)]
                 crate::devtest::record("update-install", r.rect);
                 if r.clicked() || enter {
                     install = true;
                 }
-            } else if kit::button_kbd(
-                ui,
-                kit::Kind::Primary,
-                None,
-                t("Download…"),
-                Some("↩"),
-                false,
-                false,
-            )
-            .clicked()
-                || enter
-            {
+            } else if kit::primary(ui, t("Download…")).clicked() || enter {
                 update::open_page(&release.page);
                 close = true;
             }
@@ -1004,81 +921,33 @@ fn available(
     (install, close)
 }
 
-/// `1.6.0` in a 22 px monospaced chip; the new version in the accent.
-fn version_chip(ui: &mut egui::Ui, version: &str, new: bool) {
+/// What installing does to the open sessions, as one plain sentence.
+fn restart_note(ui: &mut egui::Ui, sessions: usize) {
     let p = style::pal(ui);
-    let (font, color, fill) = if new {
-        (
-            egui::FontId::new(11.5, egui::FontFamily::Monospace),
-            p.accent_text,
-            p.accent_tint,
+    let mut text = t("TernaryShell quits, installs the new version and opens again.").to_string();
+    match sessions {
+        0 => {}
+        1 => {
+            text.push(' ');
+            text.push_str(t("The open session reconnects after the restart."));
+        }
+        n => {
+            text.push(' ');
+            text.push_str(&tf(
+                "The {} open sessions reconnect after the restart.",
+                &[&n.to_string()],
+            ));
+        }
+    }
+    ui.add(
+        egui::Label::new(
+            RichText::new(text)
+                .font(style::regular(style::BODY))
+                .color(p.text_muted)
+                .line_height(Some(20.0)),
         )
-    } else {
-        (style::mono(11.5), p.text_muted, p.hover)
-    };
-    let g = ui
-        .painter()
-        .layout_no_wrap(version.to_string(), font, color);
-    let (r, _) = ui.allocate_exact_size(egui::vec2(g.size().x + 16.0, 22.0), egui::Sense::hover());
-    ui.painter()
-        .rect_filled(r, egui::CornerRadius::same(6), fill);
-    let pos = r.center() - g.size() / 2.0;
-    if new {
-        // Monospace has no bold face: draw it twice, a hair apart.
-        ui.painter()
-            .galley(pos + egui::vec2(0.35, 0.0), g.clone(), color);
-    }
-    ui.painter().galley(pos, g, color);
-}
-
-/// What installing does to the open sessions.
-fn callout(ui: &mut egui::Ui, sessions: usize) {
-    let p = style::pal(ui);
-    let mut job = egui::text::LayoutJob::default();
-    let plain = egui::TextFormat {
-        font_id: style::regular(style::SMALL),
-        color: p.text_muted,
-        line_height: Some(18.0),
-        ..Default::default()
-    };
-    job.append(
-        t("TernaryShell quits, installs the new version and opens again."),
-        0.0,
-        plain.clone(),
+        .wrap(),
     );
-    if sessions > 0 {
-        job.append(" ", 0.0, plain.clone());
-        job.append(
-            &tf("{} open session(s)", &[&sessions.to_string()]),
-            0.0,
-            egui::TextFormat {
-                font_id: style::semibold(style::SMALL),
-                color: p.text,
-                line_height: Some(18.0),
-                ..Default::default()
-            },
-        );
-        job.append(
-            &format!(" {}", t("are closed; they reconnect after the restart.")),
-            0.0,
-            plain,
-        );
-    }
-    egui::Frame::NONE
-        .fill(p.hover)
-        .corner_radius(egui::CornerRadius::same(style::RADIUS_MD))
-        .inner_margin(egui::Margin::symmetric(12, 10))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = 10.0;
-                ui.vertical(|ui| {
-                    ui.add_space(1.0);
-                    kit::icon(ui, icons::INFO, 16.0, p.text_muted);
-                });
-                ui.add(egui::Label::new(job).wrap());
-            });
-        });
 }
 
 /// Marks where the release notes end and the web-only part (how to install) begins.
@@ -1217,21 +1086,6 @@ fn inline(text: &str, p: &style::Palette) -> egui::text::LayoutJob {
     job
 }
 
-/// A heading of the notes as a badge: CHANGED (accent), FIXED (green), others neutral.
-fn heading_tone(text: &str) -> Tone {
-    let l = text.to_ascii_lowercase();
-    if l.contains("fix") {
-        Tone::Ok
-    } else if l.contains("change") || l.contains("new") || l.contains("add") || l.contains("improv")
-    {
-        Tone::Accent
-    } else if l.contains("security") || l.contains("remov") || l.contains("break") {
-        Tone::Warn
-    } else {
-        Tone::Neutral
-    }
-}
-
 /// Release notes from GitHub (Markdown), in a scrolling well that fades out at the bottom while
 /// there is more.
 fn release_notes(ui: &mut egui::Ui, notes: &str, max_height: f32) {
@@ -1258,17 +1112,16 @@ fn release_notes(ui: &mut egui::Ui, notes: &str, max_height: f32) {
                         ui.add_space(8.0);
                         ui.label(RichText::new(t("No release notes.")).color(p.text_faint));
                     }
-                    for block in &blocks {
+                    for (i, block) in blocks.iter().enumerate() {
                         match block {
                             Block::Heading(text) => {
-                                ui.add_space(12.0);
-                                confirm::small_badge(
-                                    ui,
-                                    &text.to_uppercase(),
-                                    heading_tone(text),
-                                    None,
+                                ui.add_space(if i == 0 { 8.0 } else { 12.0 });
+                                ui.label(
+                                    RichText::new(text)
+                                        .font(style::semibold(style::SMALL))
+                                        .color(p.text),
                                 );
-                                ui.add_space(6.0);
+                                ui.add_space(4.0);
                             }
                             Block::Item(level, text) => {
                                 ui.add_space(3.0);

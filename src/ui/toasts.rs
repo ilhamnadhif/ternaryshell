@@ -1,5 +1,5 @@
-//! Toasts (Redesign 3.0): a short message in the bottom right corner of the canvas with its
-//! icon tile, a line under it and the next step as buttons (Show in Finder, Edit forwards…).
+//! Toasts (Redesign 3.1): a short message in the bottom right corner of the canvas, a line
+//! under it and the next step as buttons (Show in Finder, Edit forwards…); no icon tile.
 //! At most four are shown, the newest at the bottom; information goes away after 6 s (a thin
 //! bar shows the time left, and hovering pauses it), errors stay until closed.
 
@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Align2, CornerRadius, Id, Rect, RichText, Sense, Ui, pos2, vec2};
 
 use super::actions::Action;
-use super::style::{self, Tone};
+use super::style;
 use super::{confirm, icons, kit};
 use crate::i18n::t;
 
@@ -21,7 +21,7 @@ const LIFE: Duration = Duration::from_secs(6);
 const LIFE_ACTION: Duration = Duration::from_secs(9);
 const WIDTH: f32 = 340.0;
 
-/// What a toast is about: its icon tile and whether it stays.
+/// What a toast is about, and so whether it stays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     /// Something finished well.
@@ -48,7 +48,6 @@ pub enum Do {
 struct Button {
     label: String,
     act: Do,
-    keys: Option<String>,
     /// Drawn as a ghost button (the second, quieter action).
     quiet: bool,
 }
@@ -57,8 +56,6 @@ struct Button {
 #[derive(Clone, Debug)]
 pub struct Toast {
     kind: Kind,
-    icon: &'static str,
-    tone: Tone,
     title: String,
     detail: Option<String>,
     buttons: Vec<Button>,
@@ -71,16 +68,8 @@ pub struct Toast {
 
 impl Toast {
     pub fn new(kind: Kind, title: impl Into<String>) -> Self {
-        let (icon, tone) = match kind {
-            Kind::Ok => (icons::CHECK_CIRCLE, Tone::Ok),
-            Kind::Info => (icons::INFO, Tone::Accent),
-            Kind::Warn => (icons::WARNING, Tone::Warn),
-            Kind::Error => (icons::WARNING_CIRCLE, Tone::Err),
-        };
         Self {
             kind,
-            icon,
-            tone,
             title: title.into(),
             detail: None,
             buttons: Vec::new(),
@@ -89,15 +78,6 @@ impl Toast {
             paused: Duration::ZERO,
             hovered_since: None,
         }
-    }
-
-    /// Another icon (in the kind's tone unless `tone` is given).
-    pub fn icon(mut self, icon: &'static str, tone: Option<Tone>) -> Self {
-        self.icon = icon;
-        if let Some(t) = tone {
-            self.tone = t;
-        }
-        self
     }
 
     /// The line under the title; `code` in backquotes is monospaced.
@@ -111,7 +91,6 @@ impl Toast {
         self.buttons.push(Button {
             label: label.into(),
             act,
-            keys: None,
             quiet: false,
         });
         self
@@ -122,17 +101,8 @@ impl Toast {
         self.buttons.push(Button {
             label: label.into(),
             act,
-            keys: None,
             quiet: true,
         });
-        self
-    }
-
-    /// A key cap on the last button.
-    pub fn keys(mut self, keys: impl Into<String>) -> Self {
-        if let Some(b) = self.buttons.last_mut() {
-            b.keys = Some(keys.into());
-        }
         self
     }
 
@@ -301,8 +271,6 @@ fn toast_ui(ui: &mut Ui, toast: &Toast, now: Instant) -> (egui::Response, Option
             ui.set_width(WIDTH - 26.0);
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 11.0;
-                let (tile, _) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::hover());
-                confirm::paint_tile(ui.painter(), tile, toast.icon, toast.tone, &p);
                 let text_w = ui.available_width() - 20.0 - 11.0;
                 ui.allocate_ui_with_layout(
                     vec2(text_w, 10.0),
@@ -327,7 +295,7 @@ fn toast_ui(ui: &mut Ui, toast: &Toast, now: Instant) -> (egui::Response, Option
                             ui.add(egui::Label::new(job).wrap());
                         }
                         if !toast.buttons.is_empty() {
-                            ui.add_space(2.0);
+                            ui.add_space(7.0);
                             ui.horizontal(|ui| {
                                 ui.spacing_mut().item_spacing.x = 6.0;
                                 ui.spacing_mut().interact_size.y = style::TOOLBAR_H;
@@ -337,15 +305,7 @@ fn toast_ui(ui: &mut Ui, toast: &Toast, now: Instant) -> (egui::Response, Option
                                     } else {
                                         kit::Kind::Secondary
                                     };
-                                    let r = kit::button_kbd(
-                                        ui,
-                                        kind,
-                                        None,
-                                        &b.label,
-                                        b.keys.as_deref(),
-                                        true,
-                                        false,
-                                    );
+                                    let r = kit::button_ex(ui, kind, None, &b.label, true);
                                     if r.clicked() {
                                         clicked = Some(b.act.clone());
                                     }

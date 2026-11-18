@@ -1,29 +1,29 @@
-//! Pieces of the connection cards: the card frame, the route through jump hosts, the steps,
-//! fingerprints with their randomart, the one-time-code boxes, and what to check when a
-//! connection fails. Everything here is drawn with the painter and repaints only while a step
-//! is in progress.
+//! Pieces of the connection cards: the card frame, the steps, fingerprints with their
+//! randomart, the one-time-code boxes, and one sentence on what to check when a connection
+//! fails. Everything here is drawn with the painter and repaints only while a step is in
+//! progress. Redesign 3.1: no icon tiles, no route diagram, no checklist box.
 
 use std::time::Duration;
 
 use eframe::egui::{
-    self, Align2, Color32, CornerRadius, Mesh, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2,
-    vec2,
+    self, Align2, Color32, CornerRadius, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2,
 };
 
 use super::StepState;
 use crate::bookmarks::Bookmark;
 use crate::i18n::{t, tf};
 use crate::ssh::types::{ConnError, ProbeReason};
-use crate::ui::style::{self, Palette, Tone};
+use crate::ui::editor::Section;
+use crate::ui::style::{self, Palette};
 use crate::ui::{icons, kit};
 
 // ----- the card ---------------------------------------------------------------------------
 
 /// The frame of a connection card: the surface fill, 14 px corners, the popover shadow and a
-/// hairline ring (red when the card warns of danger).
+/// hairline ring (a faint red when the card warns of danger).
 pub fn frame(p: &Palette, danger: bool) -> egui::Frame {
     let ring = if danger {
-        style::soft(p.err, 0.45)
+        style::soft(p.err, 0.30)
     } else if p.dark {
         Color32::from_white_alpha(15)
     } else {
@@ -41,33 +41,22 @@ pub fn frame(p: &Palette, danger: bool) -> egui::Frame {
         .stroke(Stroke::new(1.0, ring))
 }
 
-/// The card's header: `lead` (a host glyph or an icon tile), the title (15 px semibold) and a
-/// line under it, then whatever `right` adds at the far right (an environment tag), for which
-/// `reserve` px are kept.
-pub fn head(
-    ui: &mut Ui,
-    reserve: f32,
-    lead: impl FnOnce(&mut Ui),
-    title: &str,
-    sub: impl FnOnce(&mut Ui),
-    right: impl FnOnce(&mut Ui),
-) {
+/// The card's header: the title (15 px semibold) and a line under it.
+pub fn head(ui: &mut Ui, title: &str, sub: impl FnOnce(&mut Ui)) {
     egui::Frame::NONE
         .inner_margin(egui::Margin {
             left: 18,
             right: 18,
             top: 18,
-            bottom: 14,
+            bottom: 10,
         })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 12.0;
-                lead(ui);
                 let text_w = ui.available_width();
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 4.0;
-                    ui.set_max_width(text_w - reserve);
+                    ui.set_max_width(text_w);
                     let p = style::pal(ui);
                     ui.add(
                         egui::Label::new(
@@ -80,7 +69,6 @@ pub fn head(
                     );
                     sub(ui);
                 });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), right);
             });
         });
 }
@@ -143,30 +131,15 @@ pub fn body(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
         });
 }
 
-/// The card's footer: a hairline over a faint band, a hint on the left, buttons on the right.
+/// The card's footer: a quiet action on the left, the buttons on the right (no band, no
+/// keyboard hints).
 pub fn foot(ui: &mut Ui, left: impl FnOnce(&mut Ui), right: impl FnOnce(&mut Ui)) {
-    let p = style::pal(ui);
-    let top = ui.cursor().top();
-    let full = ui.max_rect();
-    let band = Rect::from_min_max(pos2(full.left(), top), pos2(full.right(), top + 52.0));
-    ui.painter().rect_filled(
-        band,
-        CornerRadius {
-            nw: 0,
-            ne: 0,
-            sw: style::RADIUS_XL,
-            se: style::RADIUS_XL,
-        },
-        p.footer,
-    );
-    ui.painter()
-        .hline(band.x_range(), top + 0.5, Stroke::new(1.0, p.border));
     egui::Frame::NONE
         .inner_margin(egui::Margin {
-            left: 18,
-            right: 14,
-            top: 11,
-            bottom: 11,
+            left: 16,
+            right: 16,
+            top: 4,
+            bottom: 16,
         })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -185,146 +158,6 @@ pub fn foot(ui: &mut Ui, left: impl FnOnce(&mut Ui), right: impl FnOnce(&mut Ui)
 /// A quiet small button (26 px, no frame until hovered).
 pub fn ghost_sm(ui: &mut Ui, icon: Option<&str>, text: &str) -> egui::Response {
     kit::button_ex(ui, kit::Kind::Ghost, icon, text, true)
-}
-
-/// A footer hint: 12 px faint text.
-pub fn hint(ui: &mut Ui, text: &str) {
-    let p = style::pal(ui);
-    ui.label(
-        RichText::new(text)
-            .font(style::regular(style::SMALL))
-            .color(p.text_faint),
-    );
-}
-
-/// An icon tile in a tone: 32 px (9 px corners) or 44 px (12 px corners), as in the cards.
-pub fn tile(ui: &mut Ui, icon: &str, tone: Tone, side: f32) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
-    paint_tile(ui.painter(), rect, icon, tone, &style::pal(ui));
-    resp
-}
-
-pub fn paint_tile(painter: &egui::Painter, rect: Rect, icon: &str, tone: Tone, p: &Palette) {
-    let side = rect.width();
-    let (radius, size) = if side >= 40.0 {
-        (12, 22.0)
-    } else if side >= 30.0 {
-        (9, 17.0)
-    } else {
-        (7, 14.0)
-    };
-    let (fill, color) = match tone {
-        Tone::Neutral => (p.hover, p.text_muted),
-        Tone::Accent => (p.accent_tint, p.accent_text),
-        t => (style::soft(p.tone(t), 0.14), p.tone(t)),
-    };
-    painter.rect_filled(rect, CornerRadius::same(radius), fill);
-    painter.text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        icon,
-        style::icon_font(size),
-        color,
-    );
-}
-
-// ----- the route --------------------------------------------------------------------------
-
-/// A stop on the way: this Mac, a jump host or the server.
-pub struct Hop {
-    pub name: String,
-    pub icon: &'static str,
-    /// The host's label colour; `None` for this Mac (or a host without a label).
-    pub label: Option<Color32>,
-    pub this_mac: bool,
-}
-
-/// How far the route has come: wires before `now` are done, `now` is being made.
-pub enum WireState {
-    Done,
-    Now,
-    Pending,
-}
-
-/// The route through the jump hosts: tiles with names, joined by wires (green when that hop
-/// is up, blue into the one being made).
-pub fn route(ui: &mut Ui, stops: &[Hop], wire: impl Fn(usize) -> WireState) {
-    let p = style::pal(ui);
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 74.0), Sense::hover());
-    let painter = ui.painter();
-    painter.rect(
-        rect,
-        CornerRadius::same(10),
-        p.well,
-        Stroke::new(1.0, p.border),
-        StrokeKind::Inside,
-    );
-    let inner = rect.shrink2(vec2(12.0, 10.0));
-    let node_w = 92.0;
-    let n = stops.len().max(2) as f32;
-    let gap = ((inner.width() - node_w * n) / (n - 1.0)).max(8.0);
-    let tile_y = inner.top() + 17.0;
-    for (i, stop) in stops.iter().enumerate() {
-        let x = inner.left() + i as f32 * (node_w + gap);
-        let center = pos2(x + node_w / 2.0, tile_y);
-        if stop.this_mac {
-            let r = Rect::from_center_size(center, vec2(32.0, 32.0));
-            paint_tile(painter, r, icons::LAPTOP, Tone::Neutral, &p);
-        } else {
-            let r = Rect::from_center_size(center, vec2(28.0, 28.0));
-            kit::paint_host_glyph(painter, r, stop.icon, stop.label, None, p.well, &p);
-        }
-        let name = painter.layout(stop.name.clone(), style::medium(11.5), p.text, node_w);
-        let name_pos = pos2(center.x - name.size().x / 2.0, tile_y + 16.0 + 5.0);
-        painter
-            .with_clip_rect(Rect::from_min_size(
-                pos2(x, tile_y + 16.0),
-                vec2(node_w, 20.0),
-            ))
-            .galley(name_pos, name, p.text);
-        if i + 1 < stops.len() {
-            let a = x + node_w;
-            let b = a + gap;
-            let wire_rect = Rect::from_min_max(pos2(a, tile_y - 1.0), pos2(b, tile_y + 1.0));
-            let done = style::soft(p.ok, 0.6);
-            match wire(i) {
-                WireState::Done => {
-                    painter.rect_filled(wire_rect, CornerRadius::same(1), done);
-                }
-                WireState::Pending => {
-                    painter.rect_filled(wire_rect, CornerRadius::same(1), p.border_strong);
-                }
-                WireState::Now => {
-                    let mid = a + (b - a) * 0.6;
-                    gradient(
-                        painter,
-                        Rect::from_min_max(wire_rect.min, pos2(mid, wire_rect.bottom())),
-                        done,
-                        p.accent,
-                    );
-                    gradient(
-                        painter,
-                        Rect::from_min_max(pos2(mid, wire_rect.top()), wire_rect.max),
-                        p.accent,
-                        p.border_strong,
-                    );
-                }
-            }
-        }
-    }
-}
-
-/// A rectangle filled from `left` to `right` (a horizontal gradient).
-fn gradient(painter: &egui::Painter, rect: Rect, left: Color32, right: Color32) {
-    let mut mesh = Mesh::default();
-    let i = mesh.vertices.len() as u32;
-    mesh.colored_vertex(rect.left_top(), left);
-    mesh.colored_vertex(rect.right_top(), right);
-    mesh.colored_vertex(rect.right_bottom(), right);
-    mesh.colored_vertex(rect.left_bottom(), left);
-    mesh.add_triangle(i, i + 1, i + 2);
-    mesh.add_triangle(i, i + 2, i + 3);
-    painter.add(egui::Shape::mesh(mesh));
 }
 
 // ----- the steps --------------------------------------------------------------------------
@@ -737,111 +570,53 @@ pub fn code_boxes(ui: &mut Ui, text: &mut String, id: egui::Id) -> egui::Respons
 
 // ----- when it fails ----------------------------------------------------------------------
 
-/// What to look at, for a connection that failed this way: (icon, text, opens Edit Connection).
-pub fn things_to_check(e: &ConnError, b: &Bookmark) -> Vec<(&'static str, String, bool)> {
+/// One sentence on what to look at, for a connection that failed this way, and the page of
+/// Edit Connection its [bracketed] part opens.
+pub fn diagnosis(e: &ConnError, b: &Bookmark) -> Option<(String, Section)> {
     let port = b.port.to_string();
-    match e {
-        ConnError::Jump(_, inner) => things_to_check(inner, b),
-        ConnError::Timeout => vec![
-            (
-                icons::PLUGS,
-                t("The server is on and reachable from this network.").into(),
-                false,
+    Some(match e {
+        ConnError::Jump(_, inner) => return diagnosis(inner, b),
+        ConnError::Timeout => (
+            tf(
+                "The server didn't answer on port {}. Check that it is running and reachable from this network; it may need a VPN or a [jump host].",
+                &[&port],
             ),
-            (
-                icons::LOCK_SIMPLE,
-                tf(
-                    "Port {} is open (a firewall or security group may block it).",
-                    &[&port],
-                ),
-                false,
+            Section::Network,
+        ),
+        ConnError::HostNotFound(_) => (
+            tf(
+                "{} could not be found. [Check the name], or use the server's IP address; some names only resolve over a VPN.",
+                &[&b.host],
             ),
-            (
-                icons::SHIELD,
-                t("This host may need a VPN or a jump host (set one in Network).").into(),
-                true,
+            Section::Server,
+        ),
+        ConnError::Refused => (
+            tf(
+                "Nothing accepts SSH connections on port {}. The server may use [another port], or a firewall rejects the connection.",
+                &[&port],
             ),
-        ],
-        ConnError::HostNotFound(_) => vec![
-            (
-                icons::PENCIL_SIMPLE,
-                tf("The name is spelled right: {}.", &[&b.host]),
-                true,
+            Section::Server,
+        ),
+        ConnError::Unreachable(_) => (
+            tf(
+                "The server's network can't be reached from {}. Check that you are online; a server on a private network needs a VPN or a [jump host].",
+                &[crate::platform::this_computer()],
             ),
-            (
-                icons::GLOBE,
-                t("The name may only resolve on another network or over a VPN.").into(),
-                false,
+            Section::Network,
+        ),
+        ConnError::AuthFailed(_) => (
+            tf(
+                "The server didn't accept the login for {}. Check that your key or password is allowed for this user, or try [another way to log in].",
+                &[&b.username],
             ),
-            (
-                icons::HARD_DRIVES,
-                t("Try the server's IP address instead.").into(),
-                false,
-            ),
-        ],
-        ConnError::Refused => vec![
-            (
-                icons::PLUGS,
-                tf(
-                    "An SSH server is running and listening on port {}.",
-                    &[&port],
-                ),
-                false,
-            ),
-            (
-                icons::PENCIL_SIMPLE,
-                t("The server may use another port (change it in Edit Connection).").into(),
-                true,
-            ),
-            (
-                icons::SHIELD,
-                t("A firewall may reject the connection.").into(),
-                false,
-            ),
-        ],
-        ConnError::Unreachable(_) => vec![
-            (
-                icons::WIFI_SLASH,
-                t("This Mac is online (Wi-Fi, cable or VPN).").into(),
-                false,
-            ),
-            (
-                icons::SHIELD,
-                t("The server may sit on a private network: reach it through a jump host.").into(),
-                true,
-            ),
-        ],
-        ConnError::AuthFailed(_) => vec![
-            (
-                icons::USER,
-                tf("The user name is right: {}.", &[&b.username]),
-                true,
-            ),
-            (
-                icons::KEY,
-                t("Your key or password is allowed for this user on the server.").into(),
-                false,
-            ),
-            (
-                icons::PENCIL_SIMPLE,
-                t("Try another way to log in in Edit Connection.").into(),
-                true,
-            ),
-        ],
-        ConnError::KeyFile(_) => vec![
-            (
-                icons::FILE,
-                t("The key file exists and this user can read it.").into(),
-                true,
-            ),
-            (
-                icons::KEY,
-                t("It is a private key (not the .pub file).").into(),
-                false,
-            ),
-        ],
-        _ => Vec::new(),
-    }
+            Section::Login,
+        ),
+        ConnError::KeyFile(_) => (
+            t("Check [the key file]: it must exist, be readable by this user, and be the private key (not the .pub file).").into(),
+            Section::Login,
+        ),
+        _ => return None,
+    })
 }
 
 /// The cause of a lost connection, said in a short sentence.
@@ -858,72 +633,53 @@ pub fn lost_cause(e: Option<&ConnError>, name: &str) -> String {
     }
 }
 
-/// The "Things to check" box: an overline and one line per thing (icon, text).
-pub fn checklist(ui: &mut Ui, items: &[(&'static str, String, bool)]) -> bool {
+/// The diagnosis sentence: muted text with its [bracketed] part as a link. Returns whether the
+/// link was clicked (only the link: a click elsewhere on the sentence does nothing).
+pub fn diagnosis_text(ui: &mut Ui, text: &str) -> bool {
     let p = style::pal(ui);
-    let mut open_editor = false;
-    egui::Frame::NONE
-        .fill(if p.dark {
-            Color32::from_white_alpha(6)
+    let fmt = |color: Color32| egui::TextFormat {
+        font_id: style::regular(12.5),
+        color,
+        line_height: Some(19.0),
+        ..Default::default()
+    };
+    let mut job = egui::text::LayoutJob::default();
+    // The link's characters, as a range of char indices.
+    let link = match (text.find('['), text.find(']')) {
+        (Some(a), Some(b)) if a < b => {
+            job.append(&text[..a], 0.0, fmt(p.text_muted));
+            job.append(&text[a + 1..b], 0.0, fmt(p.accent_text));
+            job.append(&text[b + 1..], 0.0, fmt(p.text_muted));
+            let start = text[..a].chars().count();
+            Some(start..start + text[a + 1..b].chars().count())
+        }
+        _ => {
+            job.append(text, 0.0, fmt(p.text_muted));
+            None
+        }
+    };
+    let (pos, galley, resp) = egui::Label::new(job)
+        .wrap()
+        .sense(if link.is_some() {
+            Sense::click()
         } else {
-            p.card
+            Sense::hover()
         })
-        .stroke(Stroke::new(1.0, p.border))
-        .corner_radius(CornerRadius::same(10))
-        .inner_margin(egui::Margin::symmetric(14, 12))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.spacing_mut().item_spacing.y = 6.0;
-            ui.spacing_mut().interact_size.y = 17.0;
-            ui.label(style::section_label(t("Things to check"), p.text_muted));
-            ui.add_space(2.0);
-            for (icon, text, link) in items {
-                ui.horizontal_top(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    let (r, _) = ui.allocate_exact_size(vec2(14.0, 17.0), Sense::hover());
-                    ui.painter().text(
-                        r.center(),
-                        Align2::CENTER_CENTER,
-                        *icon,
-                        style::icon_font(14.0),
-                        p.text_faint,
-                    );
-                    // A link is the part in parentheses ("(set one in Network)"), or all of it.
-                    let mut job = egui::text::LayoutJob::default();
-                    let fmt = |color: Color32| egui::TextFormat {
-                        font_id: style::regular(12.5),
-                        color,
-                        ..Default::default()
-                    };
-                    match (text.find('('), text.rfind(')')) {
-                        (Some(a), Some(b)) if *link && a < b => {
-                            job.append(&text[..=a], 0.0, fmt(p.text_muted));
-                            job.append(&text[a + 1..b], 0.0, fmt(p.accent_text));
-                            job.append(&text[b..], 0.0, fmt(p.text_muted));
-                        }
-                        _ => job.append(
-                            text,
-                            0.0,
-                            fmt(if *link { p.accent_text } else { p.text_muted }),
-                        ),
-                    }
-                    let resp = ui.add(egui::Label::new(job).wrap().sense(if *link {
-                        Sense::click()
-                    } else {
-                        Sense::hover()
-                    }));
-                    if *link {
-                        if resp.hovered() {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                        }
-                        if resp.clicked() {
-                            open_editor = true;
-                        }
-                    }
-                });
-            }
-        });
-    open_editor
+        .layout_in_ui(ui);
+    let on_link = link.as_ref().is_some_and(|range| {
+        resp.hover_pos().is_some_and(|at| {
+            let local = at - pos;
+            galley.rect.contains(local.to_pos2())
+                && range.contains(&galley.cursor_from_pos(local).index.0)
+        })
+    });
+    ui.painter().galley(pos, galley, p.text_muted);
+    #[cfg(debug_assertions)]
+    crate::devtest::record("diagnosis", resp.rect);
+    if on_link {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    on_link && resp.clicked()
 }
 
 #[cfg(test)]
