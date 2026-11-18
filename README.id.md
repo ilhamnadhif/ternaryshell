@@ -306,7 +306,7 @@ Vulkan atau Direct3D (Windows memakai Direct3D 12 bila OpenGL tidak ada). Binary
 | Memori, 1 sesi SSH | 68 MB (physical footprint, seperti di Activity Monitor) |
 | Memori, 5 tab SSH | 78 MB |
 | Start dingin sampai frame pertama | ±0,1 detik |
-| `.app` universal (arm64 + x86_64) | 28 MB (DMG 15 MB) |
+| `.app` universal (arm64 + x86_64) | 32 MB (DMG 17 MB) |
 | CPU saat diam | 0,0% |
 | SFTP 1 GiB ke sshd lokal | upload ±640 MB/s, download ±650–700 MB/s, sha256 diverifikasi |
 

@@ -306,7 +306,7 @@ is about 16 MB and its packages about 8 MB; on Windows `ternaryshell.exe` is abo
 | Memory, 1 SSH session | 68 MB (physical footprint, as in Activity Monitor) |
 | Memory, 5 SSH tabs | 78 MB |
 | Cold start to first frame | ~0.1 s |
-| Universal `.app` (arm64 + x86_64) | 28 MB (DMG 15 MB) |
+| Universal `.app` (arm64 + x86_64) | 32 MB (DMG 17 MB) |
 | CPU when idle | 0.0 % |
 | SFTP, 1 GiB to a local sshd | ~640 MB/s up, ~650–700 MB/s down, sha256 verified |
 
