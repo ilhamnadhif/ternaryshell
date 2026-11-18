@@ -40,6 +40,7 @@ use crate::ui::{fonts, icons, keys, style, terminal};
 struct Applied {
     language: Language,
     theme: ThemeMode,
+    look: (crate::settings::Accent, crate::settings::Density),
     font: FontChoice,
     cjk: bool,
     terminal: (usize, crate::settings::CursorStyle, bool, String, String),
@@ -50,6 +51,7 @@ impl Applied {
         Self {
             language: s.language,
             theme: s.theme,
+            look: (s.accent, s.density),
             font: fonts::effective_choice(&s.font),
             cjk: s.load_cjk_font,
             terminal: (
@@ -234,6 +236,7 @@ impl TernaryShellApp {
         if !fonts::apply(ctx, &font, settings.load_cjk_font) {
             toasts.error(font_error(&font));
         }
+        style::set_preferences(settings.accent, settings.density);
         style::apply(ctx, settings.theme);
         ctx.options_mut(|o| {
             o.zoom_with_keyboard = false;
@@ -872,7 +875,8 @@ impl TernaryShellApp {
                     self.menu = Some(AppMenu::install());
                 }
             }
-            if now.theme != self.applied.theme {
+            if now.theme != self.applied.theme || now.look != self.applied.look {
+                style::set_preferences(now.look.0, now.look.1);
                 style::apply(ctx, now.theme);
             }
             if (now.font != self.applied.font || now.cjk != self.applied.cjk)

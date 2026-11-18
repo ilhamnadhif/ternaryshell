@@ -8,6 +8,140 @@ use uuid::Uuid;
 
 pub const DEFAULT_PORT: u16 = 22;
 
+/// The colour of an environment label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LabelColor {
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Teal,
+    Blue,
+    Violet,
+    Pink,
+    Grey,
+}
+
+impl LabelColor {
+    pub const ALL: [LabelColor; 9] = [
+        LabelColor::Red,
+        LabelColor::Orange,
+        LabelColor::Yellow,
+        LabelColor::Green,
+        LabelColor::Teal,
+        LabelColor::Blue,
+        LabelColor::Violet,
+        LabelColor::Pink,
+        LabelColor::Grey,
+    ];
+}
+
+/// An environment label (`PROD` in red): set on a group (its connections inherit it) or on one
+/// connection. It colours the host's icon, its tabs, the top edge of its terminal and the
+/// status bar, so production is never mistaken for staging.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Label {
+    pub color: LabelColor,
+    /// A short tag such as `PROD` (at most [`Label::MAX_TEXT`] characters, upper case).
+    #[serde(default)]
+    pub text: String,
+}
+
+impl Label {
+    pub const MAX_TEXT: usize = 6;
+
+    /// The text as it is shown: trimmed, upper case, at most 6 characters.
+    pub fn tag(&self) -> String {
+        self.text
+            .trim()
+            .chars()
+            .take(Self::MAX_TEXT)
+            .collect::<String>()
+            .to_uppercase()
+    }
+}
+
+/// What kind of machine a connection is: picks the icon in the sidebar, tabs and cards.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostIcon {
+    #[default]
+    Server,
+    Database,
+    Bastion,
+    Worker,
+    Board,
+    Storage,
+    Desktop,
+    Cloud,
+    Container,
+}
+
+impl HostIcon {
+    pub const ALL: [HostIcon; 9] = [
+        HostIcon::Server,
+        HostIcon::Database,
+        HostIcon::Bastion,
+        HostIcon::Worker,
+        HostIcon::Board,
+        HostIcon::Storage,
+        HostIcon::Desktop,
+        HostIcon::Cloud,
+        HostIcon::Container,
+    ];
+
+    /// The icon a connection gets when none is chosen: from its tags and name (`db`, `jump`,
+    /// `pi`, `nas`…), a server otherwise.
+    pub fn guess(b: &Bookmark) -> HostIcon {
+        let words: Vec<String> = b
+            .tags
+            .iter()
+            .map(|t| t.to_ascii_lowercase())
+            .chain(
+                b.name
+                    .to_ascii_lowercase()
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .filter(|w| !w.is_empty())
+                    .map(str::to_string),
+            )
+            .collect();
+        let any = |keys: &[&str]| words.iter().any(|w| keys.contains(&w.as_str()));
+        if any(&[
+            "db",
+            "database",
+            "postgres",
+            "postgresql",
+            "mysql",
+            "mariadb",
+            "redis",
+            "mongo",
+            "mongodb",
+            "sql",
+        ]) {
+            HostIcon::Database
+        } else if any(&["bastion", "jump", "jumphost", "gateway", "gw"]) {
+            HostIcon::Bastion
+        } else if any(&["pi", "raspberry", "raspberrypi", "arm", "iot", "board"]) {
+            HostIcon::Board
+        } else if any(&["nas", "storage", "backup", "s3", "minio"]) {
+            HostIcon::Storage
+        } else if any(&[
+            "worker", "workers", "queue", "job", "jobs", "cpu", "gpu", "ci", "runner",
+        ]) {
+            HostIcon::Worker
+        } else if any(&["vm", "dev", "desktop", "laptop", "workstation", "mac"]) {
+            HostIcon::Desktop
+        } else if any(&["docker", "container", "k8s", "kube", "kubernetes", "pod"]) {
+            HostIcon::Container
+        } else if any(&["cloud", "aws", "gcp", "azure", "ec2", "droplet", "vps"]) {
+            HostIcon::Cloud
+        } else {
+            HostIcon::Server
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Group {
     pub id: Uuid,
@@ -15,6 +149,9 @@ pub struct Group {
     /// Parent group; `None` means top level.
     #[serde(default)]
     pub parent: Option<Uuid>,
+    /// The environment label of the group; its connections and subgroups inherit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<Label>,
 }
 
 impl Group {
@@ -23,6 +160,7 @@ impl Group {
             id: Uuid::new_v4(),
             name: name.into(),
             parent,
+            label: None,
         }
     }
 }
@@ -125,6 +263,12 @@ pub struct Bookmark {
     pub jump: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub forwards: Vec<Forward>,
+    /// Its own environment label; `None` inherits the group's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<Label>,
+    /// The kind of machine; `None` guesses it from the tags and name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<HostIcon>,
 }
 
 fn default_port() -> u16 {
@@ -149,11 +293,18 @@ impl Default for Bookmark {
             legacy_algorithms: false,
             jump: None,
             forwards: Vec::new(),
+            label: None,
+            icon: None,
         }
     }
 }
 
 impl Bookmark {
+    /// The kind of machine, chosen or guessed.
+    pub fn host_icon(&self) -> HostIcon {
+        self.icon.unwrap_or_else(|| HostIcon::guess(self))
+    }
+
     /// Name shown in lists: the bookmark name, or `user@host` when it has none.
     pub fn display_name(&self) -> String {
         if self.name.trim().is_empty() {

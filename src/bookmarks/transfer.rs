@@ -455,6 +455,7 @@ impl ImportPlan {
                         id: group_map[&g.id],
                         name: g.name.clone(),
                         parent: g.parent.and_then(|p| group_map.get(&p).copied()),
+                        label: g.label.clone(),
                     });
                 }
             }
@@ -672,6 +673,7 @@ impl ImportPlan {
                     id,
                     name: g.name.clone(),
                     parent: g.parent.and_then(|p| group_map.get(&p).copied()),
+                    label: g.label.clone(),
                 });
             }
         }

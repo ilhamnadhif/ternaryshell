@@ -10,8 +10,11 @@ use eframe::egui::{
     ThemePreference, Ui, vec2,
 };
 
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+
 use super::fonts;
-use crate::settings::ThemeMode;
+use crate::bookmarks::LabelColor;
+use crate::settings::{Accent, Density, ThemeMode};
 
 /// Colors of one theme.
 #[derive(Clone, Copy, Debug)]
@@ -46,6 +49,8 @@ pub struct Palette {
     pub text: Color32,
     pub text_muted: Color32,
     pub text_faint: Color32,
+    /// Disabled text, placeholder icons.
+    pub text_ghost: Color32,
     pub accent: Color32,
     pub accent_hover: Color32,
     pub accent_press: Color32,
@@ -86,6 +91,8 @@ pub struct Palette {
     pub nav: Color32,
     /// The footer band of dialogs.
     pub footer: Color32,
+    /// Wells: code, fingerprints, previews.
+    pub well: Color32,
 }
 
 /// Unmultiplied RGBA, for the translucent tokens.
@@ -97,100 +104,301 @@ const fn rgb(hex: u32) -> Color32 {
     Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
 }
 
-// Neutral greys with no blue or violet cast (the same as TernaryCode), one quiet blue for focus,
-// links and the main action, and status colours a little below full saturation. Selected rows
-// and "on" controls are a neutral grey (`accent_soft`); blue washes are `accent_tint`.
+// Redesign 3.0: neutral greys with no blue or violet cast (TernaryCode's), a darker window frame
+// so the canvas stands forward, one accent (blue unless chosen otherwise in Settings) and status
+// colours a little below full saturation. Hairlines are translucent so they read on any surface.
 const DARK: Palette = Palette {
     dark: true,
     // The background of the "TernaryShell Dark" terminal scheme, so the terminal blends in.
-    canvas: rgb(0x232323),
-    chrome: rgb(0x1c1c1c),
-    surface: rgb(0x2c2c2c),
-    dialog: rgb(0x2c2c2c),
-    card: rgb(0x292929),
-    raised: rgb(0x2c2c2c),
-    sheet: rgb(0x2c2c2c),
-    field: rgb(0x232323),
-    field_border: rgb(0x454545),
-    hover: rgba(255, 255, 255, 0.05),
+    canvas: rgb(0x181818),
+    chrome: rgb(0x0f0f0f),
+    surface: rgb(0x1f1f1f),
+    dialog: rgb(0x1c1c1c),
+    card: rgb(0x202020),
+    raised: rgb(0x242424),
+    sheet: rgb(0x1c1c1c),
+    field: rgb(0x121212),
+    field_border: rgba(255, 255, 255, 0.10),
+    hover: rgba(255, 255, 255, 0.045),
     subtle: rgba(255, 255, 255, 0.08),
-    border: rgb(0x323232),
-    border_strong: rgb(0x454545),
-    line_soft: rgba(255, 255, 255, 0.06),
-    text: rgb(0xe6e6e6),
-    text_muted: rgb(0xa4a4a4),
-    text_faint: rgb(0x767676),
-    accent: rgb(0x3d7bd9),
-    accent_hover: rgb(0x528ce2),
-    accent_press: rgb(0x336bc4),
+    border: rgba(255, 255, 255, 0.07),
+    border_strong: rgba(255, 255, 255, 0.12),
+    line_soft: rgba(255, 255, 255, 0.045),
+    text: rgb(0xececec),
+    text_muted: rgb(0xa3a3a3),
+    text_faint: rgb(0x737373),
+    text_ghost: rgb(0x4f4f4f),
+    accent: rgb(0x3a7be0),
+    accent_hover: rgb(0x4a89ea),
+    accent_press: rgb(0x2f6bcc),
     on_accent: Color32::WHITE,
-    accent_soft: rgba(255, 255, 255, 0.085),
-    accent_softer: rgba(61, 123, 217, 0.10),
-    accent_tint: rgba(61, 123, 217, 0.18),
-    accent_halo: rgba(61, 123, 217, 0.22),
-    accent_line: rgba(61, 123, 217, 0.55),
-    accent_text: rgb(0x7faeec),
-    ok: rgb(0x5fb87e),
-    warn: rgb(0xd6a247),
-    err: rgb(0xe86b61),
-    info: rgb(0x72a7e8),
-    root: rgb(0xe8915a),
+    accent_soft: rgba(255, 255, 255, 0.075),
+    accent_softer: rgba(70, 130, 235, 0.08),
+    accent_tint: rgba(70, 130, 235, 0.16),
+    accent_halo: rgba(70, 130, 235, 0.16),
+    accent_line: rgba(84, 140, 234, 0.55),
+    accent_text: rgb(0x8cb4f5),
+    ok: rgb(0x4fbf85),
+    warn: rgb(0xe8a23c),
+    err: rgb(0xec625b),
+    info: rgb(0x7aa7f2),
+    root: rgb(0xf0894a),
     folder: rgb(0x9aa3ae),
-    scrim: rgba(0, 0, 0, 0.50),
-    card_ring: rgb(0x323232),
-    tab_on: rgb(0x2c2c2c),
-    button: rgb(0x2f2f2f),
-    button_border: rgb(0x454545),
-    segment_on: rgb(0x2c2c2c),
-    nav: rgb(0x272727),
-    footer: rgba(255, 255, 255, 0.02),
+    scrim: rgba(0, 0, 0, 0.55),
+    card_ring: rgba(255, 255, 255, 0.07),
+    tab_on: rgb(0x181818),
+    button: rgba(255, 255, 255, 0.055),
+    button_border: rgba(255, 255, 255, 0.09),
+    segment_on: rgb(0x2e2e2e),
+    nav: rgb(0x171717),
+    footer: rgba(255, 255, 255, 0.015),
+    well: rgb(0x141414),
 };
 
 const LIGHT: Palette = Palette {
     dark: false,
     // The background of the "TernaryShell Light" terminal scheme.
-    canvas: rgb(0xfbfbfb),
-    chrome: rgb(0xf3f3f3),
+    canvas: rgb(0xffffff),
+    chrome: rgb(0xefefee),
     surface: rgb(0xffffff),
     dialog: rgb(0xffffff),
     card: rgb(0xffffff),
     raised: rgb(0xffffff),
     sheet: rgb(0xffffff),
-    field: rgb(0xfbfbfb),
-    field_border: rgb(0xcbcbcb),
-    hover: rgba(0, 0, 0, 0.05),
-    subtle: rgba(0, 0, 0, 0.085),
-    border: rgb(0xe0e0e0),
-    border_strong: rgb(0xcbcbcb),
-    line_soft: rgba(0, 0, 0, 0.06),
-    text: rgb(0x1d1d1d),
-    text_muted: rgb(0x5e5e5e),
-    text_faint: rgb(0x8e8e8e),
-    accent: rgb(0x2563c9),
-    accent_hover: rgb(0x1d52ae),
-    accent_press: rgb(0x1a4a9c),
+    field: rgb(0xffffff),
+    field_border: rgba(0, 0, 0, 0.15),
+    hover: rgba(0, 0, 0, 0.045),
+    subtle: rgba(0, 0, 0, 0.08),
+    border: rgba(0, 0, 0, 0.08),
+    border_strong: rgba(0, 0, 0, 0.15),
+    line_soft: rgba(0, 0, 0, 0.05),
+    text: rgb(0x171717),
+    text_muted: rgb(0x595959),
+    text_faint: rgb(0x8a8a8a),
+    text_ghost: rgb(0xb5b5b5),
+    accent: rgb(0x1f5fbf),
+    accent_hover: rgb(0x1a52a8),
+    accent_press: rgb(0x174a97),
     on_accent: Color32::WHITE,
-    accent_soft: rgba(0, 0, 0, 0.075),
-    accent_softer: rgba(37, 99, 201, 0.07),
-    accent_tint: rgba(37, 99, 201, 0.12),
-    accent_halo: rgba(37, 99, 201, 0.22),
-    accent_line: rgba(37, 99, 201, 0.45),
-    accent_text: rgb(0x1f5abd),
-    ok: rgb(0x1f844b),
-    warn: rgb(0xa66600),
-    err: rgb(0xc8322e),
-    info: rgb(0x2563c9),
+    accent_soft: rgba(0, 0, 0, 0.065),
+    accent_softer: rgba(31, 95, 191, 0.06),
+    accent_tint: rgba(31, 95, 191, 0.11),
+    accent_halo: rgba(31, 95, 191, 0.13),
+    accent_line: rgba(31, 95, 191, 0.45),
+    accent_text: rgb(0x1a56b3),
+    ok: rgb(0x1a7f48),
+    warn: rgb(0xa8670a),
+    err: rgb(0xc9372f),
+    info: rgb(0x1f5fbf),
     root: rgb(0xc25e0a),
     folder: rgb(0x6c7888),
-    scrim: rgba(0, 0, 0, 0.25),
-    card_ring: rgb(0xe0e0e0),
+    scrim: rgba(20, 20, 20, 0.28),
+    card_ring: rgba(0, 0, 0, 0.08),
     tab_on: rgb(0xffffff),
     button: rgb(0xffffff),
-    button_border: rgb(0xcbcbcb),
+    button_border: rgba(0, 0, 0, 0.15),
     segment_on: rgb(0xffffff),
-    nav: rgb(0xf6f6f6),
-    footer: rgba(0, 0, 0, 0.025),
+    nav: rgb(0xf6f6f5),
+    footer: rgb(0xf6f6f5),
+    well: rgb(0xf6f6f5),
 };
+
+/// The accent colours of one option: fill, hover, press, text, tint (badges, halos), wash
+/// (drop targets), line (rings).
+struct AccentSet {
+    accent: Color32,
+    hover: Color32,
+    press: Color32,
+    text: Color32,
+    tint: Color32,
+    wash: Color32,
+    line: Color32,
+}
+
+const fn accent_set(
+    accent: u32,
+    hover: u32,
+    press: u32,
+    text: u32,
+    (r, g, b): (u8, u8, u8),
+    tint: f32,
+    wash: f32,
+    line: f32,
+) -> AccentSet {
+    AccentSet {
+        accent: rgb(accent),
+        hover: rgb(hover),
+        press: rgb(press),
+        text: rgb(text),
+        tint: rgba(r, g, b, tint),
+        wash: rgba(r, g, b, wash),
+        line: rgba(r, g, b, line),
+    }
+}
+
+/// Accents other than blue (blue is what `DARK` and `LIGHT` hold): `[dark, light]`.
+fn accent_sets(accent: Accent) -> Option<[AccentSet; 2]> {
+    Some(match accent {
+        Accent::Blue => return None,
+        Accent::Violet => [
+            accent_set(
+                0x7a62e6,
+                0x8a74ee,
+                0x6a52d6,
+                0xb4a4f7,
+                (130, 105, 240),
+                0.17,
+                0.08,
+                0.55,
+            ),
+            accent_set(
+                0x6246d6,
+                0x563bc4,
+                0x4b33ad,
+                0x5a3fcc,
+                (98, 70, 214),
+                0.11,
+                0.06,
+                0.45,
+            ),
+        ],
+        Accent::Green => [
+            accent_set(
+                0x2f9e66,
+                0x38ad72,
+                0x288a58,
+                0x7fd3a6,
+                (60, 170, 110),
+                0.16,
+                0.08,
+                0.50,
+            ),
+            accent_set(
+                0x1c7f4c,
+                0x186f42,
+                0x145f38,
+                0x187344,
+                (28, 127, 76),
+                0.11,
+                0.06,
+                0.45,
+            ),
+        ],
+        Accent::Orange => [
+            accent_set(
+                0xd9702b,
+                0xe57e3a,
+                0xc46220,
+                0xf2a874,
+                (230, 125, 60),
+                0.16,
+                0.08,
+                0.50,
+            ),
+            accent_set(
+                0xc25a14,
+                0xad5011,
+                0x98460f,
+                0xad5011,
+                (194, 90, 20),
+                0.11,
+                0.06,
+                0.45,
+            ),
+        ],
+        Accent::Pink => [
+            accent_set(
+                0xcf4f91,
+                0xdb5f9f,
+                0xbb4281,
+                0xf09ac6,
+                (215, 85, 150),
+                0.16,
+                0.08,
+                0.50,
+            ),
+            accent_set(
+                0xb83a7c,
+                0xa3326d,
+                0x8f2b60,
+                0xa3326d,
+                (184, 58, 124),
+                0.10,
+                0.05,
+                0.45,
+            ),
+        ],
+        Accent::Graphite => [
+            accent_set(
+                0x6b6b6b,
+                0x7a7a7a,
+                0x5c5c5c,
+                0xd0d0d0,
+                (255, 255, 255),
+                0.10,
+                0.05,
+                0.35,
+            ),
+            accent_set(
+                0x2b2b2b,
+                0x1f1f1f,
+                0x111111,
+                0x2b2b2b,
+                (0, 0, 0),
+                0.08,
+                0.04,
+                0.35,
+            ),
+        ],
+    })
+}
+
+static ACCENT: AtomicU8 = AtomicU8::new(0);
+static COMPACT: AtomicBool = AtomicBool::new(false);
+
+/// Applies the accent and density chosen in Settings to every palette and row from now on.
+pub fn set_preferences(accent: Accent, density: Density) {
+    let i = Accent::ALL.iter().position(|a| *a == accent).unwrap_or(0);
+    ACCENT.store(i as u8, Ordering::Relaxed);
+    COMPACT.store(density == Density::Compact, Ordering::Relaxed);
+}
+
+fn current_accent() -> Accent {
+    Accent::ALL
+        .get(ACCENT.load(Ordering::Relaxed) as usize)
+        .copied()
+        .unwrap_or_default()
+}
+
+/// Height of a row in the sidebar and the file lists (Settings → Appearance → Density).
+pub fn row_h() -> f32 {
+    if COMPACT.load(Ordering::Relaxed) {
+        24.0
+    } else {
+        28.0
+    }
+}
+
+/// Whether rows are compact.
+pub fn compact() -> bool {
+    COMPACT.load(Ordering::Relaxed)
+}
+
+/// The colour of an environment label (`PROD`, `STG`…) in a theme.
+pub fn label_color(color: LabelColor, dark: bool) -> Color32 {
+    let (d, l) = match color {
+        LabelColor::Red => (0xf06b63, 0xd9443b),
+        LabelColor::Orange => (0xf0894a, 0xd66a1f),
+        LabelColor::Yellow => (0xe2b445, 0xb88a12),
+        LabelColor::Green => (0x4fbf85, 0x1f8a52),
+        LabelColor::Teal => (0x3fb5c2, 0x12879a),
+        LabelColor::Blue => (0x5c9cf5, 0x2a6fd6),
+        LabelColor::Violet => (0xa48bf0, 0x7a5ad8),
+        LabelColor::Pink => (0xe27bb2, 0xc4448b),
+        LabelColor::Grey => (0x8b8b8b, 0x7d7d7d),
+    };
+    rgb(if dark { d } else { l })
+}
 
 /// The tint behind a status color (badges, callouts, icon tiles).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -251,7 +459,22 @@ impl Palette {
 }
 
 pub fn palette(dark: bool) -> Palette {
-    if dark { DARK } else { LIGHT }
+    let mut p = if dark { DARK } else { LIGHT };
+    if let Some(sets) = accent_sets(current_accent()) {
+        let a = &sets[if dark { 0 } else { 1 }];
+        p.accent = a.accent;
+        p.accent_hover = a.hover;
+        p.accent_press = a.press;
+        p.accent_text = a.text;
+        p.accent_tint = a.tint;
+        p.accent_halo = a.tint;
+        p.accent_softer = a.wash;
+        p.accent_line = a.line;
+        if !dark && matches!(current_accent(), Accent::Graphite) {
+            p.info = a.accent;
+        }
+    }
+    p
 }
 
 /// The palette of the theme `ui` is drawn with.

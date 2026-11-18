@@ -28,6 +28,50 @@ pub enum CursorStyle {
     Underline,
 }
 
+/// The accent colour (focus rings, the main button, links, selection bars).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Accent {
+    #[default]
+    Blue,
+    Violet,
+    Green,
+    Orange,
+    Pink,
+    Graphite,
+}
+
+impl Accent {
+    pub const ALL: [Accent; 6] = [
+        Accent::Blue,
+        Accent::Violet,
+        Accent::Green,
+        Accent::Orange,
+        Accent::Pink,
+        Accent::Graphite,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Accent::Blue => "Blue",
+            Accent::Violet => "Violet",
+            Accent::Green => "Green",
+            Accent::Orange => "Orange",
+            Accent::Pink => "Pink",
+            Accent::Graphite => "Graphite",
+        }
+    }
+}
+
+/// How tall rows are in the sidebar and the file lists.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Density {
+    #[default]
+    Comfortable,
+    Compact,
+}
+
 /// A command that can be sent to the active terminal from the toolbar.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuickCommand {
@@ -68,6 +112,8 @@ pub struct FontChoice {
 pub struct Settings {
     pub language: Language,
     pub theme: ThemeMode,
+    pub accent: Accent,
+    pub density: Density,
     /// Terminal colour scheme used with the dark / light app theme.
     pub scheme_dark: String,
     pub scheme_light: String,
@@ -98,6 +144,8 @@ pub struct Settings {
     pub last_update_check: Option<i64>,
     /// Saved connections opened lately, newest first (for Start and the command palette).
     pub recent: Vec<RecentConnection>,
+    /// Hosts of ~/.ssh/config the Home page no longer suggests importing (`user@host:port`).
+    pub dismissed_ssh_hosts: Vec<String>,
 }
 
 /// A saved connection and when it was last opened (Unix time).
@@ -112,6 +160,8 @@ impl Default for Settings {
         Self {
             language: Language::System,
             theme: ThemeMode::System,
+            accent: Accent::Blue,
+            density: Density::Comfortable,
             scheme_dark: "TernaryShell Dark".into(),
             scheme_light: "TernaryShell Light".into(),
             font: FontChoice::default(),
@@ -145,6 +195,7 @@ impl Default for Settings {
             skipped_version: None,
             last_update_check: None,
             recent: Vec::new(),
+            dismissed_ssh_hosts: Vec::new(),
         }
     }
 }

@@ -10,11 +10,12 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::model::{Bookmark, Group};
+use super::model::{Bookmark, Group, Label};
 use crate::paths;
 
 /// 2: SSH agent logins, jump hosts and port forwards (older versions would lose them on save).
-pub const STORE_SCHEMA_VERSION: u32 = 2;
+/// 3: environment labels on groups and connections, and host icons.
+pub const STORE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BookmarkStore {
@@ -127,6 +128,36 @@ impl BookmarkStore {
         }
         names.reverse();
         names.join(" / ")
+    }
+
+    /// The label a group shows: its own, or the nearest parent's.
+    pub fn group_label(&self, id: Option<Uuid>) -> Option<&Label> {
+        let mut cur = id;
+        let mut hops = 0;
+        while let Some(gid) = cur {
+            let g = self.group(gid)?;
+            if let Some(l) = &g.label {
+                return Some(l);
+            }
+            cur = g.parent;
+            hops += 1;
+            if hops > 64 {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// The label a connection shows: its own, or its group's (inherited up the tree).
+    pub fn label_of<'a>(&'a self, b: &'a Bookmark) -> Option<&'a Label> {
+        b.label.as_ref().or_else(|| self.group_label(b.group))
+    }
+
+    /// Sets (or clears) a group's label.
+    pub fn set_group_label(&mut self, id: Uuid, label: Option<Label>) {
+        if let Some(g) = self.groups.iter_mut().find(|g| g.id == id) {
+            g.label = label;
+        }
     }
 
     /// The group itself plus every group nested below it.

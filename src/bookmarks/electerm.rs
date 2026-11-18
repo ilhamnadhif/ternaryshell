@@ -187,6 +187,7 @@ pub fn read(value: &Value) -> Result<Incoming> {
                     title.to_string()
                 },
                 parent: parent_of.get(id).and_then(|p| local_group(p)),
+                label: None,
             }
         })
         .collect();

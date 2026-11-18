@@ -1746,6 +1746,23 @@ const ID: &[(&str, &str)] = &[
         "Something went wrong and TernaryShell recovered. A report was saved in {}.",
         "Terjadi kesalahan dan TernaryShell berhasil pulih. Laporannya disimpan di {}.",
     ),
+    // ===== Redesign 3.0: shared [foundation] =====
+    // ===== end [foundation] =====
+
+    // ===== Redesign 3.0: main window, sidebar, Home [main] =====
+    // ===== end [main] =====
+
+    // ===== Redesign 3.0: connecting, prompts, command palette [connect] =====
+    // ===== end [connect] =====
+
+    // ===== Redesign 3.0: Edit Connection, Settings, import & export [editor] =====
+    // ===== end [editor] =====
+
+    // ===== Redesign 3.0: Files and the remote editor [files] =====
+    // ===== end [files] =====
+
+    // ===== Redesign 3.0: dialogs, notifications, menus, platform [dialogs] =====
+    // ===== end [dialogs] =====
 ];
 
 #[cfg(test)]

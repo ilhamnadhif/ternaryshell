@@ -1893,3 +1893,186 @@ mod tests {
         assert_eq!(with_icon("+", "New"), "+  New");
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Host identity (Redesign 3.0): the host glyph, environment tags and label dots
+// ---------------------------------------------------------------------------------------------
+
+/// The icon of a kind of machine.
+pub fn host_icon(icon: crate::bookmarks::HostIcon) -> &'static str {
+    use crate::bookmarks::HostIcon;
+    match icon {
+        HostIcon::Server => icons::HARD_DRIVES,
+        HostIcon::Database => icons::DATABASE,
+        HostIcon::Bastion => icons::SHIELD_CHECK,
+        HostIcon::Worker => icons::CPU,
+        HostIcon::Board => icons::CIRCUITRY,
+        HostIcon::Storage => icons::HARD_DRIVE,
+        HostIcon::Desktop => icons::DESKTOP_TOWER,
+        HostIcon::Cloud => icons::CLOUD,
+        HostIcon::Container => icons::CUBE,
+    }
+}
+
+/// A host glyph: the machine's icon on a rounded tile tinted with its label colour (neutral
+/// without a label), with its connection state as a dot in the corner. `ring` is the surface
+/// it sits on (the dot is cut out of it). Sides: 20 (rows), 28 (cards), 40 / 52 (headers).
+pub fn paint_host_glyph(
+    painter: &egui::Painter,
+    rect: Rect,
+    icon: &str,
+    label: Option<Color32>,
+    status: Option<Color32>,
+    ring: Color32,
+    p: &Palette,
+) {
+    let side = rect.width();
+    let (radius, size) = if side >= 50.0 {
+        (14, 26.0)
+    } else if side >= 38.0 {
+        (11, 20.0)
+    } else if side >= 26.0 {
+        (8, 15.0)
+    } else {
+        (6, 12.0)
+    };
+    let (fill, color) = match label {
+        Some(c) => (style::soft(c, 0.15), c),
+        None => (p.hover, p.text_faint),
+    };
+    painter.rect_filled(rect, CornerRadius::same(radius), fill);
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        icon,
+        style::icon_font(size),
+        color,
+    );
+    if let Some(s) = status {
+        let r = if side >= 26.0 { 4.5 } else { 4.0 };
+        let c = rect.right_bottom() + vec2(2.0 - r, 2.0 - r);
+        painter.circle_filled(c, r + 2.0, ring);
+        painter.circle_filled(c, r, s);
+    }
+}
+
+/// See [`paint_host_glyph`].
+pub fn host_glyph(
+    ui: &mut Ui,
+    side: f32,
+    icon: &str,
+    label: Option<Color32>,
+    status: Option<Color32>,
+    ring: Color32,
+) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(side), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        paint_host_glyph(
+            ui.painter(),
+            rect,
+            icon,
+            label,
+            status,
+            ring,
+            &style::pal(ui),
+        );
+    }
+    resp
+}
+
+/// An environment tag (`PROD`): 16 px (or 20 px when `large`), the label colour on a 16 % fill
+/// of it, semibold and tracked out. Painted with its left edge at `left`, vertically centred on
+/// `left.y`; returns its width.
+pub fn paint_env_tag(
+    painter: &egui::Painter,
+    left: egui::Pos2,
+    text: &str,
+    color: Color32,
+    large: bool,
+) -> f32 {
+    let (h, pad, size, radius) = if large {
+        (20.0, 7.0, 10.5, 5)
+    } else {
+        (16.0, 5.0, 9.5, 4)
+    };
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        &text.to_uppercase(),
+        0.0,
+        egui::TextFormat {
+            font_id: style::semibold(size),
+            color,
+            extra_letter_spacing: size * 0.06,
+            ..Default::default()
+        },
+    );
+    let galley = painter.layout_job(job);
+    let w = galley.size().x + pad * 2.0;
+    let rect = Rect::from_min_size(egui::pos2(left.x, left.y - h / 2.0), vec2(w, h));
+    painter.rect_filled(rect, CornerRadius::same(radius), style::soft(color, 0.16));
+    painter.galley(
+        egui::pos2(rect.left() + pad, rect.center().y - galley.size().y / 2.0),
+        galley,
+        color,
+    );
+    w
+}
+
+/// How wide [`paint_env_tag`] draws `text`.
+pub fn env_tag_width(ui: &Ui, text: &str, large: bool) -> f32 {
+    let (pad, size) = if large { (7.0, 10.5) } else { (5.0, 9.5) };
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        &text.to_uppercase(),
+        0.0,
+        egui::TextFormat {
+            font_id: style::semibold(size),
+            extra_letter_spacing: size * 0.06,
+            ..Default::default()
+        },
+    );
+    ui.fonts_mut(|f| f.layout_job(job)).size().x + pad * 2.0
+}
+
+/// See [`paint_env_tag`].
+pub fn env_tag(ui: &mut Ui, text: &str, color: Color32, large: bool) -> Response {
+    let w = env_tag_width(ui, text, large);
+    let h = if large { 20.0 } else { 16.0 };
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        paint_env_tag(ui.painter(), rect.left_center(), text, color, large);
+    }
+    resp
+}
+
+/// The label of a connection as a tag, or nothing.
+pub fn label_tag(ui: &mut Ui, label: Option<&crate::bookmarks::Label>, large: bool) {
+    if let Some(l) = label {
+        let tag = l.tag();
+        if !tag.is_empty() {
+            env_tag(
+                ui,
+                &tag,
+                style::label_color(l.color, ui.visuals().dark_mode),
+                large,
+            );
+        }
+    }
+}
+
+/// A label colour dot (8 px).
+pub fn label_dot(ui: &mut Ui, color: Color32) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+    ui.painter().circle_filled(rect.center(), 4.0, color);
+    resp
+}
+
+/// A selected row: the neutral selection fill and a 2 px accent bar at its left edge.
+pub fn paint_selected_row(painter: &egui::Painter, rect: Rect, p: &Palette) {
+    painter.rect_filled(rect, CornerRadius::same(style::RADIUS), p.accent_soft);
+    let bar = Rect::from_min_max(
+        egui::pos2(rect.left(), rect.top() + 7.0),
+        egui::pos2(rect.left() + 2.0, rect.bottom() - 7.0),
+    );
+    painter.rect_filled(bar, CornerRadius::same(1), p.accent);
+}
