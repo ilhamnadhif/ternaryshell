@@ -311,15 +311,14 @@ impl FileEditor {
     }
 
     /// The editor filling `rect` (the tab's canvas): the header (← Terminal, the path, the
-    /// host and its label, Save), a banner when the file changed or vanished on the server, the
-    /// text with its gutter, and the status bar. `env` is the host's label (text and colour).
+    /// host, Save), a banner when the file changed or vanished on the server, the text with its
+    /// gutter, and the status bar.
     pub fn show_in(
         &mut self,
         ui: &mut Ui,
         rect: Rect,
         rt: &tokio::runtime::Handle,
         sftp: Option<Sftp>,
-        env: Option<(String, Color32)>,
     ) -> EditorOutput {
         self.poll();
         let ctx = ui.ctx().clone();
@@ -428,7 +427,7 @@ impl FileEditor {
             };
             let label = t("Save");
             let keys = super::keys::Shortcut::Save.label();
-            let w = save_width(ui, label, &keys);
+            let w = save_width(ui, label);
             let r = place(w, style::TOOLBAR_H);
             let mut b = ui.new_child(egui::UiBuilder::new().max_rect(r));
             let save = b
@@ -444,7 +443,7 @@ impl FileEditor {
                 kit::paint_spinner(ui, r.center(), 7.0);
             }
         }
-        // The host and its label.
+        // The host (Redesign 3.1: no label tag).
         let host_g =
             ui.painter()
                 .layout_no_wrap(self.host.clone(), style::mono(11.0), p.text_faint);
@@ -454,11 +453,6 @@ impl FileEditor {
             host_g,
             p.text_faint,
         );
-        if let Some((tag, color)) = &env {
-            let w = kit::env_tag_width(ui, tag, false);
-            let r = place(w, 16.0);
-            kit::paint_env_tag(ui.painter(), r.left_center(), tag, *color, false);
-        }
         // ← Terminal, then the path to the file.
         let mut x = head.left() + 8.0;
         let back_w =
@@ -527,16 +521,13 @@ impl FileEditor {
                 b.add_space((body.height() * 0.28).max(8.0));
                 b.vertical_centered(|ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
-                    let (r, _) = ui.allocate_exact_size(vec2(44.0, 44.0), Sense::hover());
-                    ui.painter().rect_filled(r, CornerRadius::same(12), p.hover);
-                    ui.painter().text(
-                        r.center(),
-                        Align2::CENTER_CENTER,
-                        icons::FILE_X,
-                        style::icon_font(22.0),
-                        p.text_muted,
+                    // Redesign 3.1: a plain icon, no tile.
+                    ui.label(
+                        RichText::new(icons::FILE_X)
+                            .font(style::icon_font(28.0))
+                            .color(p.text_faint),
                     );
-                    ui.add_space(14.0);
+                    ui.add_space(10.0);
                     ui.label(
                         RichText::new(tf("{} can't be edited here", &[self.name()]))
                             .font(style::semibold(14.0))
@@ -631,8 +622,6 @@ impl FileEditor {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 dialog_head(
                     ui,
-                    icons::FLOPPY_DISK,
-                    Tone::Warn,
                     &tf("Discard changes to {}?", &[self.name()]),
                     &tf("Your edits haven't been saved to {}.", &[&host]),
                 );
@@ -834,19 +823,9 @@ impl FileEditor {
             band.bottom() - 0.5,
             Stroke::new(1.0, p.border),
         );
-        let tile = Rect::from_min_size(
-            pos2(band.left() + 14.0, band.top() + 10.0),
-            vec2(28.0, 28.0),
-        );
-        painter.rect_filled(tile, CornerRadius::same(8), p.tone_soft(tone));
-        painter.text(
-            tile.center(),
-            Align2::CENTER_CENTER,
-            icon,
-            style::icon_font(15.0),
-            p.tone(tone),
-        );
-        let x = tile.right() + 12.0;
+        // Redesign 3.1: the tint says it; no icon tile.
+        let _ = icon;
+        let x = band.left() + 14.0;
         let w = band.right() - 12.0 - x;
         let g = painter.layout_no_wrap(title, style::semibold(style::BODY), p.text);
         painter.galley(pos2(x, band.top() + 10.0), g, p.text);
@@ -1239,11 +1218,9 @@ fn short_path(path: &str) -> String {
     format!("…/{tail}")
 }
 
-/// How wide the small Save button with its key cap is.
-fn save_width(ui: &Ui, label: &str, keys: &str) -> f32 {
-    let label_w = text_w(ui, label, style::medium(style::SMALL));
-    let keys_w = (text_w(ui, keys, style::regular(style::XS)) + 10.0).max(20.0);
-    label_w + 5.0 + keys_w + 9.0 * 2.0
+/// How wide the small Save button is (Redesign 3.1: no key cap in it).
+fn save_width(ui: &Ui, label: &str) -> f32 {
+    text_w(ui, label, style::medium(style::SMALL)) + 9.0 * 2.0
 }
 
 /// Which lines differ from the saved text: 1 changed, 2 added (0 unchanged). The lines that
@@ -1290,8 +1267,8 @@ fn discard_button(ui: &mut Ui) -> egui::Response {
     resp
 }
 
-/// A dialog's header: the icon tile (32 px), the title (16 px) and what it is about.
-fn dialog_head(ui: &mut Ui, icon: &str, tone: Tone, title: &str, sub: &str) {
+/// A dialog's header: the title (16 px) and what it is about (Redesign 3.1: no icon tile).
+fn dialog_head(ui: &mut Ui, title: &str, sub: &str) {
     let p = style::pal(ui);
     egui::Frame::NONE
         .inner_margin(egui::Margin {
@@ -1303,17 +1280,6 @@ fn dialog_head(ui: &mut Ui, icon: &str, tone: Tone, title: &str, sub: &str) {
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = 12.0;
-                let (r, _) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::hover());
-                ui.painter()
-                    .rect_filled(r, CornerRadius::same(9), p.tone_soft(tone));
-                ui.painter().text(
-                    r.center(),
-                    Align2::CENTER_CENTER,
-                    icon,
-                    style::icon_font(17.0),
-                    p.tone(tone),
-                );
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 3.0;
                     ui.set_width(ui.available_width());

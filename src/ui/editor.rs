@@ -750,21 +750,12 @@ impl Editor {
             self.nav(ui, nav, store, &forward_problems);
 
             let main = Rect::from_min_max(pos2(nav.right(), full.top()), full.max);
-            let (title, sub) = match self.section {
-                Section::Server if self.is_new => (
-                    t("New connection"),
-                    t("Where to connect, and where it lives in the sidebar."),
-                ),
-                Section::Server => (
-                    t("Server"),
-                    t("Where to connect, and where it lives in the sidebar."),
-                ),
-                Section::Login => (t("Login"), t("How TernaryShell proves who you are.")),
-                Section::Network => (
-                    t("Network"),
-                    t("Reach the server through other hosts, and forward ports while connected."),
-                ),
-                Section::Session => (t("Session"), t("What happens right after you log in.")),
+            let title = match self.section {
+                Section::Server if self.is_new => t("New connection"),
+                Section::Server => t("Server"),
+                Section::Login => t("Login"),
+                Section::Network => t("Network"),
+                Section::Session => t("Session"),
             };
             if forms::sheet_head(
                 ui,
@@ -772,7 +763,6 @@ impl Editor {
                 main.top() + 20.0,
                 main.right() - 24.0,
                 title,
-                sub,
             ) {
                 result = EditorResult::Cancel;
             }
@@ -785,7 +775,7 @@ impl Editor {
             );
             self.same_as_line(ui, cmd, &cmd_parts, &cmd_plain);
             let body = Rect::from_min_max(
-                pos2(main.left() + 24.0, main.top() + 84.0),
+                pos2(main.left() + 24.0, main.top() + 62.0),
                 pos2(main.right() - 24.0, cmd.top() - 12.0),
             );
             let mut body_ui = ui.new_child(egui::UiBuilder::new().max_rect(body));
@@ -980,12 +970,11 @@ impl Editor {
         );
         let mut job = egui::text::LayoutJob::default();
         job.append(
-            &t("Same as").to_uppercase(),
+            t("Same as"),
             0.0,
             egui::TextFormat {
-                font_id: style::semibold(style::XS),
+                font_id: style::medium(style::SMALL),
                 color: p.text_faint,
-                extra_letter_spacing: 0.44,
                 valign: egui::Align::Center,
                 ..Default::default()
             },
@@ -1100,25 +1089,15 @@ impl Editor {
         kit::paint_host_glyph(&painter, glyph, icon, color, None, p.nav, &p);
         let tx = glyph.right() + 11.0;
         let text_right = nav.right() - 16.0;
-        let tag = label
-            .as_ref()
-            .map(|l| l.tag())
-            .filter(|s| !s.is_empty() && !self.is_new);
-        let tag_w = tag
-            .as_ref()
-            .map_or(0.0, |s| kit::env_tag_width(ui, s, false) + 6.0);
+        // Redesign 3.1: the name and address only; the label shows on the picker below.
         let mut job = egui::text::LayoutJob::single_section(
             name,
             egui::TextFormat::simple(style::semibold(14.0), p.text),
         );
-        job.wrap = egui::text::TextWrapping::truncate_at_width((text_right - tx - tag_w).max(30.0));
+        job.wrap = egui::text::TextWrapping::truncate_at_width((text_right - tx).max(30.0));
         let ng = painter.layout_job(job);
         let name_y = glyph.top() + 1.5 + 9.8;
-        let name_w = ng.size().x;
         painter.galley(pos2(tx, name_y - ng.size().y / 2.0), ng, p.text);
-        if let (Some(tag), Some(c)) = (tag, color) {
-            kit::paint_env_tag(&painter, pos2(tx + name_w + 6.0, name_y), &tag, c, false);
-        }
         let mut job = egui::text::LayoutJob::single_section(
             address,
             egui::TextFormat::simple(style::mono(11.0), p.text_faint),
@@ -1836,54 +1815,46 @@ impl Editor {
     // ----- Login -------------------------------------------------------------------------------
 
     fn login_section(&mut self, ui: &mut Ui) {
-        // The method, as four cards.
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            let w = (ui.available_width() - 24.0) / 4.0;
-            let cards = [
-                (
-                    AuthKind::Password,
-                    icons::PASSWORD,
-                    t("Password"),
-                    tf("{}, or asked each time", &[keychain_name()]),
-                ),
-                (
-                    AuthKind::KeyFile,
-                    icons::KEY,
-                    t("Key file"),
-                    t("A file in ~/.ssh").to_string(),
-                ),
-                (
-                    AuthKind::PastedKey,
-                    icons::CLIPBOARD_TEXT,
-                    t("Pasted key"),
-                    tf("Kept in {}", &[crate::platform::keychain()]),
-                ),
-                (
-                    AuthKind::Agent,
-                    icons::FINGERPRINT,
-                    t("SSH agent"),
-                    t("ssh-add, 1Password, Secretive").to_string(),
-                ),
-            ];
-            for (kind, icon, title, desc) in cards {
-                let r = method_card(ui, icon, title, &desc, self.auth == kind, w);
-                #[cfg(debug_assertions)]
-                {
-                    match kind {
-                        AuthKind::KeyFile => crate::devtest::record("editor-auth-key", r.rect),
-                        AuthKind::PastedKey => crate::devtest::record("editor-auth-pasted", r.rect),
-                        AuthKind::Agent => crate::devtest::record("editor-auth-agent", r.rect),
-                        AuthKind::Password => {
-                            crate::devtest::record("editor-auth-password", r.rect)
-                        }
-                    }
-                }
-                if r.clicked() {
-                    self.auth = kind;
-                }
+        // The method: a segmented control across the page and one sentence about it.
+        let kinds = [
+            (AuthKind::Password, t("Password")),
+            (AuthKind::KeyFile, t("Key file")),
+            (AuthKind::PastedKey, t("Pasted key")),
+            (AuthKind::Agent, t("SSH agent")),
+        ];
+        let segs = method_segments(ui, &mut self.auth, &kinds);
+        #[cfg(debug_assertions)]
+        for ((kind, _), r) in kinds.iter().zip(&segs) {
+            let name = match kind {
+                AuthKind::KeyFile => "editor-auth-key",
+                AuthKind::PastedKey => "editor-auth-pasted",
+                AuthKind::Agent => "editor-auth-agent",
+                AuthKind::Password => "editor-auth-password",
+            };
+            crate::devtest::record(name, r.rect);
+        }
+        let _ = segs;
+        ui.add_space(8.0);
+        let about = match self.auth {
+            AuthKind::Password => tf(
+                "The password is kept in {}, or asked each time.",
+                &[crate::platform::keychain()],
+            ),
+            AuthKind::KeyFile => t("A private key file in ~/.ssh.").to_string(),
+            AuthKind::PastedKey => tf(
+                "The key is kept in {}, not on disk.",
+                &[crate::platform::keychain()],
+            ),
+            AuthKind::Agent => {
+                t("Keys stay in the agent (ssh-add, 1Password, Secretive).").to_string()
             }
-        });
+        };
+        let faint = style::pal(ui).text_faint;
+        ui.label(
+            egui::RichText::new(about)
+                .font(style::regular(style::SMALL))
+                .color(faint),
+        );
         ui.add_space(16.0);
         let login_problem = self
             .problem
@@ -2079,16 +2050,6 @@ impl Editor {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 10.0;
-                            kit::icon_tile(
-                                ui,
-                                if stored {
-                                    icons::KEY
-                                } else {
-                                    icons::CHECK_CIRCLE
-                                },
-                                if stored { Tone::Neutral } else { Tone::Ok },
-                                32.0,
-                            );
                             ui.vertical(|ui| {
                                 ui.spacing_mut().item_spacing = vec2(6.0, 2.0);
                                 ui.horizontal(|ui| {
@@ -2641,11 +2602,7 @@ impl Editor {
                 },
             );
             let tile = Rect::from_min_size(pos2(card.left() + 7.0, cy - 14.0), vec2(28.0, 28.0));
-            if color.is_some() || i > 0 {
-                kit::paint_host_glyph(painter, tile, icon, color, None, p.surface, &p);
-            } else {
-                kit::paint_icon_tile(painter, tile, icon, Tone::Neutral, &p);
-            }
+            kit::paint_host_glyph(painter, tile, icon, color, None, p.surface, &p);
             let tx = tile.right() + 9.0;
             let clip = painter.with_clip_rect(Rect::from_min_max(
                 pos2(tx, card.top()),
@@ -3415,67 +3372,80 @@ fn menu_row(ui: &mut Ui, dot: Option<Option<Color32>>, text: &str, on: bool) -> 
 }
 
 /// A login method as a card: icon tile, title and a line about it, the radio at the top right.
-fn method_card(
+/// The login methods as a segmented control as wide as the page (Redesign 3.1). Returns each
+/// segment's response.
+fn method_segments(
     ui: &mut Ui,
-    icon: &str,
-    title: &str,
-    desc: &str,
-    on: bool,
-    width: f32,
-) -> egui::Response {
+    value: &mut AuthKind,
+    options: &[(AuthKind, &str)],
+) -> Vec<egui::Response> {
     let p = style::pal(ui);
-    let desc_g = ui.painter().layout(
-        desc.to_string(),
-        style::regular(11.5),
-        p.text_faint,
-        width - 22.0,
+    let width = ui.available_width();
+    let (rect, base) = ui.allocate_exact_size(vec2(width, 32.0), Sense::hover());
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(style::RADIUS + 1),
+        p.hover,
+        Stroke::new(1.0, p.line_soft),
+        StrokeKind::Inside,
     );
-    let h = 11.0 + 28.0 + 9.0 + 17.5 + 1.0 + desc_g.size().y.max(16.0) + 10.0;
-    let (rect, resp) = ui.allocate_exact_size(vec2(width, h), Sense::click());
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, title));
-    if ui.is_rect_visible(rect) {
-        let painter = ui.painter();
-        if !on && resp.hovered() {
-            painter.rect_filled(rect, CornerRadius::same(10), p.hover);
+    let n = options.len() as f32;
+    let seg_w = (rect.width() - 6.0 - 2.0 * (n - 1.0)) / n;
+    let mut out = Vec::with_capacity(options.len());
+    for (i, (kind, label)) in options.iter().enumerate() {
+        let seg = Rect::from_min_size(
+            pos2(
+                rect.left() + 3.0 + i as f32 * (seg_w + 2.0),
+                rect.top() + 3.0,
+            ),
+            vec2(seg_w, 26.0),
+        );
+        let resp = ui.interact(seg, base.id.with(("auth-segment", i)), Sense::click());
+        let on = *value == *kind;
+        resp.widget_info(|| {
+            egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, on, *label)
+        });
+        if resp.clicked() {
+            *value = *kind;
         }
-        forms::choice_outline(painter, rect, 10, on, &p);
-        let tile = Rect::from_min_size(rect.min + vec2(11.0, 11.0), vec2(28.0, 28.0));
-        painter.rect_filled(
-            tile,
-            CornerRadius::same(8),
-            if on { p.accent_tint } else { p.hover },
-        );
+        let painter = ui.painter();
+        if on {
+            painter.rect_filled(
+                seg.translate(vec2(0.0, 1.0)),
+                CornerRadius::same(5),
+                Color32::from_black_alpha(if p.dark { 90 } else { 12 }),
+            );
+            painter.rect(
+                seg,
+                CornerRadius::same(5),
+                p.segment_on,
+                if p.dark {
+                    Stroke::NONE
+                } else {
+                    Stroke::new(1.0, p.border)
+                },
+                StrokeKind::Inside,
+            );
+        } else if resp.hovered() {
+            painter.rect_filled(seg, CornerRadius::same(5), p.hover);
+        }
         painter.text(
-            tile.center(),
+            seg.center(),
             Align2::CENTER_CENTER,
-            icon,
-            style::icon_font(15.0),
-            if on { p.accent_text } else { p.text_muted },
+            *label,
+            style::medium(12.5),
+            if on || resp.hovered() {
+                p.text
+            } else {
+                p.text_muted
+            },
         );
-        kit::paint_radio(
-            painter,
-            pos2(rect.right() - 11.0 - 8.0, rect.top() + 11.0 + 8.0),
-            on,
-            &p,
-        );
-        let y = tile.bottom() + 9.0;
-        painter.text(
-            pos2(rect.left() + 11.0, y + 8.75),
-            Align2::LEFT_CENTER,
-            title,
-            style::semibold(12.5),
-            p.text,
-        );
-        painter.galley(
-            pos2(rect.left() + 11.0, y + 17.5 + 1.0),
-            desc_g,
-            p.text_faint,
-        );
+        out.push(resp);
     }
-    resp
+    out
 }
 
-/// How a secret field looks: saved (a green band with Show and Forget), or a field to type in.
+/// How a secret field looks: saved (a check, Show and Forget), or a field to type in.
 struct SecretUi<'a> {
     text: &'a mut String,
     shown: &'a mut bool,
@@ -3491,24 +3461,23 @@ fn secret_block(ui: &mut Ui, s: SecretUi, problem: &mut Option<Problem>) {
     let p = style::pal(ui);
     let saved = s.had && !*s.clear;
     if saved && !*s.shown {
-        // The green band.
+        // Saved: a green check and plain text (Redesign 3.1: no tinted band).
         let width = ui.available_width();
         let (r, _) = ui.allocate_exact_size(vec2(width, 30.0), Sense::hover());
         let painter = ui.painter();
-        painter.rect_filled(r, CornerRadius::same(style::RADIUS), p.tone_soft(Tone::Ok));
         painter.text(
-            pos2(r.left() + 10.0 + 7.5, r.center().y),
+            pos2(r.left() + 7.5, r.center().y),
             Align2::CENTER_CENTER,
             icons::CHECK_CIRCLE,
             style::icon_font(15.0),
             p.ok,
         );
         painter.text(
-            pos2(r.left() + 10.0 + 15.0 + 10.0, r.center().y),
+            pos2(r.left() + 15.0 + 10.0, r.center().y),
             Align2::LEFT_CENTER,
             tf("Saved in {}", &[crate::platform::keychain()]),
-            style::medium(12.5),
-            p.ok,
+            style::regular(12.5),
+            p.text_muted,
         );
         let mut right = ui.new_child(
             egui::UiBuilder::new()
@@ -3689,18 +3658,9 @@ fn agent_row_ex(
         painter.hline(r.x_range(), r.top() + 0.5, Stroke::new(1.0, p.line_soft));
     }
     kit::paint_radio(painter, pos2(r.left() + 12.0 + 8.0, r.center().y), on, &p);
-    let tile = Rect::from_min_size(
-        pos2(r.left() + 12.0 + 16.0 + 10.0, r.center().y - 16.0),
-        vec2(32.0, 32.0),
-    );
-    kit::paint_icon_tile(
-        painter,
-        tile,
-        icon,
-        if on { Tone::Accent } else { Tone::Neutral },
-        &p,
-    );
-    let tx = tile.right() + 10.0;
+    // Redesign 3.1: no icon tile; the name follows the radio.
+    let _ = icon;
+    let tx = r.left() + 12.0 + 16.0 + 12.0;
     let right = if found {
         r.right() - 70.0
     } else {
@@ -3729,15 +3689,15 @@ fn agent_row_ex(
         p.text_faint,
     );
     if found {
-        let w = kit::env_tag_width(ui, "x", false);
-        let _ = w;
-        let g = painter.layout_no_wrap(t("Found").to_string(), style::semibold(style::MICRO), p.ok);
-        let br = Rect::from_min_size(
-            pos2(r.right() - 12.0 - g.size().x - 12.0, r.center().y - 9.0),
-            vec2(g.size().x + 12.0, 18.0),
+        let g = painter.layout_no_wrap(t("Found").to_string(), style::medium(style::SMALL), p.ok);
+        painter.galley(
+            pos2(
+                r.right() - 12.0 - g.size().x,
+                r.center().y - g.size().y / 2.0,
+            ),
+            g,
+            p.ok,
         );
-        painter.rect_filled(br, CornerRadius::same(5), p.tone_soft(Tone::Ok));
-        painter.galley(br.center() - g.size() / 2.0, g, p.ok);
     }
     resp
 }
@@ -3988,17 +3948,6 @@ fn shorten(s: &str, max: usize) -> String {
                 .collect::<String>()
         ),
         _ => format!("{}…", s.chars().take(max).collect::<String>()),
-    }
-}
-
-/// The secret store's name at the start of a sentence ("Keychain, or asked each time").
-fn keychain_name() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "Keychain"
-    } else if cfg!(windows) {
-        "Credential Manager"
-    } else {
-        t("System keyring")
     }
 }
 

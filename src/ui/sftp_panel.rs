@@ -1189,7 +1189,6 @@ impl SftpPanel {
         ui: &mut Ui,
         rect: egui::Rect,
         rt: &tokio::runtime::Handle,
-        env: Option<(String, egui::Color32)>,
     ) -> bool {
         let ctx = ui.ctx().clone();
         self.poll(rt, &ctx);
@@ -1197,7 +1196,7 @@ impl SftpPanel {
         let Some(editor) = self.editor.as_mut() else {
             return true;
         };
-        let out = editor.show_in(ui, rect, rt, sftp, env);
+        let out = editor.show_in(ui, rect, rt, sftp);
         let path = editor.path.clone();
         match out {
             EditorOutput::Close { saved } => {
@@ -3029,22 +3028,10 @@ impl SftpPanel {
         let running = summary.as_ref().filter(|s| s.running()).cloned();
         // Header: what, how far, how fast.
         let (head, _) = ui.allocate_exact_size(vec2(POP_W, 58.0), Sense::hover());
-        let (icon, tone) = match &summary {
-            Some(s) if s.uploads > 0 && s.downloads == 0 => (icons::UPLOAD_SIMPLE, Tone::Accent),
-            Some(s) if s.downloads > 0 && s.uploads == 0 => (icons::DOWNLOAD_SIMPLE, Tone::Accent),
-            _ => (icons::ARROWS_DOWN_UP, Tone::Accent),
-        };
         let outcome = self.outcome();
-        let tone = match (&running, &summary) {
-            (None, Some(_)) if outcome.failed > 0 => Tone::Err,
-            (None, Some(_)) => Tone::Ok,
-            _ => tone,
-        };
-        let tile = egui::Rect::from_min_size(
-            pos2(head.left() + 14.0, head.top() + 14.0),
-            vec2(32.0, 32.0),
-        );
-        paint_tile(ui.painter(), tile, icon, tone, &p);
+        // Redesign 3.1: no icon tile; the title starts at the edge.
+        let tile =
+            egui::Rect::from_min_size(pos2(head.left() + 14.0, head.top() + 14.0), vec2(0.0, 32.0));
         let (title, sub) = match (&running, &summary) {
             (Some(s), _) => (summary_title(s), summary_meta(s)),
             (None, Some(_)) => (t("Transfers").to_string(), outcome.detail()),
@@ -3063,7 +3050,7 @@ impl SftpPanel {
             }
             right = r.left() - 8.0;
         }
-        let tx = tile.right() + 11.0;
+        let tx = tile.left();
         let painter = ui.painter();
         let g = painter.layout_job(single_line(
             &title,
@@ -3387,7 +3374,7 @@ impl SftpPanel {
                 Dialog::Mkdir { name, dir, remote } => {
                     ui.set_width(380.0);
                     let sub = tf("in {} on {}", &[&short_dir(dir, *remote), &where_(*remote)]);
-                    dialog_head(ui, icons::FOLDER_PLUS, Tone::Neutral, t("New folder"), Some(&sub));
+                    dialog_head(ui, t("New folder"), Some(&sub));
                     let bad = taken(*remote, dir, None, name);
                     ok_enabled = !name.trim().is_empty() && !bad;
                     dialog_body(ui, |ui| {
@@ -3410,7 +3397,7 @@ impl SftpPanel {
                 Dialog::Rename { to, from, dir, remote } => {
                     ui.set_width(380.0);
                     let sub = tf("in {} on {}", &[&short_dir(dir, *remote), &where_(*remote)]);
-                    dialog_head(ui, icons::CURSOR_TEXT, Tone::Neutral, t("Rename"), Some(&sub));
+                    dialog_head(ui, t("Rename"), Some(&sub));
                     let bad = taken(*remote, dir, Some(from), to);
                     ok_enabled = !to.trim().is_empty() && !bad;
                     dialog_body(ui, |ui| {
@@ -3450,11 +3437,7 @@ impl SftpPanel {
                         "Delete {} item(s) on {}?",
                         &[&names.len().to_string(), &where_(*remote)],
                     );
-                    dialog_head(
-                        ui,
-                        icons::TRASH,
-                        Tone::Err,
-                        &title,
+                    dialog_head(ui, &title,
                         Some(&tf("in {}", &[&short_dir(dir, *remote)])),
                     );
                     dialog_body(ui, |ui| {
@@ -3472,7 +3455,7 @@ impl SftpPanel {
                     ui.set_width(400.0);
                     let name = entry::remote_name(path).to_string();
                     let sub = tf("{} on {}", &[&name, &host]);
-                    dialog_head(ui, icons::LOCK_KEY, Tone::Neutral, t("Permissions"), Some(&sub));
+                    dialog_head(ui, t("Permissions"), Some(&sub));
                     let bad = entry::parse_mode(mode).is_none();
                     ok_enabled = !bad;
                     dialog_body(ui, |ui| {
@@ -3516,7 +3499,7 @@ impl SftpPanel {
                     ui.set_width(420.0);
                     let title = tf("Replace {} existing item(s)?", &[&conflicts.len().to_string()]);
                     let sub = tf("The files on {} will be overwritten.", &[&where_(*upload)]);
-                    dialog_head(ui, icons::COPY, Tone::Warn, &title, Some(&sub));
+                    dialog_head(ui, &title, Some(&sub));
                     dialog_body(ui, |ui| {
                         item_list(ui, items, conflicts.len());
                         ui.add_space(10.0);
@@ -3536,7 +3519,7 @@ impl SftpPanel {
                 Dialog::Sudo { password, note, show } => {
                     ui.set_width(400.0);
                     let sub = tf("sudo on {} needs a password.", &[&host]);
-                    dialog_head(ui, icons::SHIELD_CHECK, Tone::Root, t("sudo password"), Some(&sub));
+                    dialog_head(ui, t("sudo password"), Some(&sub));
                     ok_enabled = !password.is_empty();
                     dialog_body(ui, |ui| {
                         let bad = note.is_some() && password.is_empty();
@@ -3598,11 +3581,7 @@ impl SftpPanel {
                 Dialog::GoTo { remote, text, pick } => {
                     ui.set_width(400.0);
                     let sub = tf("on {}", &[&where_(*remote)]);
-                    dialog_head(
-                        ui,
-                        icons::ARROW_BEND_DOWN_RIGHT,
-                        Tone::Neutral,
-                        t("Go to folder…"),
+                    dialog_head(ui, t("Go to folder…"),
                         Some(&sub),
                     );
                     let parent = goto_parent(text);
@@ -4196,45 +4175,9 @@ fn paint_track(
     }
 }
 
-/// An icon on a rounded tile in its tone (32 px, 9 px corners; 28 px, 8 px for banners).
-fn paint_tile(
-    painter: &egui::Painter,
-    rect: egui::Rect,
-    icon: &str,
-    tone: Tone,
-    p: &style::Palette,
-) {
-    let side = rect.width();
-    let (fill, color) = if tone == Tone::Neutral {
-        (p.hover, p.text_muted)
-    } else {
-        (p.tone_soft(tone), p.tone(tone))
-    };
-    let radius = if side >= 40.0 {
-        12
-    } else if side >= 30.0 {
-        9
-    } else {
-        8
-    };
-    painter.rect_filled(rect, CornerRadius::same(radius), fill);
-    painter.text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        icon,
-        style::icon_font(if side >= 40.0 {
-            22.0
-        } else if side >= 30.0 {
-            17.0
-        } else {
-            15.0
-        }),
-        color,
-    );
-}
-
-/// A dialog's header: the icon tile, the title (16 px semibold) and where it acts.
-fn dialog_head(ui: &mut Ui, icon: &str, tone: Tone, title: &str, sub: Option<&str>) {
+/// A dialog's header: the title (16 px semibold) and where it acts (Redesign 3.1: no icon
+/// tile).
+fn dialog_head(ui: &mut Ui, title: &str, sub: Option<&str>) {
     let p = style::pal(ui);
     egui::Frame::NONE
         .inner_margin(egui::Margin {
@@ -4246,15 +4189,9 @@ fn dialog_head(ui: &mut Ui, icon: &str, tone: Tone, title: &str, sub: Option<&st
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = 12.0;
-                let (r, _) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::hover());
-                paint_tile(ui.painter(), r, icon, tone, &p);
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 3.0;
                     ui.set_width(ui.available_width());
-                    if sub.is_none() {
-                        ui.add_space(6.0);
-                    }
                     ui.add(
                         egui::Label::new(
                             RichText::new(title)
@@ -5007,9 +4944,6 @@ fn message_row(ui: &mut Ui, msg: &str, is_err: bool, uid: u64) -> bool {
     let p = style::pal(ui);
     let (rect, _) = ui.allocate_exact_size(vec2(POP_W - 12.0, XFER_ROW_H), Sense::hover());
     let painter = ui.painter();
-    if is_err {
-        painter.rect_filled(rect, CornerRadius::same(7), p.tone_soft(Tone::Err));
-    }
     let lead = pos2(rect.left() + 8.0 + 9.0, rect.center().y);
     if is_err {
         icons::paint_badge_circle(painter, lead, 16.0, "!", p.err, p.raised);
@@ -5056,9 +4990,7 @@ fn transfer_row(ui: &mut Ui, tr: &Transfer, is_root: bool) -> Option<RowAction> 
     let (rect, resp) = ui.allocate_exact_size(vec2(POP_W - 12.0, XFER_ROW_H), Sense::hover());
     let failed = matches!(state, TransferState::Failed(_));
     let painter = ui.painter();
-    if failed {
-        painter.rect_filled(rect, CornerRadius::same(7), p.tone_soft(Tone::Err));
-    } else if resp.hovered() {
+    if resp.hovered() {
         painter.rect_filled(rect, CornerRadius::same(7), p.hover);
     }
     // Columns: 18 | name | 110 | 80 | 22, 10 apart, 8 in from the sides.

@@ -2162,6 +2162,45 @@ const ID: &[(&str, &str)] = &[
     ("{} groups & labels", "{} grup & label"),
     ("{} passwords", "{} password"),
     ("{} keys", "{} key"),
+    // Redesign 3.1: login methods, import and export sentences.
+    ("1 conflict", "1 konflik"),
+    ("1 group with its label", "1 grup dengan labelnya"),
+    (
+        "A private key file in ~/.ssh.",
+        "File private key di ~/.ssh.",
+    ),
+    (
+        "Keys stay in the agent (ssh-add, 1Password, Secretive).",
+        "Key tetap di agent (ssh-add, 1Password, Secretive).",
+    ),
+    ("Nothing to import.", "Tidak ada yang diimpor."),
+    (
+        "The file will have {}, {} and {}.",
+        "File akan berisi {}, {} dan {}.",
+    ),
+    (
+        "The file will have {}, {}, {}, {} and {}.",
+        "File akan berisi {}, {}, {}, {} dan {}.",
+    ),
+    (
+        "The key is kept in {}, not on disk.",
+        "Key disimpan di {}, bukan di disk.",
+    ),
+    (
+        "The password is kept in {}, or asked each time.",
+        "Password disimpan di {}, atau ditanyakan setiap kali.",
+    ),
+    ("a TernaryShell export", "ekspor TernaryShell"),
+    ("an Electerm export", "ekspor Electerm"),
+    ("an SSH config", "konfigurasi SSH"),
+    ("{} already here", "{} sudah ada"),
+    ("{} conflicts", "{} konflik"),
+    ("{} groups with their labels", "{} grup dengan labelnya"),
+    ("{} new", "{} baru"),
+    (
+        "{}, {} with {} connections in {} groups",
+        "{}, {} dengan {} koneksi dalam {} grup",
+    ),
     // ===== end [editor] =====
 
     // ===== Redesign 3.0: Files and the remote editor [files] =====
