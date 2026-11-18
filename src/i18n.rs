@@ -1756,6 +1756,120 @@ const ID: &[(&str, &str)] = &[
     // ===== end [sidebar] =====
 
     // ===== Redesign 3.0: connecting, prompts, command palette [connect] =====
+    ("1 tab open", "1 tab terbuka"),
+    ("{} tabs open", "{} tab terbuka"),
+    (
+        "A firewall may reject the connection.",
+        "Firewall mungkin menolak koneksinya.",
+    ),
+    ("ADDRESS", "ALAMAT"),
+    ("Actions", "Aksi"),
+    ("All", "Semua"),
+    ("Hosts", "Host"),
+    (
+        "An SSH server is running and listening on port {}.",
+        "Server SSH sedang berjalan dan mendengarkan di port {}.",
+    ),
+    ("Compare on the server:", "Bandingkan di server:"),
+    (
+        "Expected after a server rebuild or an OS reinstall. If you didn't expect it, close the tab and ask the server's admin.",
+        "Wajar setelah server dibangun ulang atau OS-nya diinstal ulang. Jika tidak menduganya, tutup tab ini dan tanyakan ke admin server.",
+    ),
+    (
+        "I checked the new key with the server's admin",
+        "Saya sudah mengecek key baru ini dengan admin server",
+    ),
+    (
+        "It is a private key (not the .pub file).",
+        "Itu private key (bukan file .pub).",
+    ),
+    ("Last", "Terakhir"),
+    ("Matching hosts", "Host yang cocok"),
+    ("Not saved", "Belum disimpan"),
+    ("Now", "Sekarang"),
+    ("Open Files", "Buka Files"),
+    (
+        "Port {} is open (a firewall or security group may block it).",
+        "Port {} terbuka (firewall atau security group bisa memblokirnya).",
+    ),
+    ("Quick connect", "Sambung cepat"),
+    (
+        "Same host as {} on another user and port.",
+        "Host yang sama dengan {}, dengan user dan port lain.",
+    ),
+    (
+        "Sent automatically after the 6th digit.",
+        "Terkirim otomatis setelah digit ke-6.",
+    ),
+    ("Shortcut", "Shortcut"),
+    (
+        "Someone may be intercepting this connection. TernaryShell did not log in.",
+        "Seseorang mungkin menyadap koneksi ini. TernaryShell tidak login.",
+    ),
+    (
+        "The key file exists and this user can read it.",
+        "File key-nya ada dan bisa dibaca user ini.",
+    ),
+    (
+        "The name is spelled right: {}.",
+        "Nama host ditulis dengan benar: {}.",
+    ),
+    (
+        "The name may only resolve on another network or over a VPN.",
+        "Nama itu mungkin hanya dikenal di jaringan lain atau lewat VPN.",
+    ),
+    (
+        "The server is on and reachable from this network.",
+        "Server menyala dan bisa dijangkau dari jaringan ini.",
+    ),
+    (
+        "The server may sit on a private network: reach it through a jump host.",
+        "Server mungkin ada di jaringan privat: jangkau lewat jump host.",
+    ),
+    (
+        "The server may use another port (change it in Edit Connection).",
+        "Server mungkin memakai port lain (ubah di Edit Connection).",
+    ),
+    ("The user name is right: {}.", "Nama user sudah benar: {}."),
+    ("Things to check", "Yang perlu dicek"),
+    (
+        "This Mac is online (Wi-Fi, cable or VPN).",
+        "Mac ini terhubung ke internet (Wi-Fi, kabel, atau VPN).",
+    ),
+    (
+        "This host may need a VPN or a jump host (set one in Network).",
+        "Host ini mungkin butuh VPN atau jump host (atur di Network).",
+    ),
+    ("Toggle Files", "Tampilkan/Sembunyikan Files"),
+    (
+        "Try another way to log in in Edit Connection.",
+        "Coba cara login lain di Edit Connection.",
+    ),
+    (
+        "Try the server's IP address instead.",
+        "Coba pakai alamat IP server.",
+    ),
+    ("User", "User"),
+    (
+        "Your key or password is allowed for this user on the server.",
+        "Key atau password Anda diizinkan untuk user ini di server.",
+    ),
+    ("asks when connecting", "ditanyakan saat menyambung"),
+    ("close pane", "tutup pane"),
+    ("edit", "edit"),
+    ("exit code {}", "kode keluar {}"),
+    ("files", "files"),
+    ("new shell", "shell baru"),
+    ("port {}", "port {}"),
+    ("reconnect tab", "sambungkan ulang tab"),
+    ("scope", "cakupan"),
+    ("signal {}", "sinyal {}"),
+    (
+        "{} stopped answering after the network changed.",
+        "{} berhenti menjawab setelah jaringan berubah.",
+    ),
+    ("{} stopped answering.", "{} berhenti menjawab."),
+    ("{} · different type", "{} · jenis berbeda"),
     // ===== end [connect] =====
 
     // ===== Redesign 3.0: Edit Connection, Settings, import & export [editor] =====

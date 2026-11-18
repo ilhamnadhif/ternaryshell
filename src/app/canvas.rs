@@ -11,13 +11,17 @@ use eframe::egui::{
 use super::{STATUS_H, TernaryShellApp};
 use crate::bookmarks::Auth;
 use crate::i18n::{t, tf};
-use crate::ssh::types::{ConnState, HostKeyStatus, Prompt, SecretAnswer, SecretPromptKind};
+use crate::ssh::types::{
+    ConnError, ConnState, HostKeyStatus, ProbeReason, Prompt, SecretAnswer, SecretPromptKind,
+};
 use crate::ui::actions::Action;
 use crate::ui::keys::Shortcut as S;
 use crate::ui::layout::{self, SplitDir};
 use crate::ui::sftp_panel::PanelOutput;
 use crate::ui::style::{self, Tone};
 use crate::ui::{icons, kit, terminal};
+
+mod cards;
 
 /// Snapshot of a pending prompt, copied out of the connection lock for drawing.
 enum PromptView {
@@ -45,9 +49,11 @@ pub struct StepTrack {
     marks: Vec<(usize, Instant)>,
     /// The step that failed, when the connection ended before its session.
     failed: Option<usize>,
+    /// When it failed.
+    failed_at: Option<Instant>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StepState {
     Done,
     Now,
@@ -137,6 +143,7 @@ impl TernaryShellApp {
                 (ConnState::Closed(_), _) => {
                     if !matches!(state, ConnState::Closed(None)) && track.failed.is_none() {
                         track.failed = track.marks.last().map(|m| m.0);
+                        track.failed_at = Some(Instant::now());
                     }
                     continue;
                 }
@@ -563,19 +570,12 @@ impl TernaryShellApp {
             }
             ConnState::Closed(Some(e)) if !was_connected => {
                 ui.painter().rect_filled(area, 0.0, style::soft(fill, 0.72));
-                let message = e.message();
-                self.progress_card(&ctx, area, Some(message));
+                self.progress_card(&ctx, area, Some(e.clone()));
             }
             ConnState::Closed(error) => {
-                ui.painter().rect_filled(area, 0.0, style::soft(fill, 0.45));
-                let (title, detail) = match error {
-                    Some(e) => (t("Connection lost"), e.message()),
-                    None => (
-                        t("Disconnected"),
-                        t("The connection was closed.").to_string(),
-                    ),
-                };
-                self.lost_bar(&ctx, area, title, &detail);
+                // The output stays readable (and scrollable) under the bar, dimmed.
+                ui.painter().rect_filled(area, 0.0, style::soft(fill, 0.65));
+                self.lost_bar(&ctx, area, error.as_ref());
             }
             ConnState::Connected if checking => {
                 let address = self.tabs[self.active].bookmark.display_name();
@@ -611,93 +611,158 @@ impl TernaryShellApp {
         }
     }
 
-    /// The card while connecting (or after it failed): the steps, each with how long it took.
-    fn progress_card(&mut self, ctx: &egui::Context, area: egui::Rect, failure: Option<String>) {
+    /// The stops on the way to `bookmark` (this Mac, each jump host, the server), for the route.
+    fn route_stops(&self, bookmark: &crate::bookmarks::Bookmark, dark: bool) -> Vec<cards::Hop> {
+        let chain: Vec<crate::bookmarks::Bookmark> = self
+            .store
+            .jump_chain(bookmark)
+            .map(|c| c.into_iter().cloned().collect())
+            .unwrap_or_default();
+        let hop = |b: &crate::bookmarks::Bookmark| cards::Hop {
+            name: b.display_name(),
+            icon: kit::host_icon(b.host_icon()),
+            label: self
+                .store
+                .label_of(b)
+                .map(|l| style::label_color(l.color, dark)),
+            this_mac: false,
+        };
+        let mut stops = vec![cards::Hop {
+            name: t("this Mac").to_string(),
+            icon: icons::LAPTOP,
+            label: None,
+            this_mac: true,
+        }];
+        stops.extend(chain.iter().map(hop));
+        stops.push(hop(bookmark));
+        stops
+    }
+
+    /// The card while connecting (or after it failed): the route through the jump hosts, the
+    /// steps with how long each took, and when it failed, what to check.
+    fn progress_card(&mut self, ctx: &egui::Context, area: egui::Rect, failure: Option<ConnError>) {
         let tab = &self.tabs[self.active];
         let tab_id = tab.id;
         let bookmark = tab.bookmark.clone();
-        let (labels, _) = step_labels(&self.store, &bookmark);
+        let dark = ctx.global_style().visuals.dark_mode;
+        let (labels, jumps) = step_labels(&self.store, &bookmark);
         let track = self.conn_steps.get(&tab_id);
         let marks: Vec<(usize, Instant)> = track.map(|t| t.marks.clone()).unwrap_or_default();
-        let failed = track.and_then(|t| t.failed);
+        let failed_at = track.and_then(|t| t.failed_at);
         let now_step = marks.last().map_or(0, |m| m.0);
-        let shell = labels.len() - 1;
+        let failed = failure
+            .as_ref()
+            .map(|_| track.and_then(|t| t.failed).unwrap_or(now_step));
+        let label = self.store.label_of(&bookmark).cloned();
+        let label_color = label.as_ref().map(|l| style::label_color(l.color, dark));
+        let stops = (!jumps.is_empty()).then(|| self.route_stops(&bookmark, dark));
+        let checks = failure
+            .as_ref()
+            .map(|e| cards::things_to_check(e, &bookmark))
+            .unwrap_or_default();
+        let name = bookmark.display_name();
+        let address = super::chrome::address_with_port(&bookmark);
+        let sub_rest = match jumps.last() {
+            Some(j) => {
+                let full = tf("{} · through {}", &[&address, j]);
+                full.strip_prefix(address.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_default()
+            }
+            None => String::new(),
+        };
         let mut cancel = false;
         let mut retry = false;
         let mut edit = false;
-        let mut close = false;
-        let title = if failure.is_some() {
-            tf("Couldn't connect to {}", &[&bookmark.display_name()])
-        } else {
-            tf("Connecting to {}", &[&bookmark.display_name()])
-        };
-        let address = super::chrome::address_with_port(&bookmark);
-        card_area(ctx, ("progress", tab_id), area, 452.0, |ui| {
+        let mut copy = false;
+        card_area(ctx, ("progress", tab_id), area, 468.0, false, |ui| {
             let p = style::pal(ui);
-            card_head(
-                ui,
-                if failure.is_some() {
-                    icons::WARNING_CIRCLE
-                } else {
-                    icons::PLUGS
-                },
-                if failure.is_some() {
-                    Tone::Err
-                } else {
-                    Tone::Neutral
-                },
-                &title,
-                Some((&address, true)),
-            );
-            card_body(ui, |ui| {
-                for (i, label) in labels.iter().enumerate() {
-                    if i == shell && failure.is_none() && now_step < shell {
-                        // "Open shell" waits until the login is done.
-                    }
-                    let st = if failure.is_some() && Some(i) == failed.or(Some(now_step)) {
-                        StepState::Failed
-                    } else if i < now_step {
-                        StepState::Done
-                    } else if i == now_step && failure.is_none() {
-                        StepState::Now
-                    } else {
-                        StepState::Pending
-                    };
-                    let meta = if st == StepState::Done {
-                        let start = marks.iter().find(|m| m.0 == i).map(|m| m.1);
-                        let end = marks.iter().find(|m| m.0 > i).map(|m| m.1);
-                        match (start, end) {
-                            (Some(a), Some(b)) => Some(ms(b - a)),
-                            (None, Some(_)) => None,
-                            _ => None,
+            match &failure {
+                Some(e) => cards::head(
+                    ui,
+                    0.0,
+                    |ui| {
+                        cards::tile(ui, icons::WARNING_OCTAGON, Tone::Err, 44.0);
+                    },
+                    &tf("Couldn't connect to {}", &[&name]),
+                    |ui| cards::sub_text(ui, &e.message()),
+                    |_| {},
+                ),
+                None => cards::head(
+                    ui,
+                    if label.is_some() { 72.0 } else { 0.0 },
+                    |ui| {
+                        kit::host_glyph(
+                            ui,
+                            40.0,
+                            kit::host_icon(bookmark.host_icon()),
+                            label_color,
+                            None,
+                            p.surface,
+                        );
+                    },
+                    &tf("Connecting to {}", &[&name]),
+                    |ui| cards::sub_address(ui, &address, &sub_rest),
+                    |ui| {
+                        if let (Some(l), Some(c)) = (&label, label_color)
+                            && !l.tag().is_empty()
+                        {
+                            kit::env_tag(ui, &l.tag(), c, true);
                         }
-                    } else {
-                        None
-                    };
-                    step_row(ui, st, label, meta.as_deref());
+                    },
+                ),
+            }
+            cards::body(ui, |ui| {
+                if let Some(stops) = &stops {
+                    cards::route(ui, stops, |i| match failed {
+                        Some(f) if i < f => cards::WireState::Done,
+                        Some(_) => cards::WireState::Pending,
+                        None if i < now_step => cards::WireState::Done,
+                        None if i == now_step => cards::WireState::Now,
+                        None => cards::WireState::Pending,
+                    });
                 }
-                if let Some(message) = &failure {
-                    ui.add_space(8.0);
-                    kit::callout(ui, icons::WARNING, Tone::Err, message);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    let mut prev = None;
+                    for (i, label) in labels.iter().enumerate() {
+                        let st = match failed {
+                            Some(f) if i < f => StepState::Done,
+                            Some(f) if i == f => StepState::Failed,
+                            Some(_) => StepState::Pending,
+                            None if i < now_step => StepState::Done,
+                            None if i == now_step => StepState::Now,
+                            None => StepState::Pending,
+                        };
+                        let start = marks.iter().find(|m| m.0 == i).map(|m| m.1);
+                        let meta = match st {
+                            StepState::Done => start
+                                .zip(marks.iter().find(|m| m.0 > i).map(|m| m.1))
+                                .map(|(a, b)| ms(b - a)),
+                            StepState::Failed => start.zip(failed_at).map(|(a, b)| ms(b - a)),
+                            _ => None,
+                        };
+                        // The port of the server, beside the step that failed to reach it.
+                        let note = (st == StepState::Failed && i == jumps.len())
+                            .then(|| tf("port {}", &[&bookmark.port.to_string()]));
+                        cards::step(ui, st, label, note.as_deref(), meta.as_deref(), prev);
+                        prev = Some(st);
+                    }
+                });
+                if !checks.is_empty() && cards::checklist(ui, &checks) {
+                    edit = true;
                 }
             });
-            card_foot(
+            cards::foot(
                 ui,
                 |ui| {
                     if failure.is_some() {
-                        if kit::ghost(ui, Some(icons::PENCIL_SIMPLE), t("Edit Connection…"))
-                            .clicked()
-                        {
-                            edit = true;
+                        if kit::ghost(ui, Some(icons::COPY), t("Copy Error")).clicked() {
+                            copy = true;
                         }
                     } else {
-                        ui.spacing_mut().item_spacing.x = 4.0;
                         kit::kbd(ui, "esc");
-                        ui.label(
-                            RichText::new(t("to cancel"))
-                                .font(style::regular(style::SMALL))
-                                .color(p.text_faint),
-                        );
+                        cards::hint(ui, t("to cancel"));
                     }
                 },
                 |ui| {
@@ -708,18 +773,18 @@ impl TernaryShellApp {
                             None,
                             t("Try Again"),
                             Some(&S::Reconnect.label()),
-                            true,
+                            false,
                             false,
                         )
                         .clicked()
                         {
                             retry = true;
                         }
-                        if kit::secondary_sm(ui, None, t("Close Tab")).clicked() {
-                            close = true;
+                        if kit::secondary(ui, None, t("Edit Connection…")).clicked() {
+                            edit = true;
                         }
-                    } else if kit::secondary_sm(ui, None, t("Cancel")).clicked() {
-                        cancel = true;
+                    } else if cards::ghost_sm(ui, None, t("Edit Connection…")).clicked() {
+                        edit = true;
                     }
                 },
             );
@@ -736,19 +801,27 @@ impl TernaryShellApp {
         if edit {
             self.actions.push(Action::EditBookmark(bookmark.id));
         }
-        if close {
-            self.actions.push(Action::CloseTab(tab_id));
+        if copy && let Some(e) = &failure {
+            ctx.copy_text(e.message());
         }
     }
 
-    /// The bar over a session whose connection is gone: what happened, Reconnect, and more.
-    fn lost_bar(&mut self, ctx: &egui::Context, area: egui::Rect, title: &str, detail: &str) {
+    /// The bar over a session whose connection is gone: what happened, Reconnect, Close Tab.
+    fn lost_bar(&mut self, ctx: &egui::Context, area: egui::Rect, error: Option<&ConnError>) {
         let tab = &self.tabs[self.active];
-        let (tab_id, bookmark_id) = (tab.id, tab.bookmark.id);
+        let tab_id = tab.id;
+        let name = tab.bookmark.display_name();
+        let (title, icon, tone) = match error {
+            Some(ConnError::NotResponding(ProbeReason::NetworkChanged)) => {
+                (t("Connection lost"), icons::WIFI_SLASH, Tone::Err)
+            }
+            Some(_) => (t("Connection lost"), icons::PLUGS, Tone::Err),
+            None => (t("Disconnected"), icons::PLUGS, Tone::Neutral),
+        };
+        let detail = cards::lost_cause(error, &name);
+        let width = 640.0_f32.min(area.width() - 32.0).max(320.0);
         let mut reconnect = false;
-        let mut edit = false;
         let mut close = false;
-        let mut copy = false;
         egui::Area::new(egui::Id::new(("lost", tab_id)))
             .fixed_pos(pos2(area.center().x, area.top() + 14.0))
             .pivot(Align2::CENTER_TOP)
@@ -758,96 +831,87 @@ impl TernaryShellApp {
                 let p = style::pal(ui);
                 egui::Frame::NONE
                     .fill(p.raised)
-                    .corner_radius(CornerRadius::same(style::RADIUS_LG))
-                    .shadow(ui.visuals().popup_shadow)
-                    .stroke(ui.visuals().window_stroke)
+                    .corner_radius(CornerRadius::same(12))
+                    .shadow(egui::Shadow {
+                        offset: [0, 14],
+                        blur: 40,
+                        spread: 0,
+                        color: Color32::from_black_alpha(if p.dark { 115 } else { 36 }),
+                    })
+                    .stroke(Stroke::new(
+                        1.0,
+                        if tone == Tone::Err {
+                            style::soft(p.err, 0.4)
+                        } else {
+                            p.border_strong
+                        },
+                    ))
                     .inner_margin(egui::Margin {
                         left: 14,
-                        right: 8,
-                        top: 8,
-                        bottom: 8,
+                        right: 10,
+                        top: 10,
+                        bottom: 10,
                     })
                     .show(ui, |ui| {
+                        ui.set_width(width - 24.0);
                         ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 10.0;
-                            kit::icon(ui, icons::PLUGS, 17.0, p.err);
+                            ui.spacing_mut().item_spacing.x = 12.0;
+                            cards::tile(ui, icon, tone, 32.0);
+                            let buttons = ui.ctx().fonts_mut(|f| {
+                                f.layout_no_wrap(
+                                    format!("{}{}", t("Reconnect"), t("Close Tab")),
+                                    style::medium(style::SMALL),
+                                    Color32::WHITE,
+                                )
+                                .size()
+                                .x
+                            }) + 90.0;
+                            let text_w = (ui.available_width() - buttons - 12.0).max(120.0);
                             ui.vertical(|ui| {
+                                ui.set_width(text_w);
                                 ui.spacing_mut().item_spacing.y = 1.0;
                                 ui.label(
                                     RichText::new(title)
-                                        .font(style::medium(style::BODY))
+                                        .font(style::semibold(style::BODY))
                                         .color(p.text),
                                 );
-                                ui.set_max_width((area.width() - 260.0).clamp(160.0, 460.0));
                                 ui.add(
                                     egui::Label::new(
-                                        RichText::new(detail)
+                                        RichText::new(&detail)
                                             .font(style::regular(style::SMALL))
-                                            .color(p.text_muted),
+                                            .color(p.text_faint),
                                     )
                                     .truncate(),
                                 )
-                                .on_hover_text(detail);
+                                .on_hover_text(&detail);
                             });
-                            ui.add_space(8.0);
-                            if kit::button_ex(
-                                ui,
-                                kit::Kind::Primary,
-                                Some(icons::ARROWS_CLOCKWISE),
-                                t("Reconnect"),
-                                true,
-                            )
-                            .on_hover_text(S::Reconnect.label())
-                            .clicked()
-                            {
-                                reconnect = true;
-                            }
-                            let more =
-                                kit::icon_button_ex(ui, icons::DOTS_THREE, t("More"), false, 22.0);
-                            egui::Popup::menu(&more).show(|ui| {
-                                kit::menu_body(ui);
-                                ui.set_min_width(200.0);
-                                if kit::menu_item(
-                                    ui,
-                                    Some(icons::PENCIL_SIMPLE),
-                                    t("Edit Connection…"),
-                                    None,
-                                )
-                                .clicked()
-                                {
-                                    edit = true;
-                                    ui.close();
-                                }
-                                if kit::menu_item(ui, Some(icons::COPY), t("Copy Error"), None)
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.spacing_mut().item_spacing.x = 8.0;
+                                    if kit::button_kbd(
+                                        ui,
+                                        kit::Kind::Primary,
+                                        None,
+                                        t("Reconnect"),
+                                        Some(&S::Reconnect.label()),
+                                        true,
+                                        false,
+                                    )
                                     .clicked()
-                                {
-                                    copy = true;
-                                    ui.close();
-                                }
-                                kit::menu_sep(ui);
-                                if kit::menu_item(
-                                    ui,
-                                    Some(icons::X),
-                                    t("Close Tab"),
-                                    Some(&S::Close.label()),
-                                )
-                                .clicked()
-                                {
-                                    close = true;
-                                    ui.close();
-                                }
-                            });
+                                    {
+                                        reconnect = true;
+                                    }
+                                    if cards::ghost_sm(ui, None, t("Close Tab")).clicked() {
+                                        close = true;
+                                    }
+                                },
+                            );
                         });
                     });
             });
         if reconnect {
             self.actions.push(Action::Reconnect);
-        }
-        if edit {
-            self.actions.push(Action::EditBookmark(bookmark_id));
-        }
-        if copy {
-            ctx.copy_text(detail.to_string());
         }
         if close {
             self.actions.push(Action::CloseTab(tab_id));
@@ -899,16 +963,11 @@ impl TernaryShellApp {
         let on_top = ctx.memory(|m| m.top_modal_layer().is_none());
         let tab_id = self.tabs[active].id;
         let bookmark = self.tabs[active].bookmark.clone();
-        let (labels, jumps) = step_labels(&self.store, &bookmark);
-        let marks: Vec<(usize, Instant)> = self
-            .conn_steps
-            .get(&tab_id)
-            .map(|t| t.marks.clone())
-            .unwrap_or_default();
-        let now_step = marks.last().map_or(0, |m| m.0);
+        let (_, jumps) = step_labels(&self.store, &bookmark);
         let via = self.tabs[active].conn.shared.lock().via.clone();
         let mut answer: Option<Option<SecretAnswer>> = None;
         let mut hostkey_answer: Option<bool> = None;
+        let mut close_tab = false;
         let tab = &mut self.tabs[active];
         match &view {
             PromptView::HostKey {
@@ -916,208 +975,207 @@ impl TernaryShellApp {
                 port,
                 algorithm,
                 fingerprint,
-                changed,
-                known,
+                changed: false,
+                ..
             } => {
                 let name = via.clone().unwrap_or_else(|| bookmark.display_name());
-                card_area(
-                    ctx,
-                    ("hostkey", tab_id),
-                    area,
-                    if *changed { 480.0 } else { 452.0 },
-                    |ui| {
-                        let p = style::pal(ui);
-                        if *changed {
-                            let r = ui.max_rect();
-                            let bar = egui::Rect::from_min_size(r.min, vec2(r.width(), 4.0));
-                            ui.painter().rect_filled(
-                                bar,
-                                CornerRadius {
-                                    nw: style::RADIUS_XL,
-                                    ne: style::RADIUS_XL,
-                                    sw: 0,
-                                    se: 0,
-                                },
-                                p.err,
-                            );
-                            ui.add_space(4.0);
-                            card_head(
+                card_area(ctx, ("hostkey", tab_id), area, 560.0, false, |ui| {
+                    let p = style::pal(ui);
+                    cards::head(
+                        ui,
+                        0.0,
+                        |ui| {
+                            cards::tile(ui, icons::FINGERPRINT, Tone::Accent, 44.0);
+                        },
+                        t("Verify host key"),
+                        |ui| {
+                            cards::sub_text(
                                 ui,
-                                icons::SHIELD_WARNING,
-                                Tone::Err,
-                                &tf("The host key of {} has changed", &[&name]),
-                                Some((t("Someone may be intercepting this connection."), false)),
-                            );
-                        } else {
-                            card_head(
-                                ui,
-                                icons::FINGERPRINT,
-                                Tone::Neutral,
-                                &tf("First time connecting to {}", &[&name]),
-                                Some((
-                                    t("Check the fingerprint before trusting this server."),
-                                    false,
-                                )),
-                            );
-                        }
-                        card_body(ui, |ui| {
-                            if *changed {
-                                kit::callout(
+                                &format!(
+                                    "{}. {}",
+                                    tf("First time connecting to {}", &[&name]),
+                                    t("Check the fingerprint before trusting this server.")
+                                ),
+                            )
+                        },
+                        |_| {},
+                    );
+                    cards::body(ui, |ui| {
+                        let art_w = 122.0;
+                        ui.horizontal_top(|ui| {
+                            ui.spacing_mut().item_spacing.x = 12.0;
+                            let left_w = ui.available_width() - art_w - 12.0;
+                            ui.vertical(|ui| {
+                                ui.set_width(left_w);
+                                ui.spacing_mut().item_spacing.y = 10.0;
+                                kv_rows(
                                     ui,
-                                    icons::WARNING,
-                                    Tone::Err,
-                                    t(
-                                        "The server sent a different key than the one saved for it. Only continue if you know why it changed — for example, the server was reinstalled.",
-                                    ),
+                                    &[
+                                        (t("Host"), format!("{host}:{port}"), true),
+                                        (t("Key type"), key_type(algorithm), false),
+                                    ],
                                 );
-                                ui.add_space(4.0);
-                                ui.label(
-                                    RichText::new(tf("New key · {}", &[&key_type(algorithm)]))
-                                        .font(style::medium(style::SMALL))
-                                        .color(p.text_muted),
-                                );
-                                fingerprint_box(ui, fingerprint, false);
-                                if !known.is_empty() {
-                                    ui.add_space(2.0);
-                                    ui.label(
-                                        RichText::new(t("Saved key"))
-                                            .font(style::medium(style::SMALL))
-                                            .color(p.text_muted),
-                                    );
-                                    for k in known {
-                                        fingerprint_box(ui, k, true);
-                                    }
-                                }
-                            } else {
-                                let hop_step = jumps
-                                    .iter()
-                                    .position(|j| Some(j) == via.as_ref())
-                                    .unwrap_or(jumps.len() + 1);
-                                for (i, label) in labels.iter().enumerate().take(hop_step + 1) {
-                                    let st = if i < now_step.min(hop_step)
-                                        || (i < hop_step && via.is_none())
-                                    {
-                                        StepState::Done
-                                    } else {
-                                        StepState::Now
-                                    };
-                                    let meta = if st == StepState::Done {
-                                        let start = marks.iter().find(|m| m.0 == i).map(|m| m.1);
-                                        let end = marks.iter().find(|m| m.0 > i).map(|m| m.1);
-                                        start.zip(end).map(|(a, b)| ms(b - a))
-                                    } else {
-                                        None
-                                    };
-                                    let label = if via.is_some() && i == hop_step {
-                                        t("Verify host key").to_string()
-                                    } else {
-                                        label.clone()
-                                    };
-                                    step_row(ui, st, &label, meta.as_deref());
-                                }
-                                ui.add_space(12.0);
-                                for (k, v, mono) in [
-                                    (t("Host"), format!("{host}:{port}"), true),
-                                    (t("Key type"), key_type(algorithm), false),
-                                ] {
-                                    let (r, _) = ui.allocate_exact_size(
-                                        vec2(ui.available_width(), 20.0),
-                                        Sense::hover(),
-                                    );
-                                    ui.painter().text(
-                                        pos2(r.left(), r.center().y),
-                                        Align2::LEFT_CENTER,
-                                        k,
-                                        style::regular(12.5),
-                                        p.text_muted,
-                                    );
-                                    let font = if mono {
-                                        style::mono(12.5)
-                                    } else {
-                                        style::regular(12.5)
-                                    };
-                                    ui.painter().text(
-                                        pos2(r.left() + 96.0 + 14.0, r.center().y),
-                                        Align2::LEFT_CENTER,
-                                        v,
-                                        font,
-                                        p.text,
-                                    );
-                                    ui.add_space(8.0);
-                                }
-                                ui.add_space(8.0);
-                                fingerprint_box(ui, fingerprint, false);
-                                ui.add_space(8.0);
-                                if kit::ghost(ui, Some(icons::COPY), t("Copy fingerprint"))
+                                cards::fingerprint(ui, fingerprint, cards::Fp::Plain);
+                                if kit::secondary_sm(ui, Some(icons::COPY), t("Copy fingerprint"))
                                     .clicked()
                                 {
                                     ui.ctx().copy_text(fingerprint.clone());
                                 }
-                            }
+                            });
+                            cards::randomart_box(ui, fingerprint, &cards::art_title(algorithm));
                         });
-                        if *changed {
-                            let mut accept = false;
-                            let mut refuse = false;
-                            card_foot(
+                        compare_callout(ui, &cards::compare_command(algorithm), &p);
+                    });
+                    cards::foot(
+                        ui,
+                        |ui| {
+                            kit::icon(ui, icons::INFO, 14.0, p.text_faint);
+                            cards::hint(ui, t("Saved to TernaryShell's known_hosts"));
+                        },
+                        |ui| {
+                            // No Enter shortcut: a key meant for the terminal must never trust a
+                            // host key. The decision takes a click.
+                            if kit::button_ex(
                                 ui,
-                                |ui| {
-                                    accept = kit::button_ex(
+                                kit::Kind::Primary,
+                                Some(icons::SHIELD_CHECK),
+                                t("Trust and Connect"),
+                                false,
+                            )
+                            .clicked()
+                            {
+                                hostkey_answer = Some(true);
+                            }
+                            if kit::button_kbd(
+                                ui,
+                                kit::Kind::Secondary,
+                                None,
+                                t("Cancel"),
+                                Some("esc"),
+                                false,
+                                false,
+                            )
+                            .clicked()
+                            {
+                                hostkey_answer = Some(false);
+                            }
+                        },
+                    );
+                });
+            }
+            PromptView::HostKey {
+                algorithm,
+                fingerprint,
+                known,
+                ..
+            } => {
+                let name = via.clone().unwrap_or_else(|| bookmark.display_name());
+                let checked_id = egui::Id::new(("hostkey-checked", tab_id, fingerprint.as_str()));
+                let mut checked: bool = ctx.data(|d| d.get_temp(checked_id)).unwrap_or(false);
+                let saved: Vec<(String, String)> = known
+                    .iter()
+                    .map(|k| match k.split_once(char::is_whitespace) {
+                        Some((alg, fp)) => (key_type(alg), fp.trim().to_string()),
+                        None => (String::new(), k.clone()),
+                    })
+                    .collect();
+                let new_type = key_type(algorithm);
+                card_area(ctx, ("hostkey", tab_id), area, 560.0, true, |ui| {
+                    let p = style::pal(ui);
+                    cards::head(
+                        ui,
+                        0.0,
+                        |ui| {
+                            cards::tile(ui, icons::SHIELD_WARNING, Tone::Err, 44.0);
+                        },
+                        &tf("The host key of {} has changed", &[&name]),
+                        |ui| {
+                            cards::sub_text(
+                                ui,
+                                t(
+                                    "Someone may be intercepting this connection. TernaryShell did not log in.",
+                                ),
+                            )
+                        },
+                        |_| {},
+                    );
+                    cards::body(ui, |ui| {
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 8.0;
+                            for (kind, fp) in &saved {
+                                key_heading(ui, t("Saved"), kind, p.text_faint);
+                                cards::fingerprint(ui, fp, cards::Fp::Old);
+                            }
+                            ui.add_space(4.0);
+                            let different = saved.iter().all(|(k, _)| *k != new_type);
+                            let what = if different && !saved.is_empty() {
+                                tf("{} · different type", &[&new_type])
+                            } else {
+                                new_type.clone()
+                            };
+                            key_heading(ui, t("Now"), &what, p.err);
+                            cards::fingerprint(ui, fingerprint, cards::Fp::Danger);
+                        });
+                        kit::callout(
+                            ui,
+                            icons::INFO,
+                            Tone::Neutral,
+                            t(
+                                "Expected after a server rebuild or an OS reinstall. If you didn't expect it, close the tab and ask the server's admin.",
+                            ),
+                        );
+                        if style::checkbox(
+                            ui,
+                            &mut checked,
+                            RichText::new(t("I checked the new key with the server's admin"))
+                                .font(style::regular(12.5)),
+                        )
+                        .changed()
+                        {
+                            ui.data_mut(|d| d.insert_temp(checked_id, checked));
+                        }
+                    });
+                    cards::foot(
+                        ui,
+                        |ui| {
+                            if cards::ghost_sm(ui, Some(icons::COPY), t("Copy fingerprint"))
+                                .clicked()
+                            {
+                                ui.ctx().copy_text(fingerprint.clone());
+                            }
+                        },
+                        |ui| {
+                            if kit::button_kbd(
+                                ui,
+                                kit::Kind::Primary,
+                                None,
+                                t("Close Tab"),
+                                Some("esc"),
+                                false,
+                                false,
+                            )
+                            .clicked()
+                            {
+                                hostkey_answer = Some(false);
+                                close_tab = true;
+                            }
+                            let accept = ui
+                                .add_enabled_ui(checked, |ui| {
+                                    kit::button_ex(
                                         ui,
                                         kit::Kind::DangerQuiet,
                                         None,
                                         t("Accept New Key"),
-                                        true,
+                                        false,
                                     )
-                                    .clicked();
-                                },
-                                |ui| {
-                                    refuse = kit::button_ex(
-                                        ui,
-                                        kit::Kind::Primary,
-                                        None,
-                                        t("Cancel"),
-                                        true,
-                                    )
-                                    .clicked();
-                                },
-                            );
-                            if accept {
+                                })
+                                .inner;
+                            if accept.clicked() && checked {
                                 hostkey_answer = Some(true);
-                            } else if refuse {
-                                hostkey_answer = Some(false);
                             }
-                        } else {
-                            card_foot(
-                                ui,
-                                |ui| {
-                                    ui.label(
-                                        RichText::new(t("Saved to TernaryShell's known_hosts"))
-                                            .font(style::regular(style::SMALL))
-                                            .color(p.text_faint),
-                                    );
-                                },
-                                |ui| {
-                                    // No Enter shortcut: a key meant for the terminal must never trust a
-                                    // host key. The decision takes a click.
-                                    if kit::button_ex(
-                                        ui,
-                                        kit::Kind::Primary,
-                                        None,
-                                        t("Trust and Connect"),
-                                        true,
-                                    )
-                                    .clicked()
-                                    {
-                                        hostkey_answer = Some(true);
-                                    }
-                                    if kit::secondary_sm(ui, None, t("Cancel")).clicked() {
-                                        hostkey_answer = Some(false);
-                                    }
-                                },
-                            );
-                        }
-                    },
-                );
+                        },
+                    );
+                });
             }
             PromptView::Secret {
                 kind,
@@ -1126,32 +1184,57 @@ impl TernaryShellApp {
                 can_save,
                 retry,
             } => {
-                let (icon, title, sub, go) = match kind {
-                    SecretPromptKind::Password => (
-                        icons::LOCK_KEY,
-                        tf("Password for {}", &[message]),
-                        match &via {
-                            Some(v) => tf("{} · through {}", &[&bookmark.host, v]),
-                            None => match jumps.last() {
-                                Some(j) => tf("{} · through {}", &[&bookmark.host, j]),
-                                None => bookmark.host.clone(),
-                            },
-                        },
-                        t("Connect"),
-                    ),
-                    SecretPromptKind::Passphrase => (
-                        icons::KEY,
-                        t("Key passphrase").to_string(),
-                        tf("{} is protected by a passphrase", &[message]),
-                        t("Unlock"),
-                    ),
+                let through = match &via {
+                    Some(v) => Some(v.clone()),
+                    None => jumps.last().cloned(),
+                };
+                let (icon, title, sub_mono, sub_rest, go) = match kind {
+                    SecretPromptKind::Password => {
+                        let (user, host) = message
+                            .rsplit_once('@')
+                            .map(|(u, h)| (u.to_string(), h.to_string()))
+                            .unwrap_or_else(|| (message.clone(), bookmark.host.clone()));
+                        let rest = match &through {
+                            Some(j) => {
+                                let full = tf("{} · through {}", &[&host, j]);
+                                full.strip_prefix(host.as_str())
+                                    .map(str::to_string)
+                                    .unwrap_or_default()
+                            }
+                            None => String::new(),
+                        };
+                        (
+                            icons::PASSWORD,
+                            tf("Password for {}", &[&user]),
+                            host,
+                            rest,
+                            t("Connect"),
+                        )
+                    }
+                    SecretPromptKind::Passphrase => {
+                        let full = tf("{} is protected by a passphrase", &[message]);
+                        let (mono, rest) = match full.strip_prefix(message.as_str()) {
+                            Some(rest) => (message.clone(), rest.to_string()),
+                            None => (String::new(), full),
+                        };
+                        (
+                            icons::KEY,
+                            t("Key passphrase").to_string(),
+                            mono,
+                            rest,
+                            t("Unlock"),
+                        )
+                    }
                     SecretPromptKind::Interactive => (
                         icons::SHIELD_CHECK,
                         t("Verification").to_string(),
+                        String::new(),
                         t("The server asks").to_string(),
                         t("Send"),
                     ),
                 };
+                let code =
+                    *kind == SecretPromptKind::Interactive && cards::is_code_prompt(message, *echo);
                 let settled = tab
                     .prompt
                     .shown_at
@@ -1160,57 +1243,107 @@ impl TernaryShellApp {
                     i.events.iter().any(|e| matches!(e, egui::Event::Key { key: Key::Enter, pressed: true, repeat: false, modifiers, .. } if modifiers.is_none()))
                 });
                 let prompt = &mut tab.prompt;
-                card_area(ctx, ("secret", tab_id), area, 420.0, |ui| {
+                card_area(ctx, ("secret", tab_id), area, 360.0, false, |ui| {
                     let p = style::pal(ui);
-                    card_head(ui, icon, Tone::Neutral, &title, Some((&sub, false)));
-                    card_body(ui, |ui| {
+                    cards::head(
+                        ui,
+                        0.0,
+                        |ui| {
+                            cards::tile(ui, icon, Tone::Accent, 32.0);
+                        },
+                        &title,
+                        |ui| {
+                            if sub_mono.is_empty() {
+                                cards::sub_text(ui, &sub_rest);
+                            } else {
+                                cards::sub_address(ui, &sub_mono, &sub_rest);
+                            }
+                        },
+                        |_| {},
+                    );
+                    cards::body(ui, |ui| {
                         if *kind == SecretPromptKind::Interactive {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(message.as_str())
-                                        .font(style::mono(style::MONO))
-                                        .color(p.text),
-                                )
-                                .wrap(),
-                            );
-                            ui.add_space(10.0);
+                            egui::Frame::NONE
+                                .fill(p.well)
+                                .stroke(Stroke::new(1.0, p.border))
+                                .corner_radius(CornerRadius::same(8))
+                                .inner_margin(egui::Margin::symmetric(10, 8))
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(message.as_str())
+                                                .font(style::mono(12.0))
+                                                .color(p.text),
+                                        )
+                                        .wrap(),
+                                    );
+                                });
                         }
-                        let (r, shown_toggle) = secret_field(
-                            ui,
-                            &mut prompt.text,
-                            *echo,
-                            *retry,
-                            *kind == SecretPromptKind::Interactive,
-                            ("prompt-field", tab_id),
-                        );
-                        let _ = shown_toggle;
-                        if *retry {
-                            ui.add_space(6.0);
-                            style::hint_tone(
+                        let r = if code {
+                            cards::code_boxes(
                                 ui,
-                                if *kind == SecretPromptKind::Passphrase {
-                                    t("Wrong passphrase, try again.")
-                                } else {
-                                    t("Wrong password, try again.")
+                                &mut prompt.text,
+                                egui::Id::new(("prompt-field", tab_id)),
+                            )
+                        } else {
+                            secret_field(
+                                ui,
+                                &mut prompt.text,
+                                *echo,
+                                *retry,
+                                *kind == SecretPromptKind::Interactive,
+                                ("prompt-field", tab_id),
+                                match kind {
+                                    SecretPromptKind::Passphrase => t("Passphrase"),
+                                    SecretPromptKind::Password => t("Password"),
+                                    SecretPromptKind::Interactive => "",
                                 },
-                                Tone::Err,
-                            );
+                            )
+                            .0
+                        };
+                        if code {
+                            style::hint(ui, t("Sent automatically after the 6th digit."));
                         }
-                        if *can_save {
-                            ui.add_space(12.0);
+                        if *retry {
+                            ui.add_space(-4.0);
+                            ui.spacing_mut().interact_size.y = 16.0;
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                kit::icon(ui, icons::WARNING_CIRCLE, 13.0, p.err);
+                                style::hint_tone(
+                                    ui,
+                                    if *kind == SecretPromptKind::Passphrase {
+                                        t("Wrong passphrase, try again.")
+                                    } else {
+                                        t("Wrong password, try again.")
+                                    },
+                                    Tone::Err,
+                                );
+                            });
+                        }
+                        // A one-time code is never worth saving.
+                        if *can_save && !code {
                             let label = if *kind == SecretPromptKind::Passphrase {
                                 tf("Save passphrase in {}", &[crate::platform::keychain()])
                             } else {
                                 tf("Save in {}", &[crate::platform::keychain()])
                             };
-                            if style::checkbox(ui, &mut prompt.save, label).changed() {
+                            if style::checkbox(
+                                ui,
+                                &mut prompt.save,
+                                RichText::new(label).font(style::regular(12.5)),
+                            )
+                            .changed()
+                            {
                                 r.request_focus();
                             }
                         }
                         let nothing_focused = ui.memory(|m| m.focused().is_none());
+                        let complete = code && prompt.text.len() == cards::CODE_LEN;
                         let submit = settled
-                            && enter
-                            && (r.lost_focus() || r.has_focus() || nothing_focused);
+                            && ((enter && (r.lost_focus() || r.has_focus() || nothing_focused))
+                                || (complete && r.changed()));
                         if on_top && !submit && (!prompt.focus || nothing_focused || r.lost_focus())
                         {
                             r.request_focus();
@@ -1223,44 +1356,43 @@ impl TernaryShellApp {
                             }));
                         }
                     });
-                    card_foot(
+                    cards::foot(
                         ui,
                         |ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            kit::kbd(ui, "↩");
-                            ui.label(
-                                RichText::new(t("to connect ·"))
-                                    .font(style::regular(style::SMALL))
-                                    .color(p.text_faint),
-                            );
                             kit::kbd(ui, "esc");
-                            ui.label(
-                                RichText::new(t("to cancel"))
-                                    .font(style::regular(style::SMALL))
-                                    .color(p.text_faint),
-                            );
                         },
                         |ui| {
-                            if kit::button_ex(ui, kit::Kind::Primary, None, go, true).clicked() {
+                            if kit::button_kbd(
+                                ui,
+                                kit::Kind::Primary,
+                                None,
+                                go,
+                                Some("↩"),
+                                false,
+                                false,
+                            )
+                            .clicked()
+                            {
                                 answer = Some(Some(SecretAnswer {
                                     value: std::mem::take(&mut prompt.text),
                                     save: prompt.save,
                                 }));
-                            }
-                            if kit::secondary_sm(ui, None, t("Cancel")).clicked() {
-                                answer = Some(None);
                             }
                         },
                     );
                 });
             }
         }
-        // Only Esc dismisses (a stray click beside the card must not cancel the login).
+        // Only Esc dismisses (a stray click beside the card must not cancel the login). On a
+        // changed host key Esc is "Close Tab".
         let escape = on_top && ctx.input(|i| i.key_pressed(Key::Escape));
         let tab = &mut self.tabs[active];
         if escape && tab.prompt.armed && answer.is_none() && hostkey_answer.is_none() {
             match view {
-                PromptView::HostKey { .. } => hostkey_answer = Some(false),
+                PromptView::HostKey { changed, .. } => {
+                    hostkey_answer = Some(false);
+                    close_tab = changed;
+                }
                 PromptView::Secret { .. } => answer = Some(None),
             }
         }
@@ -1270,6 +1402,9 @@ impl TernaryShellApp {
             // The Enter that answered must not repeat into the terminal.
             self.swallow_repeats = true;
             ctx.request_repaint();
+            if close_tab {
+                self.actions.push(Action::CloseTab(tab_id));
+            }
         } else if !on_top {
             tab.prompt.focus = false;
             tab.prompt.armed = false;
@@ -1293,8 +1428,10 @@ fn card_area(
     id: impl std::hash::Hash + std::fmt::Debug,
     area: egui::Rect,
     width: f32,
+    danger: bool,
     add: impl FnOnce(&mut Ui),
 ) {
+    let width = width.min(area.width() - 32.0).max(280.0);
     egui::Area::new(egui::Id::new(id))
         .fixed_pos(area.center())
         .pivot(Align2::CENTER_CENTER)
@@ -1302,199 +1439,108 @@ fn card_area(
         .constrain_to(area.shrink(8.0))
         .show(ctx, |ui| {
             let p = style::pal(ui);
-            egui::Frame::NONE
-                .fill(p.surface)
-                .corner_radius(CornerRadius::same(style::RADIUS_XL))
-                .shadow(ui.visuals().window_shadow)
-                .stroke(Stroke::new(
-                    1.0,
-                    if p.dark {
-                        Color32::from_white_alpha(15)
-                    } else {
-                        Color32::from_black_alpha(20)
-                    },
-                ))
-                .show(ui, |ui| {
-                    ui.set_width(width);
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    add(ui);
-                });
+            cards::frame(&p, danger).show(ui, |ui| {
+                ui.set_width(width);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                add(ui);
+            });
         });
 }
 
-/// The card's header: an icon tile, the title and a line under it (mono for addresses).
-fn card_head(ui: &mut Ui, icon: &str, tone: Tone, title: &str, sub: Option<(&str, bool)>) {
+/// Label / value rows (12 px; the labels in a 70 px column, faint).
+fn kv_rows(ui: &mut Ui, rows: &[(&str, String, bool)]) {
     let p = style::pal(ui);
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 7.0;
+        for (k, v, mono) in rows {
+            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 16.0), Sense::hover());
+            ui.painter().text(
+                pos2(r.left(), r.center().y),
+                Align2::LEFT_CENTER,
+                *k,
+                style::regular(style::SMALL),
+                p.text_faint,
+            );
+            ui.painter().text(
+                pos2(r.left() + 80.0, r.center().y),
+                Align2::LEFT_CENTER,
+                v,
+                if *mono {
+                    style::mono(11.5)
+                } else {
+                    style::regular(style::SMALL)
+                },
+                p.text,
+            );
+        }
+    });
+}
+
+/// "SAVED  ED25519 · trusted…": an overline (in `color`) and a faint note.
+fn key_heading(ui: &mut Ui, overline: &str, note: &str, color: Color32) {
+    let p = style::pal(ui);
+    ui.spacing_mut().interact_size.y = 17.0;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let (r, _) = ui.allocate_exact_size(vec2(60.0, 16.0), Sense::hover());
+        let g =
+            ui.painter()
+                .layout_no_wrap(overline.to_uppercase(), style::semibold(style::XS), color);
+        ui.painter()
+            .galley(pos2(r.left(), r.center().y - g.size().y / 2.0), g, color);
+        ui.label(
+            RichText::new(note)
+                .font(style::regular(style::SMALL))
+                .color(p.text_faint),
+        );
+    });
+}
+
+/// "Compare on the server: ssh-keygen -lf …" with a copy button, on the accent wash.
+fn compare_callout(ui: &mut Ui, command: &str, p: &style::Palette) {
     egui::Frame::NONE
-        .inner_margin(egui::Margin {
-            left: 20,
-            right: 20,
-            top: 18,
-            bottom: 10,
-        })
+        .fill(p.accent_softer)
+        .corner_radius(CornerRadius::same(style::RADIUS_MD))
+        .inner_margin(egui::Margin::symmetric(12, 8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            ui.spacing_mut().interact_size.y = 20.0;
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 12.0;
-                kit::icon_tile(ui, icon, tone, 36.0);
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 2.0;
-                    let color = if tone == Tone::Err { p.err } else { p.text };
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(title)
-                                .font(style::semibold(style::TITLE))
-                                .color(color),
-                        )
-                        .wrap(),
-                    );
-                    if let Some((s, mono)) = sub {
-                        let font = if mono {
-                            style::mono(style::SMALL)
-                        } else {
-                            style::regular(style::SMALL)
-                        };
-                        ui.add(
-                            egui::Label::new(RichText::new(s).font(font).color(p.text_muted))
-                                .wrap(),
-                        );
+                ui.spacing_mut().item_spacing.x = 10.0;
+                kit::icon(ui, icons::TERMINAL_WINDOW, 16.0, p.accent_text);
+                let mut job = egui::text::LayoutJob::default();
+                job.append(
+                    t("Compare on the server:"),
+                    0.0,
+                    egui::TextFormat {
+                        font_id: style::regular(style::SMALL),
+                        color: p.text_muted,
+                        valign: egui::Align::Center,
+                        ..Default::default()
+                    },
+                );
+                job.append(
+                    command,
+                    6.0,
+                    egui::TextFormat {
+                        font_id: style::mono(11.5),
+                        color: p.text,
+                        valign: egui::Align::Center,
+                        ..Default::default()
+                    },
+                );
+                let w = ui.available_width() - 30.0;
+                ui.allocate_ui(vec2(w, 20.0), |ui| {
+                    ui.set_width(w);
+                    ui.add(egui::Label::new(job).wrap());
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if kit::icon_button_ex(ui, icons::COPY, t("Copy"), false, 20.0).clicked() {
+                        ui.ctx().copy_text(command.to_string());
                     }
                 });
             });
         });
-}
-
-fn card_body(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
-    egui::Frame::NONE
-        .inner_margin(egui::Margin {
-            left: 20,
-            right: 20,
-            top: 4,
-            bottom: 16,
-        })
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.spacing_mut().item_spacing.y = 0.0;
-            add(ui);
-        });
-}
-
-/// The card's footer: a hairline, a hint or quiet action on the left, buttons on the right.
-fn card_foot(ui: &mut Ui, left: impl FnOnce(&mut Ui), right: impl FnOnce(&mut Ui)) {
-    let p = style::pal(ui);
-    let top = ui.cursor().top();
-    ui.painter().hline(
-        ui.max_rect().x_range(),
-        top + 0.5,
-        Stroke::new(1.0, p.border),
-    );
-    egui::Frame::NONE
-        .inner_margin(egui::Margin::symmetric(16, 12))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.set_height(style::TOOLBAR_H);
-                left(ui);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    right(ui);
-                });
-            });
-        });
-}
-
-/// One step (30 px): an 18 px circle (✓ done, spinning now, empty pending, ✗ failed), the
-/// label, and how long it took on the right.
-fn step_row(ui: &mut Ui, state: StepState, label: &str, meta: Option<&str>) {
-    let p = style::pal(ui);
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
-    let c = pos2(rect.left() + 9.0, rect.center().y);
-    let painter = ui.painter();
-    match state {
-        StepState::Done => {
-            painter.circle_filled(c, 9.0, p.tone_soft(Tone::Ok));
-            painter.text(
-                c,
-                Align2::CENTER_CENTER,
-                icons::CHECK,
-                style::icon_font(11.0),
-                p.ok,
-            );
-        }
-        StepState::Failed => {
-            painter.circle_filled(c, 9.0, p.tone_soft(Tone::Err));
-            painter.text(
-                c,
-                Align2::CENTER_CENTER,
-                icons::X,
-                style::icon_font(11.0),
-                p.err,
-            );
-        }
-        StepState::Pending => {
-            painter.circle_stroke(c, 8.25, Stroke::new(1.5, p.border_strong));
-        }
-        StepState::Now => {
-            let time = ui.input(|i| i.time) as f32;
-            let start = time * 5.0;
-            let points: Vec<egui::Pos2> = (0..=24)
-                .map(|i| {
-                    let a = start + i as f32 / 24.0 * std::f32::consts::TAU * 0.75;
-                    c + vec2(a.cos(), a.sin()) * 8.25
-                })
-                .collect();
-            painter.add(egui::Shape::line(points, Stroke::new(1.5, p.accent)));
-            ui.ctx().request_repaint_after(Duration::from_millis(30));
-        }
-    }
-    let (font, color) = match state {
-        StepState::Done => (style::regular(style::BODY), p.text_muted),
-        StepState::Now => (style::medium(style::BODY), p.text),
-        StepState::Pending => (style::regular(style::BODY), p.text_faint),
-        StepState::Failed => (style::regular(style::BODY), p.err),
-    };
-    let painter = ui.painter();
-    let meta_w = meta.map_or(0.0, |m| {
-        let g = painter.layout_no_wrap(m.to_string(), style::regular(style::SMALL), p.text_faint);
-        let w = g.size().x;
-        painter.galley(
-            pos2(rect.right() - w, rect.center().y - g.size().y / 2.0),
-            g,
-            p.text_faint,
-        );
-        w + 10.0
-    });
-    let clip = egui::Rect::from_min_max(rect.min, pos2(rect.right() - meta_w, rect.bottom()));
-    painter.with_clip_rect(clip).text(
-        pos2(rect.left() + 28.0, rect.center().y),
-        Align2::LEFT_CENTER,
-        label,
-        font,
-        color,
-    );
-}
-
-/// A fingerprint in a mono box (selectable); a saved one that no longer matches is struck out.
-fn fingerprint_box(ui: &mut Ui, text: &str, old: bool) {
-    let p = style::pal(ui);
-    egui::Frame::NONE
-        .fill(p.field)
-        .stroke(Stroke::new(1.0, p.border))
-        .corner_radius(CornerRadius::same(style::RADIUS_MD))
-        .inner_margin(egui::Margin::symmetric(12, 10))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            let mut rt = RichText::new(text).font(style::mono(12.0)).color(if old {
-                p.text_faint
-            } else {
-                p.text
-            });
-            if old {
-                rt = rt.strikethrough();
-            }
-            ui.add(egui::Label::new(rt).wrap().selectable(true));
-        });
-    ui.add_space(6.0);
 }
 
 /// The secret field of a prompt with a show/hide eye (passwords); returns its response.
@@ -1505,8 +1551,8 @@ fn secret_field(
     error: bool,
     mono: bool,
     id: impl std::hash::Hash + std::fmt::Debug,
+    hint: &str,
 ) -> (egui::Response, bool) {
-    let p = style::pal(ui);
     let id = egui::Id::new(id);
     let shown_id = id.with("shown");
     let mut shown: bool = ui.data(|d| d.get_temp(shown_id)).unwrap_or(false);
@@ -1522,6 +1568,9 @@ fn secret_field(
             bottom: 7,
         })
         .error(error);
+    if !hint.is_empty() {
+        field = field.hint_text(hint);
+    }
     if mono {
         field = field.mono();
     }
@@ -1544,7 +1593,6 @@ fn secret_field(
             false,
             false,
         );
-        let _ = p;
         if resp.clicked() {
             shown = !shown;
             toggled = true;
@@ -1555,61 +1603,67 @@ fn secret_field(
     (r, toggled)
 }
 
-/// "Session ended. Press ↩ for a new shell, or ⌘R to reconnect." in a soft chip at `at` (the
-/// line under the ended session's output), clipped to the pane.
+/// What a pane whose shell ended says, in a card under its last line: "Session ended", why,
+/// and what ↩, ⌘R and ⌘W do there. Drawn only (the keys do the work), clipped to the pane.
 fn session_ended_hint(ui: &Ui, pane: egui::Rect, at: egui::Rect, headline: &str) {
     let p = style::pal(ui);
     let painter = ui.painter().with_clip_rect(pane.shrink(2.0));
-    let font = style::regular(style::SMALL);
-    let enter = "↩";
-    let reconnect = S::Reconnect.label();
-    // "Press {} for a new shell, or {} to reconnect." around the two key caps.
-    let template = t("Press {} for a new shell, or {} to reconnect.");
-    let mut parts = template.splitn(3, "{}");
-    let (a, b, c) = (
-        parts.next().unwrap_or(""),
-        parts.next().unwrap_or(""),
-        parts.next().unwrap_or(""),
+    // "exit code 1" or "signal 9" when the headline names one (in any language: the number is
+    // the only digits in it).
+    let number: String = headline.chars().filter(|c| c.is_ascii_digit()).collect();
+    let mut detail = t("the server ended the session").to_string();
+    if !number.is_empty() {
+        let signal = tf("Session ended by signal {}.", &[&number]) == headline;
+        detail.push_str(" · ");
+        detail.push_str(&if signal {
+            tf("signal {}", &[&number])
+        } else {
+            tf("exit code {}", &[&number])
+        });
+    }
+    let left = pane.left() + 10.0;
+    let right = (pane.right() - 10.0).min(left + 520.0);
+    // Under the last line, or pinned to the bottom of the pane when the output fills it.
+    let top = (at.top() + 4.0).min(pane.bottom() - 84.0 - 10.0);
+    let rect = egui::Rect::from_min_max(pos2(left, top), pos2(right, top + 84.0));
+    painter.rect(
+        rect,
+        CornerRadius::same(10),
+        p.surface,
+        Stroke::new(1.0, p.border),
+        StrokeKind::Inside,
     );
-    let text = |s: &str| painter.layout_no_wrap(s.to_string(), font.clone(), p.text_muted);
-    let kbd_w = |k: &str| (text(k).size().x + 10.0).max(20.0);
-    let pieces = [
-        text(&format!("{headline} {}", a.trim_end())),
-        text(b.trim()),
-        text(c.trim_start()),
-    ];
-    let gap = 6.0;
-    let width = 10.0
-        + 14.0
-        + 10.0
-        + pieces.iter().map(|g| g.size().x).sum::<f32>()
-        + kbd_w(enter)
-        + kbd_w(&reconnect)
-        + gap * 4.0
-        + 10.0;
-    let rect = egui::Rect::from_min_size(pos2(at.left(), at.top() + 2.0), vec2(width, 28.0));
-    painter.rect_filled(rect, CornerRadius::same(style::RADIUS_MD), p.hover);
-    let y = rect.center().y;
-    let mut x = rect.left() + 10.0;
+    let tile_rect = egui::Rect::from_min_size(rect.min + vec2(14.0, 12.0), vec2(32.0, 32.0));
+    cards::paint_tile(&painter, tile_rect, icons::POWER, Tone::Neutral, &p);
+    let x = tile_rect.right() + 10.0;
     painter.text(
-        pos2(x + 7.0, y),
-        Align2::CENTER_CENTER,
-        icons::TERMINAL,
-        style::icon_font(14.0),
-        p.text_muted,
+        pos2(x, tile_rect.top() + 8.0),
+        Align2::LEFT_CENTER,
+        t("Session ended"),
+        style::semibold(style::BODY),
+        p.text,
     );
-    x += 14.0 + 10.0;
-    let [first, middle, last] = pieces;
-    for (galley, key) in [
-        (first, Some(enter)),
-        (middle, Some(reconnect.as_str())),
-        (last, None),
+    painter.text(
+        pos2(x, tile_rect.bottom() - 7.0),
+        Align2::LEFT_CENTER,
+        detail,
+        style::regular(style::SMALL),
+        p.text_faint,
+    );
+    let y = tile_rect.bottom() + 10.0 + 9.0;
+    let mut x = rect.left() + 14.0;
+    let close = S::Close.label();
+    let reconnect = S::Reconnect.label();
+    for (key, what) in [
+        ("↩", t("new shell")),
+        (reconnect.as_str(), t("reconnect tab")),
+        (close.as_str(), t("close pane")),
     ] {
-        let w = galley.size().x;
-        painter.galley(pos2(x, y - galley.size().y / 2.0), galley, p.text_muted);
-        x += w + gap;
-        if let Some(key) = key {
-            x += kit::paint_kbd_at(&painter, pos2(x, y), key, &p) + gap;
-        }
+        x += kit::paint_kbd_at(&painter, pos2(x, y), key, &p) + 6.0;
+        let g =
+            painter.layout_no_wrap(what.to_string(), style::regular(style::SMALL), p.text_faint);
+        let w = g.size().x;
+        painter.galley(pos2(x, y - g.size().y / 2.0), g, p.text_faint);
+        x += w + 14.0;
     }
 }
