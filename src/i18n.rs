@@ -169,6 +169,10 @@ const ID: &[(&str, &str)] = &[
     ("Choose file…", "Pilih file…"),
     ("Clear scrollback", "Hapus scrollback"),
     ("Go to this folder", "Buka folder ini"),
+    (
+        "Type user@host to connect without saving.",
+        "Ketik user@host untuk konek tanpa menyimpan.",
+    ),
     ("Click to type a path", "Klik untuk mengetik path"),
     ("Close Other Tabs", "Tutup Tab Lain"),
     ("Close {}?", "Tutup {}?"),

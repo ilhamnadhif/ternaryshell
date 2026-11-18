@@ -515,27 +515,31 @@ impl Palette {
                 }
 
                 // The list and the preview beside it.
+                // With nothing to show, the message takes the whole width (no empty preview).
                 let (body, _) = ui.allocate_exact_size(vec2(PALETTE_W, BODY_H), Sense::hover());
+                let preview_w = if total == 0 { 0.0 } else { PREVIEW_W };
                 let list_rect = egui::Rect::from_min_max(
                     body.min,
-                    pos2(body.right() - PREVIEW_W, body.bottom()),
+                    pos2(body.right() - preview_w, body.bottom()),
                 );
                 let preview_rect =
                     egui::Rect::from_min_max(pos2(list_rect.right(), body.top()), body.max);
-                ui.painter().rect_filled(
-                    preview_rect,
-                    0.0,
-                    if p.dark {
-                        Color32::from_white_alpha(4)
-                    } else {
-                        p.nav
-                    },
-                );
-                ui.painter().vline(
-                    list_rect.right() - 0.5,
-                    body.y_range(),
-                    Stroke::new(1.0, p.border),
-                );
+                if total > 0 {
+                    ui.painter().rect_filled(
+                        preview_rect,
+                        0.0,
+                        if p.dark {
+                            Color32::from_white_alpha(4)
+                        } else {
+                            p.nav
+                        },
+                    );
+                    ui.painter().vline(
+                        list_rect.right() - 0.5,
+                        body.y_range(),
+                        Stroke::new(1.0, p.border),
+                    );
+                }
                 let mut picked: Option<(Row, bool)> = None;
                 let mut list_ui = ui.new_child(egui::UiBuilder::new().max_rect(list_rect));
                 egui::ScrollArea::vertical()
@@ -557,6 +561,14 @@ impl Palette {
                                                 t("No matches")
                                             })
                                             .color(p.text_muted),
+                                        );
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            RichText::new(t(
+                                                "Type user@host to connect without saving.",
+                                            ))
+                                            .font(style::regular(style::SMALL))
+                                            .color(p.text_faint),
                                         );
                                     });
                                 }
@@ -602,9 +614,11 @@ impl Palette {
                             });
                     });
                 let selected = flat.get(self.index).map(|(r, _)| (*r).clone());
-                let mut preview_ui =
-                    ui.new_child(egui::UiBuilder::new().max_rect(preview_rect.shrink(16.0)));
-                preview(&mut preview_ui, selected.as_ref(), data, address.as_ref());
+                if total > 0 {
+                    let mut preview_ui =
+                        ui.new_child(egui::UiBuilder::new().max_rect(preview_rect.shrink(16.0)));
+                    preview(&mut preview_ui, selected.as_ref(), data, address.as_ref());
+                }
 
                 // Keys.
                 if let Some(n) = number {
