@@ -3010,6 +3010,14 @@ impl SettingsDialog {
                     }
                 }
             }
+            // The page shown has nothing for this search: go to the first one that has.
+            if counts[self.tab as usize] == 0
+                && let Some(tab) = SettingsTab::ALL
+                    .into_iter()
+                    .find(|t| counts[*t as usize] > 0)
+            {
+                self.tab = tab;
+            }
             self.hits = Some((self.query.clone(), counts));
         }
         let counts = self.hits.as_ref().map(|(_, c)| *c).unwrap_or_default();
