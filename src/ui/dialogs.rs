@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use super::actions::Action;
 use super::confirm::{self, ConfirmExtra, ConfirmRow};
-use super::keys::Shortcut as S;
+use super::keys::{self, Shortcut as S};
 use super::style::{self, Tone};
 pub use super::toasts::Toasts;
 use super::{fonts, icons, kit};
@@ -32,6 +32,72 @@ pub struct Command {
     pub label: String,
     pub shortcut: Option<String>,
     pub action: Action,
+    /// A faint word after the label (the tab it acts on, the command a quick command sends).
+    pub detail: Option<String>,
+    /// A quick command (listed apart from the app's actions).
+    pub quick: bool,
+}
+
+/// An open tab, for the palette's Tabs.
+pub struct PaletteTab {
+    pub index: usize,
+    pub name: String,
+    pub address: String,
+    pub bookmark: Uuid,
+    pub connected: bool,
+}
+
+/// What the palette lists and previews.
+pub struct PaletteData<'a> {
+    pub store: &'a BookmarkStore,
+    /// Recent connections, newest first, with when ("12 min ago").
+    pub recent: &'a [(Uuid, String)],
+    pub live: &'a HashSet<Uuid>,
+    /// How many tabs are open to each connection.
+    pub open: &'a std::collections::HashMap<Uuid, usize>,
+    pub tabs: &'a [PaletteTab],
+    pub commands: &'a [Command],
+}
+
+/// What the palette searches.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+enum Scope {
+    #[default]
+    All,
+    Hosts,
+    Commands,
+    Tabs,
+    Actions,
+}
+
+impl Scope {
+    const ALL: [Scope; 5] = [
+        Scope::All,
+        Scope::Hosts,
+        Scope::Commands,
+        Scope::Tabs,
+        Scope::Actions,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Scope::All => t("All"),
+            Scope::Hosts => t("Hosts"),
+            Scope::Commands => t("Commands"),
+            Scope::Tabs => t("Tabs"),
+            Scope::Actions => t("Actions"),
+        }
+    }
+
+    fn icon(self) -> Option<&'static str> {
+        match self {
+            Scope::All => None,
+            Scope::Hosts => Some(icons::HARD_DRIVES),
+            Scope::Commands => Some(icons::LIGHTNING),
+            Scope::Tabs => Some(icons::CARDS),
+            Scope::Actions => Some(icons::COMMAND),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -39,13 +105,33 @@ pub struct Palette {
     query: String,
     index: usize,
     focused: bool,
+    scope: Scope,
+    /// The rows for the last query and scope, kept until either changes.
+    cache: Option<(CacheKey, Vec<Section>)>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct CacheKey {
+    query: String,
+    scope: Scope,
+    sizes: [usize; 4],
+}
+
+struct Section {
+    title: String,
+    /// Recent connections: ⌘1–⌘9 open them.
+    numbered: bool,
+    rows: Vec<Row>,
 }
 
 pub enum PaletteResult {
     Open,
     Close,
     Connect(Uuid),
-    /// An address typed in (`user@host[:port]`) that matches no bookmark.
+    /// Connect and open the Files panel.
+    ConnectFiles(Uuid),
+    Edit(Uuid),
+    /// An address typed in (`user@host[:port]`).
     ConnectTo(String),
     /// Open the connection editor for the typed address.
     SaveAs(String),
@@ -54,87 +140,251 @@ pub enum PaletteResult {
 
 /// Most connections listed in the palette.
 const PALETTE_ROWS: usize = 50;
+const PALETTE_W: f32 = 720.0;
+const PREVIEW_W: f32 = 260.0;
+const BODY_H: f32 = 404.0;
 
 /// One row of the palette, in the order shown.
+#[derive(Clone)]
 enum Row {
-    Connection(Uuid),
+    Host(Uuid),
     ConnectTo(String),
     SaveAs(String),
     Command(usize),
+    Tab(usize),
 }
 
-impl Palette {
-    pub fn show(
-        &mut self,
-        ctx: &egui::Context,
-        store: &BookmarkStore,
-        recent: &[Uuid],
-        live: &HashSet<Uuid>,
-        commands: &[Command],
-    ) -> PaletteResult {
-        let mut result = PaletteResult::Open;
-        let query = self.query.trim().to_string();
-        // What to list: recent connections and the first commands with no query; matches of
-        // both, and the typed address, with one.
-        let mut sections: Vec<(&str, Vec<Row>)> = Vec::new();
-        if query.is_empty() {
-            let rec: Vec<Row> = recent
-                .iter()
-                .filter(|id| store.bookmark(**id).is_some())
-                .take(5)
-                .map(|id| Row::Connection(*id))
-                .collect();
-            if !rec.is_empty() {
-                sections.push((t("Recent"), rec));
-            } else if !store.bookmarks.is_empty() {
-                sections.push((
-                    t("Connections"),
+/// The modifier key labels of this system: `⌘` / `Ctrl+`.
+fn mod_label(mac: &str, other: &str) -> String {
+    if cfg!(target_os = "macos") {
+        mac.to_string()
+    } else {
+        other.to_string()
+    }
+}
+
+/// `⌘3` on macOS, `Alt+3` elsewhere: opens the n-th recent connection (or tab).
+fn number_label(n: usize) -> String {
+    format!("{}{n}", mod_label("⌘", "Alt+"))
+}
+
+/// Whether the query looks like an address to connect to (`user@host`, `host:port`, a name
+/// with a dot) and parses as one.
+fn address_query(query: &str) -> Option<crate::bookmarks::model::Target> {
+    let looks = query.contains('@')
+        || query.contains(':')
+        || (query.contains('.') && !query.contains(char::is_whitespace));
+    looks
+        .then(|| crate::bookmarks::model::parse_target(query).ok())
+        .flatten()
+}
+
+fn build_sections(query: &str, scope: Scope, data: &PaletteData) -> Vec<Section> {
+    let store = data.store;
+    let section = |title: &str, numbered: bool, rows: Vec<Row>| Section {
+        title: title.to_string(),
+        numbered,
+        rows,
+    };
+    let actions: Vec<usize> = (0..data.commands.len())
+        .filter(|i| !data.commands[*i].quick)
+        .collect();
+    let quick: Vec<usize> = (0..data.commands.len())
+        .filter(|i| data.commands[*i].quick)
+        .collect();
+    let fuzzy_cmds = |list: &[usize]| -> Vec<Row> {
+        let mut hits: Vec<(i32, usize)> = list
+            .iter()
+            .filter_map(|i| search::fuzzy_score(query, &data.commands[*i].label).map(|s| (s, *i)))
+            .collect();
+        hits.sort_by_key(|h| std::cmp::Reverse(h.0));
+        hits.into_iter()
+            .take(12)
+            .map(|(_, i)| Row::Command(i))
+            .collect()
+    };
+    let recent_rows = |n: usize| -> Vec<Row> {
+        data.recent
+            .iter()
+            .filter(|(id, _)| store.bookmark(*id).is_some())
+            .take(n)
+            .map(|(id, _)| Row::Host(*id))
+            .collect()
+    };
+    let mut out = Vec::new();
+    if query.is_empty() {
+        match scope {
+            Scope::All => {
+                let rec = recent_rows(5);
+                if !rec.is_empty() {
+                    out.push(section(t("Recent"), true, rec));
+                } else if !store.bookmarks.is_empty() {
+                    out.push(section(
+                        t("Connections"),
+                        false,
+                        store
+                            .bookmarks
+                            .iter()
+                            .take(5)
+                            .map(|b| Row::Host(b.id))
+                            .collect(),
+                    ));
+                }
+                out.push(section(
+                    t("Actions"),
+                    false,
+                    actions.iter().take(3).map(|i| Row::Command(*i)).collect(),
+                ));
+                out.push(section(
+                    t("Quick commands"),
+                    false,
+                    quick.iter().take(3).map(|i| Row::Command(*i)).collect(),
+                ));
+            }
+            Scope::Hosts => {
+                let rec = recent_rows(5);
+                let mut seen: HashSet<Uuid> = HashSet::new();
+                let mut rows = Vec::new();
+                for r in rec {
+                    if let Row::Host(id) = r {
+                        seen.insert(id);
+                        rows.push(Row::Host(id));
+                    }
+                }
+                rows.extend(
                     store
                         .bookmarks
                         .iter()
-                        .take(5)
-                        .map(|b| Row::Connection(b.id))
-                        .collect(),
+                        .filter(|b| !seen.contains(&b.id))
+                        .map(|b| Row::Host(b.id)),
+                );
+                out.push(section(t("Connections"), false, rows));
+            }
+            Scope::Commands => out.push(section(
+                t("Quick commands"),
+                false,
+                quick.iter().map(|i| Row::Command(*i)).collect(),
+            )),
+            Scope::Tabs => out.push(section(
+                t("Tabs"),
+                false,
+                (0..data.tabs.len()).map(Row::Tab).collect(),
+            )),
+            Scope::Actions => out.push(section(
+                t("Actions"),
+                false,
+                actions.iter().map(|i| Row::Command(*i)).collect(),
+            )),
+        }
+    } else {
+        let address = matches!(scope, Scope::All | Scope::Hosts)
+            .then(|| address_query(query))
+            .flatten();
+        if matches!(scope, Scope::All | Scope::Hosts) {
+            if address.is_some() {
+                out.push(section(
+                    t("Quick connect"),
+                    false,
+                    vec![
+                        Row::ConnectTo(query.to_string()),
+                        Row::SaveAs(query.to_string()),
+                    ],
                 ));
             }
-            sections.push((
-                t("Commands"),
-                (0..commands.len().min(5)).map(Row::Command).collect(),
-            ));
-        } else {
-            let mut hits = search::search(store, &query);
-            hits.truncate(PALETTE_ROWS);
-            let address = (hits.is_empty() && query.contains(['@', '.', ':']))
-                .then(|| crate::bookmarks::model::parse_target(&query).ok())
-                .flatten()
-                .map(|_| query.clone());
+            let mut hits = search::search(store, query);
             if let Some(a) = &address {
-                sections.push(("", vec![Row::ConnectTo(a.clone()), Row::SaveAs(a.clone())]));
+                // Saved hosts on the same machine, or with the same user.
+                for b in &store.bookmarks {
+                    let same_host = b.host.eq_ignore_ascii_case(&a.host);
+                    let same_user = a.user.as_ref().is_some_and(|u| *u == b.username);
+                    if (same_host || same_user) && !hits.contains(&b.id) {
+                        hits.push(b.id);
+                    }
+                }
             }
+            hits.truncate(PALETTE_ROWS);
             if !hits.is_empty() {
-                sections.push((
-                    t("Connections"),
-                    hits.into_iter().map(Row::Connection).collect(),
-                ));
-            }
-            let mut cmds: Vec<(i32, usize)> = commands
-                .iter()
-                .enumerate()
-                .filter_map(|(i, c)| search::fuzzy_score(&query, &c.label).map(|s| (s, i)))
-                .collect();
-            cmds.sort_by_key(|c| std::cmp::Reverse(c.0));
-            if !cmds.is_empty() && address.is_none() {
-                sections.push((
-                    t("Commands"),
-                    cmds.into_iter()
-                        .take(8)
-                        .map(|(_, i)| Row::Command(i))
-                        .collect(),
+                out.push(section(
+                    if address.is_some() {
+                        t("Matching hosts")
+                    } else {
+                        t("Connections")
+                    },
+                    false,
+                    hits.into_iter().map(Row::Host).collect(),
                 ));
             }
         }
-        let total: usize = sections.iter().map(|s| s.1.len()).sum();
+        if matches!(scope, Scope::All | Scope::Actions) && address.is_none() {
+            let rows = fuzzy_cmds(&actions);
+            if !rows.is_empty() {
+                out.push(section(t("Actions"), false, rows));
+            }
+        }
+        if matches!(scope, Scope::All | Scope::Commands) && address.is_none() {
+            let rows = fuzzy_cmds(&quick);
+            if !rows.is_empty() {
+                out.push(section(t("Quick commands"), false, rows));
+            }
+        }
+        if matches!(scope, Scope::All | Scope::Tabs) && address.is_none() {
+            let mut hits: Vec<(i32, usize)> = data
+                .tabs
+                .iter()
+                .enumerate()
+                .filter_map(|(i, tab)| search::fuzzy_score(query, &tab.name).map(|s| (s, i)))
+                .collect();
+            hits.sort_by_key(|h| std::cmp::Reverse(h.0));
+            if !hits.is_empty() {
+                out.push(section(
+                    t("Tabs"),
+                    false,
+                    hits.into_iter().map(|(_, i)| Row::Tab(i)).collect(),
+                ));
+            }
+        }
+    }
+    out.retain(|s| !s.rows.is_empty());
+    out
+}
+
+impl Palette {
+    pub fn show(&mut self, ctx: &egui::Context, data: &PaletteData) -> PaletteResult {
+        let mut result = PaletteResult::Open;
+        // `>` first switches to the actions, as in other editors.
+        if let Some(rest) = self.query.strip_prefix('>') {
+            self.query = rest.trim_start().to_string();
+            self.scope = Scope::Actions;
+            self.index = 0;
+        }
+        let query = self.query.trim().to_string();
+        let key = CacheKey {
+            query: query.clone(),
+            scope: self.scope,
+            sizes: [
+                data.store.bookmarks.len(),
+                data.commands.len(),
+                data.tabs.len(),
+                data.recent.len(),
+            ],
+        };
+        if self.cache.as_ref().is_none_or(|(k, _)| *k != key) {
+            let sections = build_sections(&query, self.scope, data);
+            self.cache = Some((key, sections));
+        }
+        let sections = &self.cache.as_ref().expect("built").1;
+        let flat: Vec<(&Row, Option<usize>)> = sections
+            .iter()
+            .flat_map(|s| {
+                s.rows
+                    .iter()
+                    .enumerate()
+                    .map(move |(i, r)| (r, (s.numbered && i < 9).then_some(i + 1)))
+            })
+            .collect();
+        let total = flat.len();
         self.index = self.index.min(total.saturating_sub(1));
+        let address = address_query(&query);
 
         let area = egui::Area::new(egui::Id::new("palette-area"))
             .anchor(Align2::CENTER_TOP, vec2(0.0, 86.0));
@@ -144,10 +394,55 @@ impl Palette {
             .backdrop_color(p.scrim)
             .frame(style::dialog_frame(ctx).fill(p.sheet))
             .show(ctx, |ui| {
-                ui.set_width(640.0);
+                ui.set_width(PALETTE_W);
                 ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-                // The query: 52 px, a magnifier, the text, esc.
-                let (row, _) = ui.allocate_exact_size(vec2(640.0, 52.0), Sense::hover());
+                // Keys the palette handles before the field sees them.
+                let (tab, back_tab, down, up, enter, shift_enter, cmd_enter, edit, save, number) =
+                    ui.input_mut(|i| {
+                        let number = [
+                            Key::Num1,
+                            Key::Num2,
+                            Key::Num3,
+                            Key::Num4,
+                            Key::Num5,
+                            Key::Num6,
+                            Key::Num7,
+                            Key::Num8,
+                            Key::Num9,
+                        ]
+                        .iter()
+                        .position(|k| i.consume_key(keys::tab_number_modifiers(), *k));
+                        (
+                            i.consume_key(egui::Modifiers::NONE, Key::Tab),
+                            i.consume_key(egui::Modifiers::SHIFT, Key::Tab),
+                            i.consume_key(egui::Modifiers::NONE, Key::ArrowDown),
+                            i.consume_key(egui::Modifiers::NONE, Key::ArrowUp),
+                            i.key_pressed(Key::Enter) && i.modifiers.is_none(),
+                            i.consume_key(egui::Modifiers::SHIFT, Key::Enter),
+                            i.consume_key(egui::Modifiers::COMMAND, Key::Enter),
+                            i.consume_key(egui::Modifiers::COMMAND, Key::E),
+                            i.consume_key(egui::Modifiers::COMMAND, Key::S),
+                            number,
+                        )
+                    });
+                if tab || back_tab {
+                    let i = Scope::ALL
+                        .iter()
+                        .position(|s| *s == self.scope)
+                        .unwrap_or(0);
+                    let n = Scope::ALL.len();
+                    self.scope = Scope::ALL[if tab { (i + 1) % n } else { (i + n - 1) % n }];
+                    self.index = 0;
+                }
+                if down {
+                    self.index = (self.index + 1).min(total.saturating_sub(1));
+                }
+                if up {
+                    self.index = self.index.saturating_sub(1);
+                }
+
+                // The query: 54 px, a magnifier, the text, ADDRESS when it is one.
+                let (row, _) = ui.allocate_exact_size(vec2(PALETTE_W, 54.0), Sense::hover());
                 ui.painter().text(
                     pos2(row.left() + 16.0 + 9.5, row.center().y),
                     Align2::CENTER_CENTER,
@@ -155,25 +450,35 @@ impl Palette {
                     style::icon_font(19.0),
                     p.text_faint,
                 );
-                let esc_w = kit::paint_kbd_at(
-                    ui.painter(),
-                    pos2(row.right() - 16.0 - 26.0, row.center().y),
-                    "esc",
-                    &p,
-                );
-                let _ = esc_w;
+                let right_pad = if address.is_some() {
+                    let w = badge_at(
+                        ui.painter(),
+                        pos2(row.right() - 16.0, row.center().y),
+                        t("ADDRESS"),
+                        &p,
+                    );
+                    w + 26.0
+                } else {
+                    16.0
+                };
                 let mut edit_ui =
                     ui.new_child(egui::UiBuilder::new().max_rect(egui::Rect::from_min_max(
-                        pos2(row.left() + 16.0 + 19.0 + 12.0, row.top()),
-                        pos2(row.right() - 16.0 - 30.0 - 12.0, row.bottom()),
+                        pos2(row.left() + 16.0 + 19.0 + 14.0, row.top()),
+                        pos2(row.right() - right_pad, row.bottom()),
                     )));
+                let font = if address.is_some() {
+                    style::mono(15.0)
+                } else {
+                    style::regular(16.0)
+                };
                 let r = edit_ui.add(
                     egui::TextEdit::singleline(&mut self.query)
                         .hint_text(
                             RichText::new(t("Search connections and commands, or type user@host…"))
+                                .font(style::regular(16.0))
                                 .color(p.text_faint),
                         )
-                        .font(style::regular(15.0))
+                        .font(font)
                         .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(0, 16)))
                         .desired_width(f32::INFINITY),
                 );
@@ -182,26 +487,14 @@ impl Palette {
                     row.bottom() - 0.5,
                     Stroke::new(1.0, p.border),
                 );
-                if !self.focused {
+                // The field keeps the keyboard: Tab switches the scope instead of moving focus.
+                let nothing_focused = ui.memory(|m| m.focused().is_none());
+                if !self.focused || tab || back_tab || (!r.has_focus() && nothing_focused) {
                     r.request_focus();
                     self.focused = true;
                 }
                 if r.changed() {
                     self.index = 0;
-                }
-                let (down, up, enter, cmd_enter) = ui.input_mut(|i| {
-                    (
-                        i.consume_key(egui::Modifiers::NONE, Key::ArrowDown),
-                        i.consume_key(egui::Modifiers::NONE, Key::ArrowUp),
-                        i.key_pressed(Key::Enter) && !i.modifiers.command,
-                        i.consume_key(egui::Modifiers::COMMAND, Key::Enter),
-                    )
-                });
-                if down {
-                    self.index = (self.index + 1).min(total.saturating_sub(1));
-                }
-                if up {
-                    self.index = self.index.saturating_sub(1);
                 }
                 if r.has_focus() {
                     ui.memory_mut(|m| {
@@ -209,27 +502,70 @@ impl Palette {
                             r.id,
                             egui::EventFilter {
                                 vertical_arrows: true,
+                                tab: true,
                                 ..Default::default()
                             },
                         )
                     });
                 }
-                // The list.
-                let mut picked: Option<&Row> = None;
-                let mut n = 0;
+
+                // The scopes.
+                let (chips, _) = ui.allocate_exact_size(vec2(PALETTE_W, 32.0), Sense::hover());
+                let mut x = chips.left() + 12.0;
+                for scope in Scope::ALL {
+                    let w = scope_chip(
+                        ui,
+                        pos2(x, chips.top() + 8.0),
+                        scope,
+                        scope == self.scope,
+                        &p,
+                    );
+                    if w.1 {
+                        self.scope = scope;
+                        self.index = 0;
+                        r.request_focus();
+                    }
+                    x += w.0 + 4.0;
+                }
+
+                // The list and the preview beside it.
+                let (body, _) = ui.allocate_exact_size(vec2(PALETTE_W, BODY_H), Sense::hover());
+                let list_rect = egui::Rect::from_min_max(
+                    body.min,
+                    pos2(body.right() - PREVIEW_W, body.bottom()),
+                );
+                let preview_rect =
+                    egui::Rect::from_min_max(pos2(list_rect.right(), body.top()), body.max);
+                ui.painter().rect_filled(
+                    preview_rect,
+                    0.0,
+                    if p.dark {
+                        Color32::from_white_alpha(4)
+                    } else {
+                        p.nav
+                    },
+                );
+                ui.painter().vline(
+                    list_rect.right() - 0.5,
+                    body.y_range(),
+                    Stroke::new(1.0, p.border),
+                );
+                let mut picked: Option<(Row, bool)> = None;
+                let mut list_ui = ui.new_child(egui::UiBuilder::new().max_rect(list_rect));
                 egui::ScrollArea::vertical()
-                    .max_height(440.0)
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
+                    .id_salt("palette-list")
+                    .max_height(BODY_H)
+                    .auto_shrink([false, false])
+                    .show(&mut list_ui, |ui| {
                         egui::Frame::NONE
                             .inner_margin(egui::Margin::same(6))
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());
                                 if total == 0 {
-                                    ui.add_space(14.0);
+                                    ui.add_space(30.0);
                                     ui.vertical_centered(|ui| {
                                         ui.label(
-                                            RichText::new(if store.bookmarks.is_empty() {
+                                            RichText::new(if data.store.bookmarks.is_empty() {
                                                 t("No connections yet")
                                             } else {
                                                 t("No matches")
@@ -237,27 +573,37 @@ impl Palette {
                                             .color(p.text_muted),
                                         );
                                     });
-                                    ui.add_space(14.0);
                                 }
-                                for (title, rows) in &sections {
-                                    if !title.is_empty() {
-                                        ui.add_space(4.0);
-                                        ui.horizontal(|ui| {
-                                            ui.add_space(10.0);
-                                            ui.label(style::section_label(title, p.text_faint));
-                                        });
-                                        ui.add_space(4.0);
-                                    }
-                                    for row in rows {
+                                let mut n = 0;
+                                for s in sections {
+                                    let (head, _) = ui.allocate_exact_size(
+                                        vec2(ui.available_width(), 30.0),
+                                        Sense::hover(),
+                                    );
+                                    ui.painter().text(
+                                        pos2(head.left() + 10.0, head.bottom() - 4.0),
+                                        Align2::LEFT_BOTTOM,
+                                        &s.title,
+                                        style::semibold(style::XS),
+                                        p.text_faint,
+                                    );
+                                    for (i, row) in s.rows.iter().enumerate() {
                                         let selected = n == self.index;
+                                        let number = (s.numbered && i < 9).then_some(i + 1);
                                         let resp = palette_row(
-                                            ui, row, selected, store, live, commands, &query,
+                                            ui,
+                                            row,
+                                            selected,
+                                            data,
+                                            &query,
+                                            number,
+                                            address.as_ref(),
                                         );
                                         if selected && (down || up) {
                                             resp.scroll_to_me(None);
                                         }
                                         if resp.clicked() {
-                                            picked = Some(row);
+                                            picked = Some((row.clone(), false));
                                         }
                                         if resp.hovered()
                                             && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO)
@@ -269,110 +615,103 @@ impl Palette {
                                 }
                             });
                     });
-                if enter || cmd_enter {
-                    let mut flat = sections.iter().flat_map(|s| s.1.iter());
-                    picked = picked.or_else(|| flat.nth(self.index));
-                    if cmd_enter && let Some(Row::ConnectTo(a)) = picked {
-                        result = PaletteResult::SaveAs(a.clone());
-                        picked = None;
+                let selected = flat.get(self.index).map(|(r, _)| (*r).clone());
+                let mut preview_ui =
+                    ui.new_child(egui::UiBuilder::new().max_rect(preview_rect.shrink(16.0)));
+                if let Some(action) =
+                    preview(&mut preview_ui, selected.as_ref(), data, address.as_ref())
+                {
+                    picked = Some(action);
+                }
+
+                // Keys.
+                if let Some(n) = number {
+                    if self.scope == Scope::Tabs {
+                        if let Some(tab) = data.tabs.get(n) {
+                            result = PaletteResult::Run(Action::SelectTab(tab.index));
+                        }
+                    } else if let Some((row, _)) = flat.iter().find(|(_, num)| *num == Some(n + 1))
+                    {
+                        picked = Some(((*row).clone(), false));
                     }
                 }
-                if let Some(row) = picked {
+                if enter || shift_enter {
+                    picked = picked.or_else(|| selected.clone().map(|r| (r, shift_enter)));
+                }
+                if (cmd_enter || save)
+                    && let Some(Row::ConnectTo(a) | Row::SaveAs(a)) = &selected
+                {
+                    result = PaletteResult::SaveAs(a.clone());
+                    picked = None;
+                }
+                if edit {
+                    let id = match &selected {
+                        Some(Row::Host(id)) => Some(*id),
+                        Some(Row::Tab(i)) => data.tabs.get(*i).map(|t| t.bookmark),
+                        _ => None,
+                    };
+                    if let Some(id) = id.filter(|id| data.store.bookmark(*id).is_some()) {
+                        result = PaletteResult::Edit(id);
+                    }
+                }
+                if let Some((row, files)) = picked {
                     result = match row {
-                        Row::Connection(id) => PaletteResult::Connect(*id),
-                        Row::ConnectTo(a) => PaletteResult::ConnectTo(a.clone()),
-                        Row::SaveAs(a) => PaletteResult::SaveAs(a.clone()),
-                        Row::Command(i) => PaletteResult::Run(commands[*i].action.clone()),
+                        Row::Host(id) if files => PaletteResult::ConnectFiles(id),
+                        Row::Host(id) => PaletteResult::Connect(id),
+                        Row::ConnectTo(a) => PaletteResult::ConnectTo(a),
+                        Row::SaveAs(a) => PaletteResult::SaveAs(a),
+                        Row::Command(i) => PaletteResult::Run(data.commands[i].action.clone()),
+                        Row::Tab(i) => match data.tabs.get(i) {
+                            Some(tab) => PaletteResult::Run(Action::SelectTab(tab.index)),
+                            None => PaletteResult::Close,
+                        },
                     };
                 } else if enter && total == 0 {
                     result = PaletteResult::Close;
                 }
+
                 // Key hints along the bottom.
-                let (foot, _) = ui.allocate_exact_size(vec2(640.0, 38.0), Sense::hover());
+                let (foot, _) = ui.allocate_exact_size(vec2(PALETTE_W, 36.0), Sense::hover());
                 let painter = ui.painter();
                 painter.hline(foot.x_range(), foot.top() + 0.5, Stroke::new(1.0, p.border));
-                let mut x = foot.left() + 14.0;
                 let cy = foot.center().y;
-                let hint = |x: &mut f32, keys: &[&str], what: &str| {
+                let hint = |x: f32, keys: &[&str], what: &str| -> f32 {
+                    let mut x = x;
                     for k in keys {
-                        *x += kit::paint_kbd_at(painter, pos2(*x, cy), k, &p) + 3.0;
+                        x += kit::paint_kbd_at(painter, pos2(x, cy), k, &p) + 3.0;
                     }
-                    *x += 2.0;
+                    x += 3.0;
                     let g = painter.layout_no_wrap(
                         what.to_string(),
-                        style::regular(style::XS),
+                        style::regular(style::SMALL),
                         p.text_faint,
                     );
                     let w = g.size().x;
-                    painter.galley(pos2(*x, cy - g.size().y / 2.0), g, p.text_faint);
-                    *x += w + 14.0;
+                    painter.galley(pos2(x, cy - g.size().y / 2.0), g, p.text_faint);
+                    x + w + 14.0
                 };
-                hint(&mut x, &["↑", "↓"], t("navigate"));
-                hint(
-                    &mut x,
-                    &["↩"],
-                    if query.is_empty() {
-                        t("open")
-                    } else {
-                        t("connect")
-                    },
-                );
-                if matches!(
-                    sections.first().and_then(|s| s.1.first()),
-                    Some(Row::ConnectTo(_))
-                ) {
-                    hint(&mut x, &[&S::SaveAndConnect.label()], t("save"));
-                }
-                let right = if query.is_empty() {
-                    String::new()
-                } else {
-                    let conns: usize = sections
-                        .iter()
-                        .flat_map(|s| s.1.iter())
-                        .filter(|r| matches!(r, Row::Connection(_)))
-                        .count();
-                    let cmds: usize = sections
-                        .iter()
-                        .flat_map(|s| s.1.iter())
-                        .filter(|r| matches!(r, Row::Command(_)))
-                        .count();
-                    tf(
-                        "{} connections · {} commands",
-                        &[&conns.to_string(), &cmds.to_string()],
-                    )
-                };
-                if right.is_empty() {
-                    let g = painter.layout_no_wrap(
-                        t("close").to_string(),
-                        style::regular(style::XS),
-                        p.text_faint,
-                    );
-                    let gw = g.size().x;
-                    painter.galley(
-                        pos2(foot.right() - 14.0 - gw, cy - g.size().y / 2.0),
-                        g,
-                        p.text_faint,
-                    );
-                    let kw = painter
-                        .layout_no_wrap("esc".into(), style::regular(style::XS), p.text_muted)
+                let mut x = foot.left() + 14.0;
+                x = hint(x, &["↑", "↓"], t("navigate"));
+                x = hint(x, &["↩"], t("open"));
+                x = hint(x, &[&mod_label("⇧↩", "Shift+Enter")], t("files"));
+                let _ = hint(x, &[&mod_label("⌘E", "Ctrl+E")], t("edit"));
+                // Right-aligned: tab scope, esc close.
+                let width = |keys: &str, what: &str| {
+                    let k = painter
+                        .layout_no_wrap(keys.into(), style::regular(style::XS), p.text_muted)
                         .size()
                         .x
                         + 10.0;
-                    kit::paint_kbd_at(
-                        painter,
-                        pos2(foot.right() - 14.0 - gw - 5.0 - kw, cy),
-                        "esc",
-                        &p,
-                    );
-                } else {
-                    painter.text(
-                        pos2(foot.right() - 14.0, cy),
-                        Align2::RIGHT_CENTER,
-                        right,
-                        style::regular(style::XS),
-                        p.text_faint,
-                    );
-                }
+                    let w = painter
+                        .layout_no_wrap(what.into(), style::regular(style::SMALL), p.text_faint)
+                        .size()
+                        .x;
+                    k.max(18.0) + 6.0 + w
+                };
+                let esc_x = foot.right() - 14.0 - width("esc", t("close"));
+                let tab_x = esc_x - 14.0 - width("tab", t("scope"));
+                hint(tab_x, &["tab"], t("scope"));
+                hint(esc_x, &["esc"], t("close"));
             });
         if modal.should_close() && matches!(result, PaletteResult::Open) {
             result = PaletteResult::Close;
@@ -381,175 +720,771 @@ impl Palette {
     }
 }
 
-/// One palette row (40 px): an icon tile (accent when selected), the name, the address in mono,
-/// and on the right the group or the shortcut.
+/// A small accent badge (`ADDRESS`) ending at `right`; returns its width.
+fn badge_at(painter: &egui::Painter, right: egui::Pos2, text: &str, p: &style::Palette) -> f32 {
+    let g = painter.layout_no_wrap(text.to_string(), style::semibold(10.5), p.accent_text);
+    let w = g.size().x + 12.0;
+    let rect = egui::Rect::from_min_max(
+        pos2(right.x - w, right.y - 9.0),
+        pos2(right.x, right.y + 9.0),
+    );
+    painter.rect_filled(rect, CornerRadius::same(5), p.accent_tint);
+    painter.galley(
+        pos2(rect.left() + 6.0, rect.center().y - g.size().y / 2.0),
+        g,
+        p.accent_text,
+    );
+    w
+}
+
+/// A scope chip at `pos` (24 px); returns its width and whether it was clicked.
+fn scope_chip(
+    ui: &mut Ui,
+    pos: egui::Pos2,
+    scope: Scope,
+    on: bool,
+    p: &style::Palette,
+) -> (f32, bool) {
+    let painter = ui.painter();
+    let g = painter.layout_no_wrap(
+        scope.label().to_string(),
+        style::medium(style::SMALL),
+        p.text,
+    );
+    let icon_w = if scope.icon().is_some() {
+        15.0 + 6.0
+    } else {
+        0.0
+    };
+    let kbd_w = if scope == Scope::Actions {
+        6.0 + 15.0
+    } else {
+        0.0
+    };
+    let w = 10.0 + icon_w + g.size().x + kbd_w + 10.0;
+    let rect = egui::Rect::from_min_size(pos, vec2(w, 24.0));
+    let resp = ui.interact(
+        rect,
+        egui::Id::new(("palette-scope", scope)),
+        Sense::click(),
+    );
+    let painter = ui.painter();
+    if on {
+        painter.rect_filled(rect, CornerRadius::same(12), p.accent_soft);
+    } else {
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(12),
+            Stroke::new(
+                1.0,
+                if resp.hovered() {
+                    p.border_strong
+                } else {
+                    p.border
+                },
+            ),
+            StrokeKind::Inside,
+        );
+    }
+    let color = if on || resp.hovered() {
+        p.text
+    } else {
+        p.text_muted
+    };
+    let mut x = rect.left() + 10.0;
+    if let Some(icon) = scope.icon() {
+        painter.text(
+            pos2(x + 7.5, rect.center().y),
+            Align2::CENTER_CENTER,
+            icon,
+            style::icon_font(15.0),
+            color,
+        );
+        x += icon_w;
+    }
+    let gw = g.size().x;
+    painter.galley(pos2(x, rect.center().y - g.size().y / 2.0), g, color);
+    x += gw;
+    if scope == Scope::Actions {
+        let cap = egui::Rect::from_min_size(pos2(x + 6.0, rect.center().y - 7.5), vec2(15.0, 15.0));
+        kit::paint_kbd(painter, cap, p);
+        painter.text(
+            cap.center(),
+            Align2::CENTER_CENTER,
+            ">",
+            style::regular(9.5),
+            p.text_muted,
+        );
+    }
+    (w, resp.clicked())
+}
+
+/// A name with the matched letters in the accent colour (semibold).
+fn highlighted(
+    job: &mut egui::text::LayoutJob,
+    text: &str,
+    hits: &[usize],
+    font: egui::FontId,
+    bold: egui::FontId,
+    color: Color32,
+    accent: Color32,
+) {
+    for (i, c) in text.chars().enumerate() {
+        let hit = hits.contains(&i);
+        job.append(
+            &c.to_string(),
+            0.0,
+            egui::TextFormat {
+                font_id: if hit { bold.clone() } else { font.clone() },
+                color: if hit { accent } else { color },
+                valign: egui::Align::Center,
+                ..Default::default()
+            },
+        );
+    }
+}
+
+/// Where `needle` occurs in `text` (char indices), for highlighting a typed host or user.
+fn substring_hits(text: &str, needle: &str) -> Vec<usize> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let lower = text.to_lowercase();
+    match lower.find(&needle.to_lowercase()) {
+        Some(byte) => {
+            let start = lower[..byte].chars().count();
+            (start..start + needle.chars().count()).collect()
+        }
+        None => Vec::new(),
+    }
+}
+
+/// One palette row (38 px): a 26 px tile (the host's glyph, or the command's icon), the title,
+/// a faint detail, and on the right its key.
 fn palette_row(
     ui: &mut Ui,
     row: &Row,
     selected: bool,
-    store: &BookmarkStore,
-    live: &HashSet<Uuid>,
-    commands: &[Command],
+    data: &PaletteData,
     query: &str,
+    number: Option<usize>,
+    address: Option<&crate::bookmarks::model::Target>,
 ) -> egui::Response {
     let p = style::pal(ui);
-    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
+    let dark = p.dark;
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 38.0), Sense::click());
     let painter = ui.painter();
-    if selected {
-        painter.rect_filled(rect, CornerRadius::same(style::RADIUS_MD), p.accent_soft);
+    let row_fill = if selected {
+        p.accent_soft
     } else if resp.hovered() {
-        painter.rect_filled(rect, CornerRadius::same(style::RADIUS_MD), p.hover);
-    }
-    let (icon, name, address, right, kbd, is_live): (
-        &str,
-        String,
-        String,
-        String,
-        Option<String>,
-        bool,
-    ) = match row {
-        Row::Connection(id) => {
-            let b = store.bookmark(*id);
-            (
-                icons::HARD_DRIVES,
-                b.map(|b| b.display_name()).unwrap_or_default(),
-                b.map(|b| b.address()).unwrap_or_default(),
-                b.map(|b| store.group_path(b.group)).unwrap_or_default(),
-                selected.then(|| "↩".to_string()),
-                live.contains(id),
-            )
-        }
-        Row::ConnectTo(a) => (
-            icons::ARROW_RIGHT,
-            tf("Connect to {}", &[a]),
-            String::new(),
-            String::new(),
-            Some("↩".into()),
-            false,
-        ),
-        Row::SaveAs(_) => (
-            icons::PLUS,
-            t("Save as New Connection…").to_string(),
-            String::new(),
-            String::new(),
-            Some(S::SaveAndConnect.label()),
-            false,
-        ),
-        Row::Command(i) => {
-            let c = &commands[*i];
-            (
-                c.icon,
-                c.label.clone(),
-                String::new(),
-                String::new(),
-                c.shortcut.clone(),
-                false,
-            )
-        }
+        p.hover
+    } else {
+        Color32::TRANSPARENT
     };
+    painter.rect_filled(rect, CornerRadius::same(8), row_fill);
+    // The status dot is cut out of the row's own colour.
+    let ring = over(p.sheet, row_fill);
     let tile = egui::Rect::from_min_size(
         pos2(rect.left() + 10.0, rect.center().y - 13.0),
         vec2(26.0, 26.0),
     );
-    painter.rect_filled(
-        tile,
-        CornerRadius::same(7),
-        if selected { p.accent } else { p.hover },
-    );
-    painter.text(
-        tile.center(),
-        Align2::CENTER_CENTER,
-        icon,
-        style::icon_font(15.0),
-        if selected {
-            Color32::WHITE
-        } else {
-            p.text_muted
-        },
-    );
-    if is_live {
-        let c = pos2(tile.right() - 2.0, tile.bottom() - 2.0);
-        painter.circle_filled(c, 6.0, p.sheet);
-        painter.circle_filled(c, 4.0, p.ok);
-    }
-    let mut x = tile.right() + 10.0;
-    // Right side first.
-    let mut right_edge = rect.right() - 10.0;
-    if let Some(k) = &kbd {
+    let neutral_tile = |icon: &str, tone: Tone| {
+        let (fill, color) = match tone {
+            Tone::Accent => (p.accent_tint, p.accent_text),
+            _ => (p.hover, p.text_muted),
+        };
+        painter.rect_filled(tile, CornerRadius::same(7), fill);
+        painter.text(
+            tile.center(),
+            Align2::CENTER_CENTER,
+            icon,
+            style::icon_font(14.0),
+            color,
+        );
+    };
+    let store = data.store;
+    let (title, sub, sub_mono, keys): (egui::text::LayoutJob, String, bool, Vec<String>) = match row
+    {
+        Row::Host(id) => {
+            let b = store.bookmark(*id);
+            let name = b.map(|b| b.display_name()).unwrap_or_default();
+            let label = b.and_then(|b| store.label_of(b));
+            kit::paint_host_glyph(
+                painter,
+                tile,
+                kit::host_icon(b.map_or(Default::default(), |b| b.host_icon())),
+                label.map(|l| style::label_color(l.color, dark)),
+                data.live.contains(id).then_some(p.ok),
+                ring,
+                &p,
+            );
+            let mut job = egui::text::LayoutJob::default();
+            let hits = if query.is_empty() || address.is_some() {
+                Vec::new()
+            } else {
+                search::match_positions(query, &name)
+            };
+            highlighted(
+                &mut job,
+                &name,
+                &hits,
+                style::medium(style::BODY),
+                style::semibold(style::BODY),
+                p.text,
+                p.accent_text,
+            );
+            let keys = number.map(number_label).into_iter().collect();
+            (job, b.map(|b| b.address()).unwrap_or_default(), true, keys)
+        }
+        Row::ConnectTo(a) => {
+            neutral_tile(icons::ARROW_RIGHT, Tone::Accent);
+            let mut job = egui::text::LayoutJob::default();
+            let base = t("Connect to {}");
+            let (before, after) = base.split_once("{}").unwrap_or((base, ""));
+            let f = |font: egui::FontId| egui::TextFormat {
+                font_id: font,
+                color: p.text,
+                valign: egui::Align::Center,
+                ..Default::default()
+            };
+            job.append(before, 0.0, f(style::medium(style::BODY)));
+            job.append(a, 0.0, f(style::medium(style::BODY)));
+            job.append(after, 0.0, f(style::medium(style::BODY)));
+            (job, String::new(), false, vec!["↩".to_string()])
+        }
+        Row::SaveAs(_) => {
+            neutral_tile(icons::FLOPPY_DISK, Tone::Neutral);
+            let mut job = egui::text::LayoutJob::default();
+            highlighted(
+                &mut job,
+                t("Save as New Connection…"),
+                &[],
+                style::medium(style::BODY),
+                style::medium(style::BODY),
+                p.text,
+                p.text,
+            );
+            (job, String::new(), false, vec![mod_label("⌘S", "Ctrl+S")])
+        }
+        Row::Command(i) => {
+            let c = &data.commands[*i];
+            neutral_tile(c.icon, Tone::Neutral);
+            let mut job = egui::text::LayoutJob::default();
+            let hits = if query.is_empty() {
+                Vec::new()
+            } else {
+                search::match_positions(query, &c.label)
+            };
+            highlighted(
+                &mut job,
+                &c.label,
+                &hits,
+                style::medium(style::BODY),
+                style::semibold(style::BODY),
+                p.text,
+                p.accent_text,
+            );
+            (
+                job,
+                c.detail.clone().unwrap_or_default(),
+                c.quick,
+                c.shortcut.clone().into_iter().collect(),
+            )
+        }
+        Row::Tab(i) => {
+            let tab = &data.tabs[*i];
+            let b = store.bookmark(tab.bookmark);
+            let label = b.and_then(|b| store.label_of(b));
+            kit::paint_host_glyph(
+                painter,
+                tile,
+                kit::host_icon(b.map_or(Default::default(), |b| b.host_icon())),
+                label.map(|l| style::label_color(l.color, dark)),
+                tab.connected.then_some(p.ok),
+                ring,
+                &p,
+            );
+            let mut job = egui::text::LayoutJob::default();
+            let hits = if query.is_empty() {
+                Vec::new()
+            } else {
+                search::match_positions(query, &tab.name)
+            };
+            highlighted(
+                &mut job,
+                &tab.name,
+                &hits,
+                style::medium(style::BODY),
+                style::semibold(style::BODY),
+                p.text,
+                p.accent_text,
+            );
+            let keys = (tab.index < 9)
+                .then(|| number_label(tab.index + 1))
+                .into_iter()
+                .collect();
+            (job, tab.address.clone(), true, keys)
+        }
+    };
+    // Keys on the right first.
+    let mut right = rect.right() - 10.0;
+    for k in keys.iter().rev() {
         let w = (painter
             .layout_no_wrap(k.clone(), style::regular(style::XS), p.text_muted)
             .size()
             .x
             + 10.0)
-            .max(20.0);
-        kit::paint_kbd_at(painter, pos2(right_edge - w, rect.center().y), k, &p);
-        right_edge -= w + 8.0;
+            .max(18.0);
+        kit::paint_kbd_at(painter, pos2(right - w, rect.center().y), k, &p);
+        right -= w + 6.0;
     }
-    if !right.is_empty() {
-        let g = painter.layout_no_wrap(right, style::regular(style::SMALL), p.text_faint);
-        let w = g.size().x;
-        painter.galley(
-            pos2(right_edge - w, rect.center().y - g.size().y / 2.0),
-            g,
-            p.text_faint,
-        );
-        right_edge -= w + 12.0;
-    }
-    let clip = egui::Rect::from_min_max(rect.min, pos2(right_edge, rect.bottom()));
-    // The name, matched letters in the accent color (connections and commands).
-    let mono_name = matches!(row, Row::ConnectTo(_));
-    let hits = if query.is_empty() || mono_name {
-        Vec::new()
-    } else {
-        search::match_positions(query, &name)
-    };
-    let mut job = egui::text::LayoutJob::default();
-    if let Row::ConnectTo(a) = row {
-        let base = t("Connect to {}");
-        let before = base.split("{}").next().unwrap_or("");
-        let after = base.split("{}").nth(1).unwrap_or("");
-        let f = |font: egui::FontId| egui::TextFormat {
-            font_id: font,
-            color: p.text,
-            ..Default::default()
-        };
-        job.append(before, 0.0, f(style::medium(style::BODY)));
-        job.append(a, 0.0, f(style::mono(style::BODY)));
-        job.append(after, 0.0, f(style::medium(style::BODY)));
-    } else {
-        for (i, c) in name.chars().enumerate() {
-            let hit = hits.contains(&i);
-            job.append(
-                &c.to_string(),
-                0.0,
-                egui::TextFormat {
-                    font_id: if hit {
-                        style::semibold(style::BODY)
-                    } else {
-                        style::medium(style::BODY)
-                    },
-                    color: if hit { p.accent_text } else { p.text },
-                    ..Default::default()
-                },
-            );
-        }
-    }
-    let g = painter.layout_job(job);
+    let clip = egui::Rect::from_min_max(rect.min, pos2(right - 6.0, rect.bottom()));
+    let g = painter.layout_job(title);
     let gw = g.size().x;
+    let x = tile.right() + 10.0;
     painter
         .with_clip_rect(clip)
         .galley(pos2(x, rect.center().y - g.size().y / 2.0), g, p.text);
-    x += gw + 10.0;
-    if !address.is_empty() {
-        painter.with_clip_rect(clip).text(
-            pos2(x, rect.center().y),
-            Align2::LEFT_CENTER,
-            address,
-            style::mono(11.5),
+    if !sub.is_empty() {
+        let mut job = egui::text::LayoutJob::default();
+        // A typed address highlights where it matches this host.
+        let hits: Vec<usize> = match (row, address) {
+            (Row::Host(_), Some(a)) => {
+                let mut h = substring_hits(&sub, &a.host);
+                if let Some(u) = &a.user
+                    && sub.starts_with(&format!("{u}@"))
+                {
+                    h.extend(0..u.chars().count());
+                }
+                h
+            }
+            _ => Vec::new(),
+        };
+        let font = if sub_mono {
+            style::mono(11.0)
+        } else {
+            style::regular(style::SMALL)
+        };
+        highlighted(
+            &mut job,
+            &sub,
+            &hits,
+            font.clone(),
+            font,
+            p.text_faint,
+            p.accent_text,
+        );
+        let sg = painter.layout_job(job);
+        painter.with_clip_rect(clip).galley(
+            pos2(x + gw + 10.0, rect.center().y - sg.size().y / 2.0),
+            sg,
             p.text_faint,
         );
     }
     resp
+}
+
+/// `top` (maybe translucent) painted over the opaque `base`.
+fn over(base: Color32, top: Color32) -> Color32 {
+    let a = top.a() as f32 / 255.0;
+    let [tr, tg, tb, _] = top.to_srgba_unmultiplied();
+    let mix = |b: u8, t: u8| (b as f32 * (1.0 - a) + t as f32 * a).round() as u8;
+    Color32::from_rgb(mix(base.r(), tr), mix(base.g(), tg), mix(base.b(), tb))
+}
+
+/// The preview of the selected row, in the palette's right column. Returns a row to open when
+/// one of its buttons was clicked (and whether to open its files).
+fn preview(
+    ui: &mut Ui,
+    selected: Option<&Row>,
+    data: &PaletteData,
+    address: Option<&crate::bookmarks::model::Target>,
+) -> Option<(Row, bool)> {
+    let p = style::pal(ui);
+    let store = data.store;
+    let mut picked = None;
+    ui.spacing_mut().item_spacing.y = 12.0;
+    let bottom_buttons = |ui: &mut Ui, n: usize| {
+        // Room for the buttons at the bottom.
+        let h = n as f32 * 30.0 + (n.saturating_sub(1)) as f32 * 6.0;
+        let space = ui.available_height() - h;
+        if space > 0.0 {
+            ui.add_space(space);
+        }
+    };
+    let full_button = wide_button;
+    let host_id = match selected {
+        Some(Row::Host(id)) => Some(*id),
+        Some(Row::Tab(i)) => data.tabs.get(*i).map(|t| t.bookmark),
+        _ => None,
+    };
+    if let Some(b) = host_id.and_then(|id| store.bookmark(id)) {
+        let label = store.label_of(b).cloned();
+        let label_color = label.as_ref().map(|l| style::label_color(l.color, p.dark));
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            kit::host_glyph(
+                ui,
+                40.0,
+                kit::host_icon(b.host_icon()),
+                label_color,
+                data.live.contains(&b.id).then_some(p.ok),
+                if p.dark {
+                    Color32::from_rgb(0x1e, 0x1e, 0x1e)
+                } else {
+                    p.nav
+                },
+            );
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(b.display_name())
+                            .font(style::semibold(14.0))
+                            .color(p.text),
+                    )
+                    .truncate(),
+                );
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(b.address())
+                            .font(style::mono(11.0))
+                            .color(p.text_faint),
+                    )
+                    .truncate(),
+                );
+            });
+        });
+        let has_chips = label.as_ref().is_some_and(|l| !l.tag().is_empty()) || !b.tags.is_empty();
+        if has_chips {
+            let w = ui.available_width();
+            ui.allocate_ui_with_layout(
+                vec2(w, 22.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_clip_rect(ui.max_rect());
+                    ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                    kit::label_tag(ui, label.as_ref(), false);
+                    for tag in b.tags.iter().take(4) {
+                        tag_chip(ui, tag, &p);
+                    }
+                },
+            );
+        }
+        let login = match &b.auth {
+            crate::bookmarks::Auth::Password => t("Password").to_string(),
+            crate::bookmarks::Auth::Key { path } => {
+                let file = path.rsplit(['/', '\\']).next().unwrap_or(path);
+                tf("Key file · {}", &[file])
+            }
+            crate::bookmarks::Auth::KeychainKey => t("Pasted key").to_string(),
+            crate::bookmarks::Auth::Agent { .. } => t("SSH agent").to_string(),
+        };
+        let mut rows: Vec<(&str, String, Option<Color32>)> = vec![(t("Login"), login, None)];
+        let group = store.group_path(b.group);
+        if !group.is_empty() {
+            rows.push((t("Group"), group, None));
+        }
+        if let Some(j) = b.jump.and_then(|j| store.bookmark(j)) {
+            rows.push((t("Via"), j.display_name(), None));
+        }
+        if !b.forwards.is_empty() {
+            let ports: Vec<String> = b
+                .forwards
+                .iter()
+                .map(|f| f.listen_port.to_string())
+                .collect();
+            rows.push((
+                t("Forwards"),
+                format!("{} ({})", b.forwards.len(), ports.join(", ")),
+                None,
+            ));
+        }
+        if let Some((_, when)) = data.recent.iter().find(|(id, _)| *id == b.id) {
+            rows.push((t("Last"), when.clone(), None));
+        }
+        if let Some(n) = data.open.get(&b.id).filter(|n| **n > 0) {
+            let text = if *n == 1 {
+                t("1 tab open").to_string()
+            } else {
+                tf("{} tabs open", &[&n.to_string()])
+            };
+            rows.push((t("Open"), text, None));
+        }
+        kv(ui, &rows);
+        bottom_buttons(ui, 2);
+        ui.spacing_mut().item_spacing.y = 6.0;
+        let row = match selected {
+            Some(Row::Tab(i)) => Row::Tab(*i),
+            _ => Row::Host(b.id),
+        };
+        if full_button(ui, kit::Kind::Primary, t("Connect"), "↩") {
+            picked = Some((row, false));
+        }
+        if full_button(
+            ui,
+            kit::Kind::Secondary,
+            t("Open Files"),
+            &mod_label("⇧↩", "Shift+Enter"),
+        ) {
+            picked = Some((Row::Host(b.id), true));
+        }
+        return picked;
+    }
+    match selected {
+        Some(Row::ConnectTo(a) | Row::SaveAs(a)) => {
+            ui.label(style::section_label(t("Not saved"), p.text_faint));
+            if let Some(target) = address {
+                let rows: Vec<(&str, String, Option<Color32>)> = vec![
+                    (
+                        t("User"),
+                        target.user.clone().unwrap_or_else(|| "—".to_string()),
+                        None,
+                    ),
+                    (t("Host"), target.host.clone(), None),
+                    (
+                        t("Port"),
+                        target
+                            .port
+                            .unwrap_or(crate::bookmarks::DEFAULT_PORT)
+                            .to_string(),
+                        None,
+                    ),
+                    (t("Login"), t("asks when connecting").to_string(), None),
+                ];
+                kv_mixed(ui, &rows, 3);
+                // A saved connection to the same machine with another user or port.
+                if let Some(other) = store.bookmarks.iter().find(|b| {
+                    b.host.eq_ignore_ascii_case(&target.host)
+                        && (target.user.as_ref().is_some_and(|u| *u != b.username)
+                            || target.port.unwrap_or(crate::bookmarks::DEFAULT_PORT) != b.port)
+                }) {
+                    kit::callout(
+                        ui,
+                        icons::INFO,
+                        Tone::Neutral,
+                        &tf(
+                            "Same host as {} on another user and port.",
+                            &[&other.display_name()],
+                        ),
+                    );
+                }
+            }
+            bottom_buttons(ui, 1);
+            if full_button(ui, kit::Kind::Primary, t("Connect"), "↩") {
+                picked = Some((Row::ConnectTo(a.clone()), false));
+            }
+        }
+        Some(Row::Command(i)) => {
+            let c = &data.commands[*i];
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                let (r, _) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
+                ui.painter().rect_filled(r, CornerRadius::same(11), p.hover);
+                ui.painter().text(
+                    r.center(),
+                    Align2::CENTER_CENTER,
+                    c.icon,
+                    style::icon_font(20.0),
+                    p.text_muted,
+                );
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&c.label)
+                            .font(style::semibold(14.0))
+                            .color(p.text),
+                    )
+                    .wrap(),
+                );
+            });
+            if let Some(d) = &c.detail {
+                egui::Frame::NONE
+                    .fill(p.well)
+                    .stroke(Stroke::new(1.0, p.border))
+                    .corner_radius(CornerRadius::same(8))
+                    .inner_margin(egui::Margin::symmetric(10, 8))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(d)
+                                    .font(if c.quick {
+                                        style::mono(11.5)
+                                    } else {
+                                        style::regular(style::SMALL)
+                                    })
+                                    .color(p.text),
+                            )
+                            .wrap(),
+                        );
+                    });
+            }
+            if let Some(k) = &c.shortcut {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    ui.label(
+                        RichText::new(t("Shortcut"))
+                            .font(style::regular(style::SMALL))
+                            .color(p.text_faint),
+                    );
+                    kit::kbd(ui, k);
+                });
+            }
+            bottom_buttons(ui, 1);
+            if full_button(ui, kit::Kind::Primary, t("Run"), "↩") {
+                picked = Some((Row::Command(*i), false));
+            }
+        }
+        _ => {}
+    }
+    picked
+}
+
+/// A button as wide as its column (30 px): the label and its key cap, centred.
+fn wide_button(ui: &mut Ui, kind: kit::Kind, text: &str, key: &str) -> bool {
+    let p = style::pal(ui);
+    let (rect, resp) =
+        ui.allocate_exact_size(vec2(ui.available_width(), style::CONTROL_H), Sense::click());
+    let hovered = resp.hovered();
+    let pressed = resp.is_pointer_button_down_on();
+    let primary = kind == kit::Kind::Primary;
+    let (fill, stroke, color) = if primary {
+        (
+            if pressed {
+                p.accent_press
+            } else if hovered {
+                p.accent_hover
+            } else {
+                p.accent
+            },
+            Stroke::NONE,
+            p.on_accent,
+        )
+    } else {
+        (
+            if pressed {
+                p.subtle
+            } else if hovered {
+                p.hover
+            } else {
+                p.button
+            },
+            Stroke::new(
+                1.0,
+                if hovered {
+                    p.border_strong
+                } else {
+                    p.button_border
+                },
+            ),
+            p.text,
+        )
+    };
+    let painter = ui.painter();
+    painter.rect(
+        rect,
+        CornerRadius::same(style::RADIUS),
+        fill,
+        stroke,
+        StrokeKind::Inside,
+    );
+    if primary {
+        painter.hline(
+            rect.x_range().shrink(3.0),
+            rect.top() + 0.5,
+            Stroke::new(1.0, Color32::from_white_alpha(36)),
+        );
+    }
+    let g = painter.layout_no_wrap(text.to_string(), style::medium(style::BODY), color);
+    let k = painter.layout_no_wrap(key.to_string(), style::regular(style::XS), color);
+    let kw = (k.size().x + 10.0).max(20.0);
+    let total = g.size().x + 6.0 + kw;
+    let x = rect.center().x - total / 2.0;
+    let gw = g.size().x;
+    painter.galley(pos2(x, rect.center().y - g.size().y / 2.0), g, color);
+    let cap = egui::Rect::from_min_size(pos2(x + gw + 6.0, rect.center().y - 9.0), vec2(kw, 18.0));
+    painter.rect_filled(
+        cap,
+        CornerRadius::same(4),
+        if primary {
+            Color32::from_white_alpha(36)
+        } else {
+            p.hover
+        },
+    );
+    painter.galley(
+        cap.center() - k.size() / 2.0,
+        k,
+        if primary {
+            color.gamma_multiply(0.85)
+        } else {
+            p.text_faint
+        },
+    );
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp.clicked()
+}
+
+/// A tag chip (22 px, square corners).
+fn tag_chip(ui: &mut Ui, text: &str, p: &style::Palette) {
+    let g =
+        ui.painter()
+            .layout_no_wrap(text.to_string(), style::regular(style::SMALL), p.text_muted);
+    let (rect, _) = ui.allocate_exact_size(vec2(g.size().x + 16.0, 22.0), Sense::hover());
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(5), p.hover);
+    ui.painter().galley(
+        pos2(rect.left() + 8.0, rect.center().y - g.size().y / 2.0),
+        g,
+        p.text_muted,
+    );
+}
+
+/// Label / value rows of the preview (12 px; labels in a 74 px column).
+fn kv(ui: &mut Ui, rows: &[(&str, String, Option<Color32>)]) {
+    kv_font(ui, rows, style::regular(style::SMALL));
+}
+
+fn kv_font(ui: &mut Ui, rows: &[(&str, String, Option<Color32>)], font: egui::FontId) {
+    kv_rows(ui, rows, 0, font);
+}
+
+/// [`kv`] with the first `mono` values in the mono font (an address split into its parts).
+fn kv_mixed(ui: &mut Ui, rows: &[(&str, String, Option<Color32>)], mono: usize) {
+    kv_rows(ui, rows, mono, style::regular(style::SMALL));
+}
+
+fn kv_rows(ui: &mut Ui, rows: &[(&str, String, Option<Color32>)], mono: usize, font: egui::FontId) {
+    let p = style::pal(ui);
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 7.0;
+        for (i, (k, v, color)) in rows.iter().enumerate() {
+            let font = if i < mono {
+                style::mono(11.5)
+            } else {
+                font.clone()
+            };
+            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 16.0), Sense::hover());
+            ui.painter().text(
+                pos2(r.left(), r.center().y),
+                Align2::LEFT_CENTER,
+                *k,
+                style::regular(style::SMALL),
+                p.text_faint,
+            );
+            let value = egui::Rect::from_min_max(pos2(r.left() + 84.0, r.top()), r.max);
+            let g = ui
+                .painter()
+                .layout_no_wrap(v.clone(), font.clone(), color.unwrap_or(p.text));
+            ui.painter().with_clip_rect(value).galley(
+                pos2(value.left(), r.center().y - g.size().y / 2.0),
+                g,
+                color.unwrap_or(p.text),
+            );
+        }
+    });
 }
 
 // ----- simple dialogs -------------------------------------------------------------------------

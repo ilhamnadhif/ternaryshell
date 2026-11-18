@@ -379,6 +379,66 @@ impl TernaryShellApp {
             },
             // Redesign 3.0 dialogs, toasts, update states and About, for screenshots.
             "dg" => self.dev_dialogs(ctx, arg),
+            // Connection states that are hard to reach on purpose, for screenshots and checks
+            // of the cards: `debug-state lost|fail|hostkey-changed|otp|password-retry`.
+            "debug-state" => {
+                use crate::ssh::types::{
+                    ConnError, HostKeyStatus, ProbeReason, Prompt, SecretPromptKind,
+                };
+                if let Some(tab) = self.tabs.get(self.active) {
+                    let mut s = tab.conn.shared.lock();
+                    let secret = |kind, message: &str, retry| {
+                        let (reply, _) = tokio::sync::oneshot::channel();
+                        Prompt::Secret {
+                            kind,
+                            message: message.to_string(),
+                            echo: false,
+                            can_save: true,
+                            retry,
+                            reply,
+                        }
+                    };
+                    match arg {
+                        "lost" => {
+                            s.state = ConnState::Closed(Some(ConnError::NotResponding(
+                                ProbeReason::NetworkChanged,
+                            )))
+                        }
+                        "fail" => s.state = ConnState::Closed(Some(ConnError::Timeout)),
+                        "hostkey-changed" => {
+                            let (reply, _) = tokio::sync::oneshot::channel();
+                            s.prompt = Some(Prompt::HostKey {
+                                host: "127.0.0.1".into(),
+                                port: 2299,
+                                algorithm: "ecdsa-sha2-nistp256".into(),
+                                fingerprint: "SHA256:Vd5Lq0Ym3Ps8Wn2Kf7Rb1Xc6Gt4Ze9Hj2Na5Uo3ERi8"
+                                    .into(),
+                                status: HostKeyStatus::Changed,
+                                known: vec![
+                                    "ssh-ed25519  SHA256:Q1n8Rb2w7TzKp4Ly0aVf6Hs3mJ9cXe5DuG2iWo8NBt1"
+                                        .into(),
+                                ],
+                                reply,
+                            });
+                        }
+                        "otp" => {
+                            s.prompt = Some(secret(
+                                SecretPromptKind::Interactive,
+                                "Verification code (Google Authenticator):",
+                                false,
+                            ))
+                        }
+                        "password-retry" => {
+                            s.prompt = Some(secret(
+                                SecretPromptKind::Password,
+                                "deploy@api.stg.acme.io",
+                                true,
+                            ))
+                        }
+                        _ => {}
+                    }
+                }
+            }
             "connect" => {
                 if let Some(b) = self
                     .store
@@ -1596,16 +1656,46 @@ impl TernaryShellApp {
 
     fn overlay_dialogs(&mut self, ctx: &egui::Context) {
         if self.palette.is_some() {
-            let recent: Vec<Uuid> = self.settings.recent.iter().map(|r| r.id).collect();
+            use crate::ui::dialogs::{PaletteData, PaletteTab};
+            let recent: Vec<(Uuid, String)> = self
+                .settings
+                .recent
+                .iter()
+                .map(|r| (r.id, chrome::ago(r.at)))
+                .collect();
             let live: std::collections::HashSet<Uuid> = self
                 .live_map()
                 .into_iter()
                 .filter(|(_, l)| *l == Live::Connected)
                 .map(|(id, _)| id)
                 .collect();
+            let mut open: HashMap<Uuid, usize> = HashMap::new();
+            for tab in &self.tabs {
+                *open.entry(tab.bookmark.id).or_default() += 1;
+            }
+            let tabs: Vec<PaletteTab> = self
+                .tabs
+                .iter()
+                .enumerate()
+                .map(|(index, tab)| PaletteTab {
+                    index,
+                    name: tab.bookmark.display_name(),
+                    address: tab.bookmark.address(),
+                    bookmark: tab.bookmark.id,
+                    connected: tab.state().is_connected(),
+                })
+                .collect();
             let commands = self.palette_commands(ctx);
+            let data = PaletteData {
+                store: &self.store,
+                recent: &recent,
+                live: &live,
+                open: &open,
+                tabs: &tabs,
+                commands: &commands,
+            };
             let palette = self.palette.as_mut().expect("checked");
-            match palette.show(ctx, &self.store, &recent, &live, &commands) {
+            match palette.show(ctx, &data) {
                 PaletteResult::Open => {}
                 PaletteResult::Close => self.palette = None,
                 PaletteResult::SaveAs(address) => {
@@ -1619,6 +1709,21 @@ impl TernaryShellApp {
                 PaletteResult::Connect(id) => {
                     self.palette = None;
                     self.actions.push(Action::Connect(id));
+                }
+                PaletteResult::ConnectFiles(id) => {
+                    self.palette = None;
+                    if let Some(b) = self.store.bookmark(id).cloned() {
+                        self.sidebar.selected = Some(id);
+                        self.settings.touch_recent(id);
+                        self.open_tab(ctx, b);
+                        if let Some(tab) = self.tabs.last_mut() {
+                            tab.show_sftp = true;
+                        }
+                    }
+                }
+                PaletteResult::Edit(id) => {
+                    self.palette = None;
+                    self.actions.push(Action::EditBookmark(id));
                 }
                 PaletteResult::ConnectTo(address) => {
                     self.palette = None;
@@ -1705,121 +1810,134 @@ impl TernaryShellApp {
         }
     }
 
-    /// Everything the command palette can run, in the order it lists them.
+    /// Everything the command palette can run, in the order it lists them: the app's actions,
+    /// then the quick commands.
     fn palette_commands(&self, ctx: &egui::Context) -> Vec<crate::ui::dialogs::Command> {
         use crate::ui::dialogs::Command;
         use keys::Shortcut as S;
         let has_tab = !self.tabs.is_empty();
         let dark = ctx.theme() == Theme::Dark;
-        let mut list = vec![Command {
-            icon: icons::PLUS,
-            label: t("New Connection…").into(),
-            shortcut: Some(S::NewConnection.label()),
-            action: Action::NewBookmark { group: None },
-        }];
+        let cmd = |icon, label: &str, shortcut: Option<S>, action| Command {
+            icon,
+            label: label.to_string(),
+            shortcut: shortcut.map(S::label),
+            action,
+            detail: None,
+            quick: false,
+        };
+        let mut list = vec![cmd(
+            icons::PLUS,
+            t("New Connection…"),
+            Some(S::NewConnection),
+            Action::NewBookmark { group: None },
+        )];
         if has_tab {
-            list.push(Command {
-                icon: icons::ARROWS_DOWN_UP,
-                label: t("Toggle SFTP Panel").into(),
-                shortcut: Some(S::Sftp.label()),
-                action: Action::ToggleSftp,
-            });
-            list.push(Command {
-                icon: icons::SQUARE_SPLIT_HORIZONTAL,
-                label: t("Split Right").into(),
-                shortcut: Some(S::SplitRight.label()),
-                action: Action::SplitRight,
-            });
+            let mut files = cmd(
+                icons::FOLDER_SIMPLE,
+                t("Toggle Files"),
+                Some(S::Sftp),
+                Action::ToggleSftp,
+            );
+            files.detail = self
+                .tabs
+                .get(self.active)
+                .map(|t| t.bookmark.display_name());
+            list.push(files);
+            list.push(cmd(
+                icons::SQUARE_SPLIT_HORIZONTAL,
+                t("Split Right"),
+                Some(S::SplitRight),
+                Action::SplitRight,
+            ));
         }
-        list.push(Command {
-            icon: icons::CIRCLE_HALF,
-            label: if dark {
+        list.push(cmd(
+            icons::CIRCLE_HALF,
+            if dark {
                 t("Switch to Light Theme")
             } else {
                 t("Switch to Dark Theme")
-            }
-            .into(),
-            shortcut: None,
-            action: Action::ToggleTheme,
-        });
-        list.push(Command {
-            icon: icons::FILE_CODE,
-            label: t("Import from ~/.ssh/config").into(),
-            shortcut: None,
-            action: Action::ImportSshConfig,
-        });
+            },
+            None,
+            Action::ToggleTheme,
+        ));
+        list.push(cmd(
+            icons::FILE_CODE,
+            t("Import from ~/.ssh/config"),
+            None,
+            Action::ImportSshConfig,
+        ));
         if has_tab {
-            list.push(Command {
-                icon: icons::SQUARE_SPLIT_VERTICAL,
-                label: t("Split Down").into(),
-                shortcut: Some(S::SplitDown.label()),
-                action: Action::SplitDown,
-            });
-            list.push(Command {
-                icon: icons::TERMINAL_WINDOW,
-                label: t("New Tab").into(),
-                shortcut: Some(S::NewTab.label()),
-                action: Action::NewTab,
-            });
-            list.push(Command {
-                icon: icons::ARROWS_CLOCKWISE,
-                label: t("Reconnect").into(),
-                shortcut: Some(S::Reconnect.label()),
-                action: Action::Reconnect,
-            });
-            list.push(Command {
-                icon: icons::BROOM,
-                label: t("Clear Scrollback").into(),
-                shortcut: Some(S::ClearScrollback.label()),
-                action: Action::ClearScrollback,
-            });
+            list.push(cmd(
+                icons::SQUARE_SPLIT_VERTICAL,
+                t("Split Down"),
+                Some(S::SplitDown),
+                Action::SplitDown,
+            ));
+            list.push(cmd(
+                icons::TERMINAL_WINDOW,
+                t("New Tab"),
+                Some(S::NewTab),
+                Action::NewTab,
+            ));
+            list.push(cmd(
+                icons::ARROWS_CLOCKWISE,
+                t("Reconnect"),
+                Some(S::Reconnect),
+                Action::Reconnect,
+            ));
+            list.push(cmd(
+                icons::BROOM,
+                t("Clear Scrollback"),
+                Some(S::ClearScrollback),
+                Action::ClearScrollback,
+            ));
         }
         list.extend([
-            Command {
-                icon: icons::SIDEBAR_SIMPLE,
-                label: t("Show/Hide Sidebar").into(),
-                shortcut: Some(S::Sidebar.label()),
-                action: Action::ToggleSidebar,
-            },
-            Command {
-                icon: icons::FOLDER_PLUS,
-                label: t("New Group").into(),
-                shortcut: None,
-                action: Action::NewGroup { parent: None },
-            },
-            Command {
-                icon: icons::DOWNLOAD_SIMPLE,
-                label: t("Import Connections…").into(),
-                shortcut: None,
-                action: Action::Import,
-            },
-            Command {
-                icon: icons::EXPORT,
-                label: t("Export Connections…").into(),
-                shortcut: Some(S::Export.label()),
-                action: Action::Export(ExportScope::All),
-            },
-            Command {
-                icon: icons::GEAR_SIX,
-                label: t("Settings…").into(),
-                shortcut: Some(S::Settings.label()),
-                action: Action::Settings,
-            },
-            Command {
-                icon: icons::KEYBOARD,
-                label: t("Keyboard Shortcuts").into(),
-                shortcut: None,
-                action: Action::Shortcuts,
-            },
-            Command {
-                icon: icons::ARROW_CIRCLE_UP,
-                label: t("Check for Updates…").into(),
-                shortcut: None,
-                action: Action::CheckForUpdates,
-            },
+            cmd(
+                icons::SIDEBAR_SIMPLE,
+                t("Show/Hide Sidebar"),
+                Some(S::Sidebar),
+                Action::ToggleSidebar,
+            ),
+            cmd(
+                icons::FOLDER_PLUS,
+                t("New Group"),
+                None,
+                Action::NewGroup { parent: None },
+            ),
+            cmd(
+                icons::DOWNLOAD_SIMPLE,
+                t("Import Connections…"),
+                None,
+                Action::Import,
+            ),
+            cmd(
+                icons::EXPORT,
+                t("Export Connections…"),
+                Some(S::Export),
+                Action::Export(ExportScope::All),
+            ),
+            cmd(
+                icons::GEAR_SIX,
+                t("Settings…"),
+                Some(S::Settings),
+                Action::Settings,
+            ),
+            cmd(
+                icons::KEYBOARD,
+                t("Keyboard Shortcuts"),
+                None,
+                Action::Shortcuts,
+            ),
+            cmd(
+                icons::ARROW_CIRCLE_UP,
+                t("Check for Updates…"),
+                None,
+                Action::CheckForUpdates,
+            ),
         ]);
         if has_tab {
-            for qc in &self.settings.quick_commands {
+            for (i, qc) in self.settings.quick_commands.iter().enumerate() {
                 let name = if qc.name.trim().is_empty() {
                     qc.command.clone()
                 } else {
@@ -1828,8 +1946,11 @@ impl TernaryShellApp {
                 list.push(Command {
                     icon: icons::LIGHTNING,
                     label: tf("Run: {}", &[&name]),
-                    shortcut: None,
+                    // ⌃1–⌃9 run the first nine (macOS).
+                    shortcut: (cfg!(target_os = "macos") && i < 9).then(|| format!("⌃{}", i + 1)),
                     action: Action::SendQuickCommand(qc.id),
+                    detail: Some(qc.command.lines().next().unwrap_or("").to_string()),
+                    quick: true,
                 });
             }
         }
