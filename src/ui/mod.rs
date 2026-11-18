@@ -7,6 +7,7 @@ pub mod dialogs;
 pub mod editor;
 pub mod file_editor;
 pub mod fonts;
+pub mod forms;
 pub mod icon_codes;
 pub mod icons;
 pub mod keys;

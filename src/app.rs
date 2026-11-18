@@ -450,6 +450,42 @@ impl TernaryShellApp {
                     self.open_tab(ctx, b);
                 }
             }
+            // `edit <name>[ server|login|network|session]`: the editor on that section.
+            "edit" => {
+                let (name, section) = arg.rsplit_once(' ').unwrap_or((arg, ""));
+                if let Some(b) = self
+                    .store
+                    .bookmarks
+                    .iter()
+                    .find(|b| b.display_name() == name)
+                    .cloned()
+                {
+                    use crate::ui::editor::Section;
+                    let s = match section {
+                        "login" => Some(Section::Login),
+                        "network" => Some(Section::Network),
+                        "session" => Some(Section::Session),
+                        _ => None,
+                    };
+                    self.editor = Some(Editor::new(b, false).with_section(s));
+                }
+            }
+            // `new-in <group>`: New Connection in that group.
+            "new-in" => {
+                let group = self
+                    .store
+                    .groups
+                    .iter()
+                    .find(|g| g.name == arg)
+                    .map(|g| g.id);
+                self.run_action(ctx, Action::NewBookmark { group });
+            }
+            // `settings-search <text>`: search the open Settings.
+            "settings-search" => {
+                if let Some(crate::ui::dialogs::Dialog::Settings(d)) = &mut self.dialog {
+                    d.set_query(arg);
+                }
+            }
             "search" => self.sidebar.search = arg.to_string(),
             "import" => self.import_file(PathBuf::from(arg)),
             // `export-to <path>`: everything, without the save panel.
@@ -459,11 +495,17 @@ impl TernaryShellApp {
                 let action = match arg {
                     "quick" => Some(Action::QuickConnect),
                     "settings" => Some(Action::Settings),
-                    "settings-appearance" | "settings-terminal" | "settings-quick" => {
+                    "settings-appearance"
+                    | "settings-terminal"
+                    | "settings-quick"
+                    | "settings-general"
+                    | "settings-shortcuts" => {
                         use crate::ui::dialogs::SettingsTab;
                         self.settings_page = Some(match arg {
                             "settings-appearance" => SettingsTab::Appearance,
                             "settings-terminal" => SettingsTab::Terminal,
+                            "settings-general" => SettingsTab::General,
+                            "settings-shortcuts" => SettingsTab::Shortcuts,
                             _ => SettingsTab::QuickCommands,
                         });
                         Some(Action::Settings)
@@ -1598,6 +1640,26 @@ impl TernaryShellApp {
             match editor.show(ctx, &self.store) {
                 EditorResult::Open => {}
                 EditorResult::Cancel => self.editor = None,
+                EditorResult::Test(bookmark) => {
+                    // "Test Connection": connect and log in, without saving anything.
+                    let jumps = self
+                        .store
+                        .jump_chain(&bookmark)
+                        .map(|c| c.into_iter().cloned().collect())
+                        .unwrap_or_default();
+                    let spec = crate::ssh::session::ConnectSpec {
+                        bookmark,
+                        jumps,
+                        keepalive_secs: self.settings.keepalive_secs,
+                        known_hosts: paths::known_hosts_file(),
+                        save_secrets: false,
+                    };
+                    editor.start_test(crate::ssh::session::Connection::start(
+                        self.rt.handle(),
+                        ctx.clone(),
+                        spec,
+                    ));
+                }
                 EditorResult::Save {
                     bookmark,
                     set,
