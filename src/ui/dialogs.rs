@@ -19,7 +19,7 @@ use crate::bookmarks::transfer::{
     ExportScope, ImportPlan, ItemStatus, MatchedBy, Resolution, SourceKind,
 };
 use crate::bookmarks::{BookmarkStore, search};
-use crate::i18n::{Language, t, tf};
+use crate::i18n::{Language, t, tf, tn};
 use crate::settings::{CursorStyle, FontChoice, QuickCommand, Settings, ThemeMode};
 use crate::term::scheme::{SCHEMES, Scheme};
 
@@ -1421,18 +1421,15 @@ impl Dialog {
                 let modal = style::modal(ctx, egui::Id::new("group-name")).show(ctx, |ui| {
                     ui.set_width(380.0);
                     ui.spacing_mut().item_spacing.y = 0.0;
+                    // Redesign 3.1: a title only; a subgroup names its parent in it.
                     let (title, button) = match target {
-                        GroupTarget::New { .. } => (t("New Group"), t("Create")),
-                        GroupTarget::Rename(_) => (t("Rename Group"), t("Rename")),
+                        GroupTarget::New { .. } if !context.is_empty() => {
+                            (format!("{} {}", t("New Group"), context), t("Create"))
+                        }
+                        GroupTarget::New { .. } => (t("New Group").to_string(), t("Create")),
+                        GroupTarget::Rename(_) => (t("Rename Group").to_string(), t("Rename")),
                     };
-                    let sub = (!context.is_empty()).then_some(context.as_str());
-                    kit::dialog_header(
-                        ui,
-                        Some((icons::FOLDER_PLUS, Tone::Neutral)),
-                        title,
-                        sub,
-                        false,
-                    );
+                    kit::dialog_header(ui, None, &title, None, false);
                     kit::dialog_body(ui, |ui| {
                         let r = ui.add(style::input(name).hint_text(t("Group name")));
                         if std::mem::take(focus) {
@@ -1914,9 +1911,11 @@ impl ImportDialog {
         match result.and_then(|plain| self.plan.attach_credentials(&plain)) {
             Ok(n) => {
                 self.unlock_message = Some((
-                    tf(
-                        "Unlocked credentials for {} connection(s).",
-                        &[&n.to_string()],
+                    tn(
+                        "Unlocked credentials for {} connection.",
+                        "Unlocked credentials for {} connections.",
+                        n,
+                        &[],
                     ),
                     false,
                 ));
@@ -2048,7 +2047,7 @@ impl ImportDialog {
                 let missing = self.plan.keys_missing();
                 if missing > 0 {
                     ui.add_space(12.0);
-                    kit::callout(ui, icons::WARNING, Tone::Warn, &tf("{} connection(s) log in with a pasted key that this file doesn't include. Paste the key again in Edit Connection before connecting (or choose a key file).", &[&missing.to_string()]));
+                    kit::callout(ui, icons::WARNING, Tone::Warn, &tn("{} connection logs in with a pasted key that this file doesn't include. Paste the key again in Edit Connection before connecting (or choose a key file).", "{} connections log in with a pasted key that this file doesn't include. Paste the key again in Edit Connection before connecting (or choose a key file).", missing, &[]));
                 }
                 ui.add_space(14.0);
                 // The list, grouped.

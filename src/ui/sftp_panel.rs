@@ -15,7 +15,7 @@ use eframe::egui::{
 use russh_sftp::client::SftpSession;
 use tokio::sync::oneshot;
 
-use crate::i18n::{t, tf};
+use crate::i18n::{t, tf, tn};
 use crate::paths;
 use crate::sftp::entry::{self, FileEntry, SortKey, remote_join, remote_parent};
 use crate::sftp::remote::{self, Sftp};
@@ -1668,46 +1668,65 @@ impl SftpPanel {
         );
         let edit_id = egui::Id::new(("sftp-path", uid, is_remote));
         if side.editing {
-            let painter = ui.painter();
-            painter.rect_filled(path_r, CornerRadius::same(style::RADIUS), p.field);
+            // The same bar as the breadcrumb (icon, then the path where the crumbs start), with
+            // a focus ring and a small "go" arrow on the right; Enter goes, Esc cancels.
+            let cy = path_r.center().y;
+            ui.painter()
+                .rect_filled(path_r, CornerRadius::same(style::RADIUS), p.field);
             style::focus_halo(ui, path_r, style::RADIUS);
-            let kbd_r = egui::Rect::from_min_size(
-                pos2(path_r.right() - 4.0 - 20.0, path_r.center().y - 9.0),
-                vec2(20.0, 18.0),
-            );
-            let painter = ui.painter();
-            painter.rect_stroke(
-                kbd_r,
-                CornerRadius::same(4),
-                Stroke::new(1.0, p.border),
-                StrokeKind::Inside,
-            );
-            painter.text(
-                kbd_r.center(),
+            ui.painter().text(
+                pos2(path_r.left() + 8.0 + 7.0, cy),
                 Align2::CENTER_CENTER,
-                "↩",
-                style::regular(style::MICRO),
+                if is_remote {
+                    icons::HARD_DRIVES
+                } else {
+                    icons::LAPTOP
+                },
+                style::icon_font(14.0),
                 p.text_faint,
             );
+            let go_r = egui::Rect::from_center_size(
+                pos2(path_r.right() - 4.0 - 10.0, cy),
+                vec2(20.0, 20.0),
+            );
+            let go = ui
+                .interact(go_r, edit_id.with("go"), Sense::click())
+                .on_hover_text(t("Go to this folder"));
+            if go.hovered() {
+                ui.painter()
+                    .rect_filled(go_r, CornerRadius::same(5), p.hover);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            ui.painter().text(
+                go_r.center(),
+                Align2::CENTER_CENTER,
+                icons::ARROW_ELBOW_DOWN_LEFT,
+                style::icon_font(13.0),
+                if go.hovered() { p.text } else { p.text_faint },
+            );
             let field_r = egui::Rect::from_min_max(
-                pos2(path_r.left() + 2.0, path_r.top()),
-                pos2(kbd_r.left() - 4.0, path_r.bottom()),
+                pos2(path_r.left() + 8.0 + 14.0 + 4.0, path_r.top()),
+                pos2(go_r.left() - 4.0, path_r.bottom()),
             );
             let mut field_ui = ui.new_child(egui::UiBuilder::new().max_rect(field_r));
-            let r = field_ui.add(
+            let r = field_ui.add_sized(
+                field_r.size(),
                 egui::TextEdit::singleline(&mut side.path_edit)
                     .id(edit_id)
-                    .frame(egui::Frame::NONE)
-                    .margin(egui::Margin::symmetric(6, 6))
+                    .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(5, 0)))
                     .font(style::mono(12.0))
-                    .desired_width(field_r.width()),
+                    .vertical_align(egui::Align::Center),
             );
             if !r.has_focus() && !r.lost_focus() {
                 r.request_focus();
             }
             if r.lost_focus() {
                 side.editing = false;
-                if field_ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                // Pressing the arrow takes the focus from the field before it counts as a click.
+                let on_go = ui
+                    .input(|i| i.pointer.interact_pos())
+                    .is_some_and(|pos| go_r.contains(pos));
+                if on_go || field_ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     actions.push(SideAction::Cd(is_remote, side.path_edit.clone()));
                 } else {
                     side.path_edit = side.cwd.clone();
@@ -3433,10 +3452,18 @@ impl SftpPanel {
                     items,
                 } => {
                     ui.set_width(400.0);
-                    let title = tf(
-                        "Delete {} item(s) on {}?",
-                        &[&names.len().to_string(), &where_(*remote)],
-                    );
+                    let title = match names.as_slice() {
+                        [one] => tf("Delete “{}” on {}?", &[one, &where_(*remote)]),
+                        _ => tf(
+                            "Delete {} items on {}?",
+                            &[&names.len().to_string(), &where_(*remote)],
+                        ),
+                    };
+                    // Folders take everything in them: say so only when one may be among them.
+                    let folders = items.len() < names.len()
+                        || items
+                            .iter()
+                            .any(|i| i.kind == icons::FileKind::Folder || i.meta.is_empty());
                     dialog_head(ui, &title,
                         Some(&tf("in {}", &[&short_dir(dir, *remote)])),
                     );
@@ -3447,7 +3474,11 @@ impl SftpPanel {
                             ui,
                             icons::WARNING,
                             Tone::Warn,
-                            t("Folders are deleted with everything in them. This can't be undone."),
+                            if folders {
+                                t("Folders are deleted with everything in them. This can't be undone.")
+                            } else {
+                                t("This can't be undone.")
+                            },
                         );
                     });
                 }
@@ -3497,7 +3528,10 @@ impl SftpPanel {
                     ..
                 } => {
                     ui.set_width(420.0);
-                    let title = tf("Replace {} existing item(s)?", &[&conflicts.len().to_string()]);
+                    let title = match conflicts.as_slice() {
+                        [one] => tf("Replace “{}”?", &[one]),
+                        _ => tf("Replace {} existing items?", &[&conflicts.len().to_string()]),
+                    };
                     let sub = tf("The files on {} will be overwritten.", &[&where_(*upload)]);
                     dialog_head(ui, &title, Some(&sub));
                     dialog_body(ui, |ui| {
@@ -3892,25 +3926,14 @@ struct Outcome {
 }
 
 impl Outcome {
-    /// "Uploaded 2 file(s)." or, with failures, "Uploaded 1 file(s). 1 transfer(s) failed."
+    /// "Uploaded 2 files." or, with failures, "Uploaded 1 file. 1 transfer failed."
     fn title(&self) -> String {
-        let files = self.done.to_string();
-        let mut text = match (self.uploads, self.downloads) {
-            (true, false) => tf("Uploaded {} file(s).", &[&files]),
-            (false, true) => tf("Downloaded {} file(s).", &[&files]),
-            _ => tf("Transferred {} file(s).", &[&files]),
-        };
-        if self.failed > 0 {
-            text = if self.done == 0 {
-                tf("{} transfer(s) failed.", &[&self.failed.to_string()])
-            } else {
-                format!(
-                    "{text} {}",
-                    tf("{} transfer(s) failed.", &[&self.failed.to_string()])
-                )
-            };
-        }
-        text
+        done_text(
+            self.uploads,
+            self.downloads,
+            self.done as u64,
+            self.failed as u64,
+        )
     }
 
     /// "4 done · 1 failed".
@@ -5214,14 +5237,33 @@ fn capitalized(s: &str) -> String {
         .unwrap_or_default()
 }
 
-/// "Uploading 7 file(s)" (files inside folders count one by one).
+/// "Uploading 7 files" (files inside folders count one by one).
 pub fn summary_title(s: &Summary) -> String {
-    let n = s.files_total.to_string();
+    let n = s.files_total;
     match (s.uploads > 0, s.downloads > 0) {
-        (true, false) => tf("Uploading {} file(s)", &[&n]),
-        (false, true) => tf("Downloading {} file(s)", &[&n]),
-        _ => tf("Transferring {} file(s)", &[&n]),
+        (true, false) => tn("Uploading {} file", "Uploading {} files", n, &[]),
+        (false, true) => tn("Downloading {} file", "Downloading {} files", n, &[]),
+        _ => tn("Transferring {} file", "Transferring {} files", n, &[]),
     }
+}
+
+/// "Uploaded 2 files.", "Uploaded 1 file. 1 transfer failed." or, when nothing got through,
+/// only "2 transfers failed."
+fn done_text(uploads: bool, downloads: bool, done: u64, failed: u64) -> String {
+    let failed_text = tn("{} transfer failed.", "{} transfers failed.", failed, &[]);
+    if failed > 0 && done == 0 {
+        return failed_text;
+    }
+    let mut text = match (uploads, downloads) {
+        (true, false) => tn("Uploaded {} file.", "Uploaded {} files.", done, &[]),
+        (false, true) => tn("Downloaded {} file.", "Downloaded {} files.", done, &[]),
+        _ => tn("Transferred {} file.", "Transferred {} files.", done, &[]),
+    };
+    if failed > 0 {
+        text.push(' ');
+        text.push_str(&failed_text);
+    }
+    text
 }
 
 /// "56% · 236 of 419 MB · 12.4 MB/s · about 1 min left"
@@ -5263,15 +5305,13 @@ pub fn summary_detail(s: &Summary) -> String {
 
 /// What to say when a batch has finished (nothing if it was all cancelled).
 fn batch_notice(s: &Summary) -> Option<(String, bool)> {
-    let files = s.files_done.to_string();
-    let mut text = match (s.uploads > 0, s.downloads > 0) {
-        (true, false) => tf("Uploaded {} file(s).", &[&files]),
-        (false, true) => tf("Downloaded {} file(s).", &[&files]),
-        _ => tf("Transferred {} file(s).", &[&files]),
-    };
+    let text = done_text(
+        s.uploads > 0,
+        s.downloads > 0,
+        s.files_done,
+        s.failed as u64,
+    );
     if s.failed > 0 {
-        text.push(' ');
-        text.push_str(&tf("{} transfer(s) failed.", &[&s.failed.to_string()]));
         return Some((text, true));
     }
     (s.done > 0).then_some((text, false))

@@ -17,7 +17,7 @@ use super::model::{Bookmark, Group};
 use super::store::BookmarkStore;
 use super::{electerm, ssh_config};
 use crate::crypto::{self, EncryptedBlob};
-use crate::i18n::{t, tf};
+use crate::i18n::{t, tf, tn};
 use crate::secrets::SecretSet;
 
 /// 2: SSH agent logins, jump hosts and port forwards.
@@ -579,9 +579,11 @@ impl ImportPlan {
             }
         }
         if mismatched > 0 {
-            self.warnings.push(tf(
-                "{} saved credential(s) were left out: the connection's address in the file differs from the address they were saved for.",
-                &[&mismatched.to_string()],
+            self.warnings.push(tn(
+                "{} saved credential was left out: the connection's address in the file differs from the address it was saved for.",
+                "{} saved credentials were left out: the connection's address in the file differs from the address they were saved for.",
+                mismatched,
+                &[],
             ));
         }
         if legacy {

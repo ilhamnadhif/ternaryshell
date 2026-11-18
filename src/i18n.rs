@@ -74,6 +74,19 @@ pub fn tf(en: &'static str, args: &[&str]) -> String {
     out
 }
 
+/// `tf` with the count as the first `{}`: `one` when it is 1, `many` otherwise (Indonesian
+/// uses the same words for both). `tn("{} file", "{} files", n, &[])`.
+pub fn tn<N>(one: &'static str, many: &'static str, n: N, args: &[&str]) -> String
+where
+    N: ToString + PartialEq + From<u8>,
+{
+    let count = n.to_string();
+    let mut all: Vec<&str> = Vec::with_capacity(args.len() + 1);
+    all.push(&count);
+    all.extend_from_slice(args);
+    tf(if n == N::from(1) { one } else { many }, &all)
+}
+
 fn table() -> &'static HashMap<&'static str, &'static str> {
     static TABLE: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
     TABLE.get_or_init(|| ID.iter().copied().collect())
@@ -155,6 +168,7 @@ const ID: &[(&str, &str)] = &[
     ),
     ("Choose file…", "Pilih file…"),
     ("Clear scrollback", "Hapus scrollback"),
+    ("Go to this folder", "Buka folder ini"),
     ("Click to type a path", "Klik untuk mengetik path"),
     ("Close Other Tabs", "Tutup Tab Lain"),
     ("Close {}?", "Tutup {}?"),
@@ -172,7 +186,8 @@ const ID: &[(&str, &str)] = &[
     ("Dec", "Des"),
     ("Delete Group", "Hapus Grup"),
     ("Delete group “{}”?", "Hapus grup “{}”?"),
-    ("Delete {} item(s) on {}?", "Hapus {} item di {}?"),
+    ("Delete “{}” on {}?", "Hapus “{}” di {}?"),
+    ("Delete {} items on {}?", "Hapus {} item di {}?"),
     ("Delete “{}”?", "Hapus “{}”?"),
     ("Discard changes to {}?", "Buang perubahan pada {}?"),
     ("Don't show again for {}", "Jangan tampilkan lagi untuk {}"),
@@ -346,9 +361,10 @@ const ID: &[(&str, &str)] = &[
     ("Reload theirs", "Muat versi mereka"),
     ("Remote folder", "Folder remote"),
     (
-        "Replace {} existing item(s)?",
+        "Replace {} existing items?",
         "Ganti {} item yang sudah ada?",
     ),
+    ("Replace “{}”?", "Ganti “{}”?"),
     ("Retry", "Coba lagi"),
     (
         "Run off = the command is pasted, so you can edit it before pressing Enter.",
@@ -1096,7 +1112,11 @@ const ID: &[(&str, &str)] = &[
     ("Unknown host", "Host tidak dikenal"),
     ("Unlock", "Buka"),
     (
-        "Unlocked credentials for {} connection(s).",
+        "Unlocked credentials for {} connection.",
+        "Kredensial untuk {} koneksi berhasil dibuka.",
+    ),
+    (
+        "Unlocked credentials for {} connections.",
         "Kredensial untuk {} koneksi berhasil dibuka.",
     ),
     (
@@ -1181,7 +1201,11 @@ const ID: &[(&str, &str)] = &[
     ("{} already exists.", "{} sudah ada."),
     ("{} connections", "{} koneksi"),
     (
-        "{} connection(s) log in with a pasted key that this file doesn't include. Paste the key again in Edit Connection before connecting (or choose a key file).",
+        "{} connection logs in with a pasted key that this file doesn't include. Paste the key again in Edit Connection before connecting (or choose a key file).",
+        "{} koneksi login dengan key yang di-paste, tapi key-nya tidak ada di file ini. Paste lagi key-nya di Edit Koneksi sebelum konek (atau pilih file key).",
+    ),
+    (
+        "{} connections log in with a pasted key that this file doesn't include. Paste the key again in Edit Connection before connecting (or choose a key file).",
         "{} koneksi login dengan key yang di-paste, tapi key-nya tidak ada di file ini. Paste lagi key-nya di Edit Koneksi sebelum konek (atau pilih file key).",
     ),
     ("{} conflict(s). For all:", "{} konflik. Untuk semua:"),
@@ -1190,7 +1214,11 @@ const ID: &[(&str, &str)] = &[
         "{} koneksi terbuka dan akan ditutup.",
     ),
     (
-        "{} credential(s) could not be saved to {}.",
+        "{} credential could not be saved to {}.",
+        "{} kredensial tidak bisa disimpan ke {}.",
+    ),
+    (
+        "{} credentials could not be saved to {}.",
         "{} kredensial tidak bisa disimpan ke {}.",
     ),
     (
@@ -1330,7 +1358,11 @@ const ID: &[(&str, &str)] = &[
     ),
     ("{} is already being transferred.", "{} sedang ditransfer."),
     (
-        "{} saved credential(s) were left out: the connection's address in the file differs from the address they were saved for.",
+        "{} saved credential was left out: the connection's address in the file differs from the address it was saved for.",
+        "{} kredensial tersimpan tidak diikutkan: alamat koneksi di file berbeda dengan alamat saat kredensial disimpan.",
+    ),
+    (
+        "{} saved credentials were left out: the connection's address in the file differs from the address they were saved for.",
         "{} kredensial tersimpan tidak diikutkan: alamat koneksi di file berbeda dengan alamat saat kredensial disimpan.",
     ),
     ("{} skipped", "{} dilewati"),
@@ -1562,21 +1594,28 @@ const ID: &[(&str, &str)] = &[
         "Choose files on {} to upload into this folder",
         "Pilih file di {} untuk di-upload ke folder ini",
     ),
-    ("Downloaded {} file(s).", "{} file selesai di-download."),
-    ("Downloading {} file(s)", "Mengunduh {} file"),
+    ("Downloaded {} file.", "{} file selesai di-download."),
+    ("Downloaded {} files.", "{} file selesai di-download."),
+    ("Downloading {} file", "Mengunduh {} file"),
+    ("Downloading {} files", "Mengunduh {} file"),
     ("Files…", "File…"),
     ("Folders…", "Folder…"),
     ("Into the local folder {}", "Ke folder lokal {}"),
     ("Into the remote folder {}", "Ke folder remote {}"),
-    ("Transferred {} file(s).", "{} file selesai ditransfer."),
-    ("Transferring {} file(s)", "Mentransfer {} file"),
+    ("Transferred {} file.", "{} file selesai ditransfer."),
+    ("Transferred {} files.", "{} file selesai ditransfer."),
+    ("Transferring {} file", "Mentransfer {} file"),
+    ("Transferring {} files", "Mentransfer {} file"),
     ("Upload to {}", "Unggah ke {}"),
-    ("Uploaded {} file(s).", "{} file selesai di-upload."),
-    ("Uploading {} file(s)", "Mengunggah {} file"),
+    ("Uploaded {} file.", "{} file selesai di-upload."),
+    ("Uploaded {} files.", "{} file selesai di-upload."),
+    ("Uploading {} file", "Mengunggah {} file"),
+    ("Uploading {} files", "Mengunggah {} file"),
     ("Upload…", "Unggah…"),
     ("about {} left", "sisa sekitar {}"),
     ("{} done", "{} selesai"),
-    ("{} transfer(s) failed.", "{} transfer gagal."),
+    ("{} transfer failed.", "{} transfer gagal."),
+    ("{} transfers failed.", "{} transfer gagal."),
     (
         "⌘-click or ⇧-click to select several",
         "⌘-klik atau ⇧-klik untuk memilih beberapa",
@@ -2405,8 +2444,20 @@ const ID: &[(&str, &str)] = &[
         "Hanya grupnya yang dihapus. {} koneksi di dalamnya naik satu tingkat.",
     ),
     (
-        "Only the group goes. Its {} connection(s) and subgroups move up one level.",
+        "Only the group goes. Its {} connections and subgroups move up one level.",
         "Hanya grupnya yang dihapus. {} koneksi dan subgrup di dalamnya naik satu tingkat.",
+    ),
+    (
+        "Only the group goes. Its connection and subgroups move up one level.",
+        "Hanya grupnya yang dihapus. Koneksi dan subgrup di dalamnya naik satu tingkat.",
+    ),
+    (
+        "Only the group goes. Its subgroups move up one level.",
+        "Hanya grupnya yang dihapus. Subgrup di dalamnya naik satu tingkat.",
+    ),
+    (
+        "This can't be undone.",
+        "Tindakan ini tidak bisa dibatalkan.",
     ),
     ("Delete the group “{}”?", "Hapus grup “{}”?"),
     ("1 session: {}", "1 sesi: {}"),
@@ -2502,10 +2553,19 @@ mod tests {
         );
     }
 
-    /// Finds string literals passed directly to `t(` or `tf(`.
+    #[test]
+    fn plural_strings_are_found_and_chosen() {
+        let found =
+            extract_literals("x = tn(\n    \"{} file\",\n    \"{} files\",\n    n,\n    &[],\n);");
+        assert_eq!(found, vec!["{} file".to_string(), "{} files".to_string()]);
+        assert_eq!(tn("{} file", "{} files", 1usize, &[]), "1 file");
+        assert_eq!(tn("{} file", "{} files", 3u64, &[]), "3 files");
+    }
+
+    /// Finds string literals passed directly to `t(` or `tf(`, and both literals of `tn(`.
     fn extract_literals(text: &str) -> Vec<String> {
         let mut out = Vec::new();
-        for pat in ["t(", "tf("] {
+        for pat in ["t(", "tf(", "tn("] {
             let mut rest = text;
             while let Some(pos) = rest.find(pat) {
                 let prev = rest[..pos].chars().last();
@@ -2533,6 +2593,16 @@ mod tests {
                     }
                 }
                 out.push(lit);
+                // `tn(one, many, …)`: the plural follows the singular.
+                if pat == "tn(" {
+                    let after = chars.as_str().trim_start();
+                    if let Some(next) = after.strip_prefix(',').map(str::trim_start)
+                        && let Some(body) = next.strip_prefix('"')
+                        && let Some(end) = body.find('"')
+                    {
+                        out.push(body[..end].to_string());
+                    }
+                }
             }
         }
         out

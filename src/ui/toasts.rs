@@ -337,7 +337,7 @@ fn toast_ui(ui: &mut Ui, toast: &Toast, now: Instant) -> (egui::Response, Option
     (resp, clicked, closed)
 }
 
-/// "Uploaded 4 file(s). 1 transfer(s) failed." → title and detail; short messages stay whole.
+/// "Uploaded 4 files. 1 transfer failed." → title and detail; short messages stay whole.
 fn split_message(msg: &str) -> (String, Option<String>) {
     if let Some((a, b)) = msg.split_once(": ")
         && a.len() <= 48
@@ -383,10 +383,10 @@ mod tests {
     #[test]
     fn messages_split_into_title_and_detail() {
         assert_eq!(
-            split_message("Uploaded 4 file(s). 1 transfer(s) failed."),
+            split_message("Uploaded 4 files. 1 transfer failed."),
             (
-                "Uploaded 4 file(s).".to_string(),
-                Some("1 transfer(s) failed.".to_string())
+                "Uploaded 4 files.".to_string(),
+                Some("1 transfer failed.".to_string())
             )
         );
         assert_eq!(split_message("Saved."), ("Saved.".to_string(), None));

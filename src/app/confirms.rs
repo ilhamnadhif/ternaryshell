@@ -180,8 +180,11 @@ impl TernaryShellApp {
                 "Only the group goes. Its {} connections move up one level.",
                 &[&n.to_string()],
             ),
+            (0, _) => t("Only the group goes. Its subgroups move up one level.").to_string(),
+            (1, _) => t("Only the group goes. Its connection and subgroups move up one level.")
+                .to_string(),
             (n, _) => tf(
-                "Only the group goes. Its {} connection(s) and subgroups move up one level.",
+                "Only the group goes. Its {} connections and subgroups move up one level.",
                 &[&n.to_string()],
             ),
         };
@@ -343,7 +346,7 @@ impl TernaryShellApp {
             "about" => self.about = Some(Default::default()),
             "toasts" => {
                 self.toasts.add(
-                    Toast::new(Kind::Ok, "Downloaded 4 file(s).")
+                    Toast::new(Kind::Ok, "Downloaded 4 files.")
                         .detail("Into the local folder `~/Downloads/web-01`")
                         .button(
                             crate::platform::reveal_label(),

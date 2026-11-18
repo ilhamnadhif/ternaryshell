@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::bookmarks::store::NewerSchema;
 use crate::bookmarks::transfer::{self, ExportScope, ImportPlan};
 use crate::bookmarks::{Auth, Bookmark, BookmarkStore, ssh_config};
-use crate::i18n::{self, Language, t, tf};
+use crate::i18n::{self, Language, t, tf, tn};
 use crate::paths;
 use crate::secrets::{self, SecretKind};
 use crate::settings::{FontChoice, Settings, ThemeMode};
@@ -1204,7 +1204,7 @@ impl TernaryShellApp {
                     .unwrap_or_default();
                 self.dialog = Some(Dialog::GroupName {
                     target: GroupTarget::Rename(id),
-                    context: name.clone(),
+                    context: String::new(),
                     name,
                     focus: true,
                 });
@@ -1641,9 +1641,11 @@ impl TernaryShellApp {
             ],
         ));
         if failed > 0 {
-            self.toasts.error(tf(
-                "{} credential(s) could not be saved to {}.",
-                &[&failed.to_string(), crate::platform::keychain()],
+            self.toasts.error(tn(
+                "{} credential could not be saved to {}.",
+                "{} credentials could not be saved to {}.",
+                failed,
+                &[crate::platform::keychain()],
             ));
         }
     }
