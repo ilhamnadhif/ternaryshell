@@ -10,8 +10,10 @@ use eframe::egui::{
 use uuid::Uuid;
 
 use super::actions::Action;
+use super::confirm::{self, ConfirmExtra, ConfirmRow};
 use super::keys::Shortcut as S;
 use super::style::{self, Tone};
+pub use super::toasts::Toasts;
 use super::{fonts, icons, kit};
 use crate::bookmarks::transfer::{
     ExportScope, ImportPlan, ItemStatus, MatchedBy, Resolution, SourceKind,
@@ -574,14 +576,16 @@ pub enum Dialog {
     Confirm {
         title: String,
         message: String,
-        /// What is affected, one line each with its icon (running programs, transfers, edits).
-        details: Vec<(&'static str, String)>,
+        /// What is affected, one row each (running programs, transfers, edits, what is kept).
+        details: Vec<ConfirmRow>,
         button: String,
         action: ConfirmAction,
         /// When it first appeared (an Enter typed just before must not confirm it).
         shown_at: Option<Instant>,
         /// "Don't ask again" (ticked or not), for closing a connected tab.
         dont_ask: Option<bool>,
+        /// The header line, the before → after tree, the keys.
+        extra: Box<ConfirmExtra>,
     },
     GroupName {
         target: GroupTarget,
@@ -606,6 +610,8 @@ pub enum DialogResult {
     Import(Box<ImportPlan>),
     /// A button in a dialog asked for an app action (Settings → Check Now).
     Run(Action),
+    /// A link in a confirmation ("Review"): close it and run the action.
+    RunAndClose(Action),
 }
 
 /// For dialogs holding typed input: only Esc closes them, not a click beside the dialog.
@@ -614,35 +620,56 @@ pub fn escape_only<T>(ctx: &egui::Context, modal: &egui::ModalResponse<T>) -> bo
 }
 
 pub fn confirm(title: &str, message: String, button: &str, action: ConfirmAction) -> Dialog {
-    confirm_details(title, message, Vec::new(), button, action)
+    confirm_details(title, message, Vec::<ConfirmRow>::new(), button, action)
 }
 
 /// A confirmation listing what is affected.
 pub fn confirm_details(
     title: &str,
     message: String,
-    details: Vec<(&'static str, String)>,
+    details: Vec<impl Into<ConfirmRow>>,
     button: &str,
     action: ConfirmAction,
 ) -> Dialog {
-    Dialog::Confirm {
-        title: title.into(),
+    confirm_rows(
+        title,
         message,
-        details,
-        button: button.into(),
+        details.into_iter().map(Into::into).collect(),
+        button,
         action,
-        shown_at: None,
-        dont_ask: None,
-    }
+        ConfirmExtra::default(),
+        false,
+    )
 }
 
 /// The question before closing a connected tab, with "Don't ask again".
 pub fn confirm_close(
     title: &str,
     message: String,
-    details: Vec<(&'static str, String)>,
+    details: Vec<impl Into<ConfirmRow>>,
     button: &str,
     action: ConfirmAction,
+) -> Dialog {
+    confirm_rows(
+        title,
+        message,
+        details.into_iter().map(Into::into).collect(),
+        button,
+        action,
+        ConfirmExtra::default(),
+        true,
+    )
+}
+
+/// A confirmation with everything: rows, the header line or tree, and "Don't ask again".
+pub fn confirm_rows(
+    title: &str,
+    message: String,
+    details: Vec<ConfirmRow>,
+    button: &str,
+    action: ConfirmAction,
+    extra: ConfirmExtra,
+    dont_ask: bool,
 ) -> Dialog {
     Dialog::Confirm {
         title: title.into(),
@@ -651,7 +678,8 @@ pub fn confirm_close(
         button: button.into(),
         action,
         shown_at: None,
-        dont_ask: Some(false),
+        dont_ask: dont_ask.then_some(false),
+        extra: Box::new(extra),
     }
 }
 
@@ -671,12 +699,13 @@ impl Dialog {
                 action,
                 shown_at,
                 dont_ask,
+                extra,
             } => {
                 let mut result = DialogResult::Open;
                 // Enter confirms only when pressed (not auto-repeated, no modifiers) once the
                 // dialog has been up for a moment, and only while it is on top.
                 let settled = shown_at.get_or_insert_with(Instant::now).elapsed()
-                    >= Duration::from_millis(300);
+                    >= Duration::from_millis(400);
                 let id = egui::Id::new("confirm");
                 let on_top = ctx.memory(|m| m.top_modal_layer().is_none_or(|l| l.id == id));
                 let enter = settled
@@ -686,76 +715,78 @@ impl Dialog {
                             matches!(e, egui::Event::Key { key: Key::Enter, pressed: true, repeat: false, modifiers, .. } if modifiers.is_none())
                         })
                     });
-                let destructive = matches!(
+                let destructive = !matches!(
                     action,
-                    ConfirmAction::DeleteBookmark(_) | ConfirmAction::DeleteGroup(_)
+                    ConfirmAction::Reconnect(_) | ConfirmAction::RestartForUpdate
                 );
-                let (icon, tone) = match action {
+                let (icon, tone) = extra.icon.unwrap_or(match action {
                     ConfirmAction::DeleteBookmark(_) => (icons::TRASH, Tone::Err),
-                    ConfirmAction::DeleteGroup(_) => (icons::FOLDER_SIMPLE, Tone::Err),
-                    ConfirmAction::CloseTab(_) => (icons::X, Tone::Neutral),
-                    ConfirmAction::Reconnect(_) => (icons::ARROWS_CLOCKWISE, Tone::Neutral),
-                    ConfirmAction::RestartForUpdate => (icons::ARROW_CIRCLE_UP, Tone::Neutral),
-                    ConfirmAction::Quit => (icons::SIGN_OUT, Tone::Warn),
-                };
+                    ConfirmAction::DeleteGroup(_) => (icons::FOLDER_MINUS, Tone::Warn),
+                    ConfirmAction::CloseTab(_) => (icons::TERMINAL_WINDOW, Tone::Neutral),
+                    ConfirmAction::Reconnect(_) => (icons::ARROWS_CLOCKWISE, Tone::Accent),
+                    ConfirmAction::RestartForUpdate => (icons::ARROW_CIRCLE_UP, Tone::Accent),
+                    ConfirmAction::Quit => (icons::POWER, Tone::Neutral),
+                });
+                let width = extra.width.unwrap_or(420.0);
                 let modal = style::modal(ctx, id).show(ctx, |ui| {
-                    ui.set_width(420.0);
+                    ui.set_width(width);
                     ui.spacing_mut().item_spacing.y = 0.0;
                     let p = style::pal(ui);
-                    kit::dialog_header(ui, Some((icon, tone)), title, None, false);
-                    kit::dialog_body(ui, |ui| {
-                        ui.spacing_mut().item_spacing.y = 0.0;
-                        if !details.is_empty() {
-                            details_card(ui, details);
+                    confirm::header(ui, icon, tone, title, extra.sub.as_ref());
+                    egui::Frame::NONE
+                        .inner_margin(egui::Margin {
+                            left: 20,
+                            right: 20,
+                            top: 14,
+                            bottom: 16,
+                        })
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.spacing_mut().item_spacing.y = 12.0;
                             if !message.is_empty() {
-                                ui.add_space(10.0);
+                                let mut job =
+                                    confirm::rich_job(message, style::BODY, p.text_muted, p.text);
+                                for s in &mut job.sections {
+                                    s.format.line_height = Some(20.0);
+                                }
+                                ui.add(egui::Label::new(job).wrap());
                             }
-                        }
-                        if !message.is_empty() {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(message.as_str()).color(p.text_muted),
+                            if let Some(tree) = &extra.tree {
+                                confirm::tree(ui, tree);
+                            }
+                            if !details.is_empty()
+                                && let Some(a) = confirm::rows_card(ui, details)
+                            {
+                                result = DialogResult::RunAndClose(a);
+                            }
+                            if let Some(ticked) = dont_ask {
+                                let r = style::checkbox(
+                                    ui,
+                                    ticked,
+                                    RichText::new(t("Don't ask again")).color(p.text_muted),
                                 )
-                                .wrap(),
-                            );
-                        }
-                        if let Some(ticked) = dont_ask {
-                            ui.add_space(12.0);
-                            let r = style::checkbox(
-                                ui,
-                                ticked,
-                                RichText::new(t("Don't ask again")).color(p.text),
-                            )
-                            .on_hover_text(t("You can turn it back on in Settings."));
-                            #[cfg(debug_assertions)]
-                            crate::devtest::record("confirm-dont-ask", r.rect);
-                            if r.changed() {
-                                r.surrender_focus();
+                                .on_hover_text(t("You can turn it back on in Settings."));
+                                #[cfg(debug_assertions)]
+                                crate::devtest::record("confirm-dont-ask", r.rect);
+                                if r.changed() {
+                                    r.surrender_focus();
+                                }
                             }
-                        }
-                    });
-                    kit::dialog_footer(
-                        ui,
-                        |_| {},
-                        |ui| {
-                            let ok = if destructive {
-                                kit::danger(ui, button.as_str())
-                            } else {
-                                kit::primary(ui, button.as_str())
-                            };
-                            #[cfg(debug_assertions)]
-                            crate::devtest::record("confirm-ok", ok.rect);
-                            if ok.clicked() || enter {
-                                result = DialogResult::Confirmed(action.clone());
-                            }
-                            let cancel = kit::secondary(ui, None, t("Cancel"));
-                            #[cfg(debug_assertions)]
-                            crate::devtest::record("confirm-cancel", cancel.rect);
-                            if cancel.clicked() {
-                                result = DialogResult::Close;
-                            }
-                        },
-                    );
+                        });
+                    let escape = extra.escape.as_deref().unwrap_or(t("to cancel"));
+                    let keys = extra.keys.as_deref().unwrap_or("↩");
+                    let (ok, cancel) =
+                        confirm::footer(ui, escape, button.as_str(), keys, destructive);
+                    #[cfg(debug_assertions)]
+                    crate::devtest::record("confirm-ok", ok.rect);
+                    #[cfg(debug_assertions)]
+                    crate::devtest::record("confirm-cancel", cancel.rect);
+                    if ok.clicked() || enter {
+                        result = DialogResult::Confirmed(action.clone());
+                    }
+                    if cancel.clicked() {
+                        result = DialogResult::Close;
+                    }
                 });
                 if modal.should_close() && matches!(result, DialogResult::Open) {
                     result = DialogResult::Close;
@@ -827,32 +858,6 @@ impl Dialog {
             Dialog::Settings(d) => d.show(ctx, settings),
         }
     }
-}
-
-/// A card listing what a confirmation affects: one line per item with its icon.
-fn details_card(ui: &mut Ui, details: &[(&'static str, String)]) {
-    let p = style::pal(ui);
-    egui::Frame::NONE
-        .fill(p.card)
-        .stroke(Stroke::new(1.0, p.border))
-        .corner_radius(CornerRadius::same(style::RADIUS_LG))
-        .inner_margin(egui::Margin::symmetric(12, 8))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.spacing_mut().item_spacing.y = 4.0;
-            for (icon, text) in details {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 8.0;
-                    kit::icon(ui, icon, 14.0, p.text_faint);
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(text).font(style::regular(12.5)).color(p.text),
-                        )
-                        .wrap(),
-                    );
-                });
-            }
-        });
 }
 
 // ----- export ---------------------------------------------------------------------------------
@@ -2401,165 +2406,4 @@ fn shortcuts(ui: &mut Ui, filter: &mut String) {
         });
         ui.add_space(16.0);
     }
-}
-
-// ----- toasts ---------------------------------------------------------------------------------
-
-struct Toast {
-    title: String,
-    detail: Option<String>,
-    error: bool,
-    action: Option<(String, Action)>,
-    at: Instant,
-}
-
-#[derive(Default)]
-pub struct Toasts {
-    items: Vec<Toast>,
-}
-
-impl Toasts {
-    pub fn info(&mut self, msg: impl Into<String>) {
-        let msg = msg.into();
-        #[cfg(debug_assertions)]
-        eprintln!("DEVTEST LOG: toast info: {msg}");
-        self.push(msg, None, false, None);
-    }
-
-    pub fn error(&mut self, msg: impl Into<String>) {
-        let msg = msg.into();
-        #[cfg(debug_assertions)]
-        eprintln!("DEVTEST LOG: toast error: {msg}");
-        self.push(msg, None, true, None);
-    }
-
-    /// A toast with a title, a line under it, and an action button.
-    pub fn push(
-        &mut self,
-        title: String,
-        detail: Option<String>,
-        error: bool,
-        action: Option<(String, Action)>,
-    ) {
-        // A message "Title: detail" or "Title. Detail" splits into its two lines.
-        let (title, detail) = match detail {
-            Some(d) => (title, Some(d)),
-            None => split_message(&title),
-        };
-        self.items.push(Toast {
-            title,
-            detail,
-            error,
-            action,
-            at: Instant::now(),
-        });
-    }
-
-    /// Draws the toasts in the bottom right corner of the canvas; returns an action clicked.
-    pub fn show(&mut self, ctx: &egui::Context) -> Option<Action> {
-        let now = Instant::now();
-        self.items.retain(|t| {
-            now.duration_since(t.at)
-                < Duration::from_secs(if t.error || t.action.is_some() { 9 } else { 5 })
-        });
-        if self.items.is_empty() {
-            return None;
-        }
-        ctx.request_repaint_after(Duration::from_millis(500));
-        let mut chosen = None;
-        egui::Area::new(egui::Id::new("toasts"))
-            // Above the status strip, inside the canvas.
-            .anchor(Align2::RIGHT_BOTTOM, vec2(-20.0, -44.0))
-            .order(egui::Order::Foreground)
-            .show(ctx, |ui| {
-                let mut dismiss = None;
-                let p = style::pal(ui);
-                ui.spacing_mut().item_spacing.y = 8.0;
-                for (i, toast) in self.items.iter().enumerate() {
-                    egui::Frame::NONE
-                        .fill(p.raised)
-                        .corner_radius(CornerRadius::same(style::RADIUS_LG))
-                        .shadow(ui.visuals().popup_shadow)
-                        .stroke(ui.visuals().window_stroke)
-                        .inner_margin(egui::Margin {
-                            left: 14,
-                            right: 12,
-                            top: 12,
-                            bottom: 12,
-                        })
-                        .show(ui, |ui| {
-                            ui.set_width(360.0 - 26.0);
-                            ui.horizontal_top(|ui| {
-                                ui.spacing_mut().item_spacing.x = 10.0;
-                                let (icon, color) = if toast.error {
-                                    (icons::WARNING_CIRCLE, p.err)
-                                } else {
-                                    (icons::CHECK_CIRCLE, p.ok)
-                                };
-                                kit::icon(ui, icon, 18.0, color);
-                                let text_w = ui.available_width() - 22.0 - 10.0;
-                                ui.allocate_ui_with_layout(
-                                    vec2(text_w, 10.0),
-                                    egui::Layout::top_down(egui::Align::Min),
-                                    |ui| {
-                                        ui.set_width(text_w);
-                                        ui.spacing_mut().item_spacing.y = 2.0;
-                                        ui.add(
-                                            egui::Label::new(
-                                                RichText::new(&toast.title)
-                                                    .font(style::medium(style::BODY))
-                                                    .color(p.text),
-                                            )
-                                            .wrap(),
-                                        );
-                                        if let Some(d) = &toast.detail {
-                                            ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(d)
-                                                        .font(style::regular(style::SMALL))
-                                                        .color(p.text_muted),
-                                                )
-                                                .wrap(),
-                                            );
-                                        }
-                                        if let Some((label, action)) = &toast.action {
-                                            ui.add_space(6.0);
-                                            if kit::secondary_sm(ui, None, label).clicked() {
-                                                chosen = Some(action.clone());
-                                                dismiss = Some(i);
-                                            }
-                                        }
-                                    },
-                                );
-                                if kit::icon_button_ex(ui, icons::X, t("Dismiss"), false, 22.0)
-                                    .clicked()
-                                {
-                                    dismiss = Some(i);
-                                }
-                            });
-                        });
-                }
-                if let Some(i) = dismiss {
-                    self.items.remove(i);
-                }
-            });
-        chosen
-    }
-}
-
-/// "Uploaded 4 file(s). 1 transfer(s) failed." → title and detail; short messages stay whole.
-fn split_message(msg: &str) -> (String, Option<String>) {
-    if let Some((a, b)) = msg.split_once(": ")
-        && a.len() <= 48
-        && !b.is_empty()
-    {
-        return (a.to_string(), Some(b.to_string()));
-    }
-    if let Some((a, b)) = msg.split_once(". ")
-        && a.len() <= 60
-        && !b.trim().is_empty()
-    {
-        return (format!("{a}."), Some(b.to_string()));
-    }
-    (msg.to_string(), None)
 }

@@ -340,7 +340,7 @@ pub fn installed_bundle() -> Option<PathBuf> {
 }
 
 /// Progress of a download, for the UI.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum Stage {
     #[default]
     Starting,
@@ -348,7 +348,9 @@ pub enum Stage {
         done: u64,
         total: u64,
     },
-    Verifying,
+    /// Checking the download: 0 its size, 1 its SHA-256, 2 what it contains (bundle id,
+    /// version and code signature on macOS; the package elsewhere).
+    Verifying(u8),
 }
 
 /// A downloaded and checked update, ready to replace the installed app.
@@ -465,6 +467,7 @@ fn download_into(
     stage: &Arc<Mutex<Stage>>,
 ) -> Result<Prepared, String> {
     let archive = fetch(asset, dir, stage)?;
+    *stage.lock() = Stage::Verifying(2);
     prepare(release, &archive, dir)
 }
 
@@ -513,7 +516,7 @@ fn fetch(asset: &Asset, dir: &Path, stage: &Arc<Mutex<Stage>>) -> Result<PathBuf
         return Err(format!("download failed: {}", err.trim()));
     }
 
-    *stage.lock() = Stage::Verifying;
+    *stage.lock() = Stage::Verifying(0);
     let size = std::fs::metadata(&archive).map(|m| m.len()).unwrap_or(0);
     if size != asset.size {
         return Err(format!(
@@ -525,6 +528,7 @@ fn fetch(asset: &Asset, dir: &Path, stage: &Arc<Mutex<Stage>>) -> Result<PathBuf
         .sha256
         .as_ref()
         .ok_or("the download has no published checksum")?;
+    *stage.lock() = Stage::Verifying(1);
     let actual = sha256_file(&archive).map_err(|e| e.to_string())?;
     if &actual != expected {
         return Err("the download does not match its published checksum".into());
