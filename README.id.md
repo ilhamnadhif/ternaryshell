@@ -34,8 +34,8 @@ dalam ±0,1 detik, CPU 0% saat diam, dan memakai sekitar 70 MB memori dengan sat
 - **Update otomatis** dari rilis GitHub, dipasang dengan satu klik.
 - **macOS, Windows, dan Linux**, masing-masing dengan installer dan pintasannya sendiri.
 - **Label untuk environment**: beri grup atau koneksi warna dan tag pendek (`PROD` merah, `STG`
-  kuning). Label ikut ke ikon host di sidebar, tab, tepi terminal, dan status bar, jadi production
-  tidak tertukar dengan staging.
+  kuning). Warnanya menandai grup di sidebar, menggarisbawahi tab host, dan membentang di atas
+  terminalnya, sedangkan tagnya tampil di status bar, jadi production tidak tertukar dengan staging.
 - Antarmuka bahasa Inggris dan Indonesia, tema terang dan gelap, enam warna aksen, mode ringkas,
   tanpa telemetri.
 
@@ -329,7 +329,7 @@ AppData tetap privat per user).
   termasuk entri ter-hash, wildcard, negasi, dan `@revoked`.
   - Host baru harus dipercaya dengan klik; Enter tidak pernah menerima key.
   - Key yang berubah, atau key dengan jenis berbeda dari yang tercatat, memunculkan peringatan merah
-    beserta fingerprint lama.
+    beserta fingerprint lama; key itu baru bisa diterima setelah Anda menyatakan sudah memeriksanya.
   - Key yang di-revoke langsung ditolak.
 - **Algoritma**: AES-256-GCM diutamakan (AES hardware, lewat *ring*), lalu ChaCha20-Poly1305.
   Signature SHA-1, cipher CBC, dan key exchange SHA-1 hanya aktif bila **Legacy algorithms**

@@ -33,8 +33,9 @@ memory with a session open.
 - **Automatic updates** from GitHub releases, with one click to install.
 - **macOS, Windows and Linux**, each with its own installers and shortcuts.
 - **Labels for environments**: give a group or a connection a colour and a short tag (`PROD` in red,
-  `STG` in yellow). It follows the host to its sidebar icon, its tabs, the edge of its terminal and the
-  status bar, so production is never mistaken for staging.
+  `STG` in yellow). The colour marks the group in the sidebar, underlines the host's tabs and runs
+  along the top of its terminal, and the tag sits in the status bar, so production is never mistaken
+  for staging.
 - English and Indonesian UI, light and dark themes, six accent colours, a compact density, no
   telemetry.
 
@@ -327,7 +328,7 @@ user's AppData private).
   including hashed entries, wildcards, negation and `@revoked`.
   - A new host must be trusted with a click; Enter never accepts a key.
   - A changed key, or a key of a different type than the one on record, triggers a red warning that
-    shows the old fingerprints.
+    shows the old fingerprints; it can only be accepted after you confirm you checked it.
   - Revoked keys are refused.
 - **Algorithms**: AES-256-GCM is preferred (hardware AES, via *ring*), then ChaCha20-Poly1305.
   SHA-1 signatures, CBC ciphers and SHA-1 key exchange are only enabled when **Legacy algorithms**
