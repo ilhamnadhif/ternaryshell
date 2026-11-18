@@ -1357,18 +1357,26 @@ impl SftpPanel {
         let mut rx = right_edge;
         let mut upload_rect = None;
         let mut root_rect = None;
+        let g1_w = group_width(3);
+        let g2_w = group_width(2);
+        let groups_w = g1_w + 8.0 + g2_w;
+        let lead_w = if is_remote { 20.0 } else { 16.0 };
+        // A narrow side: Root and Upload… keep only their icons (with a tooltip).
+        let uw_full = text_button_w(ui, t("Upload…"), true, true);
+        let rw_full = text_button_w(ui, t("Root"), true, true);
+        let compact = is_remote
+            && bar.width() - 22.0
+                < lead_w + 7.0 + 72.0 + 12.0 + groups_w + 8.0 + rw_full + 8.0 + uw_full;
         if is_remote {
-            let uw = text_button_w(ui, t("Upload…"), true, true);
+            let uw = if compact { 26.0 } else { uw_full };
             let r = egui::Rect::from_min_max(pos2(rx - uw, cy - 13.0), pos2(rx, cy + 13.0));
             upload_rect = Some(r);
-            rx = r.left() - 8.0;
-            let rw = text_button_w(ui, t("Root"), true, true);
+            rx = r.left() - if compact { 4.0 } else { 8.0 };
+            let rw = if compact { 26.0 } else { rw_full };
             let r = egui::Rect::from_min_max(pos2(rx - rw, cy - 13.0), pos2(rx, cy + 13.0));
             root_rect = Some(r);
             rx = r.left() - 8.0;
         }
-        let g1_w = group_width(3);
-        let g2_w = group_width(2);
         let (who, sub) = if is_remote {
             (
                 host.clone(),
@@ -1386,9 +1394,7 @@ impl SftpPanel {
         };
         let name_g = painter.layout_no_wrap(who, style::semibold(style::BODY), p.text);
         let sub_g = painter.layout_no_wrap(sub, style::regular(style::SMALL), p.text_faint);
-        let lead_w = if is_remote { 20.0 } else { 16.0 };
-        let groups_w = g1_w + 8.0 + g2_w;
-        let avail_who = (rx - left - groups_w - 8.0 - 4.0).max(40.0);
+        let avail_who = (rx - left - groups_w - 8.0 - 4.0).max(lead_w);
         let full_who = lead_w + 7.0 + name_g.size().x + 7.0 + sub_g.size().x;
         let show_sub = full_who <= avail_who && !sub_g.is_empty();
         let who_w = if show_sub {
@@ -1518,7 +1524,7 @@ impl SftpPanel {
                 .add_enabled_ui(!reopening, |ui| {
                     let resp =
                         ui.interact(rr, egui::Id::new(("sftp-root-btn", uid)), Sense::click());
-                    paint_root_button(ui, &resp, rr, is_root_now);
+                    paint_root_button(ui, &resp, rr, is_root_now, compact);
                     resp
                 })
                 .inner
@@ -1533,13 +1539,17 @@ impl SftpPanel {
                 actions.push(SideAction::Root);
             }
             let mut b = ui.new_child(egui::UiBuilder::new().max_rect(ur));
-            let upload = kit::button_ex(
-                &mut b,
-                kit::Kind::Secondary,
-                Some(icons::UPLOAD_SIMPLE),
-                t("Upload…"),
-                true,
-            )
+            let upload = if compact {
+                kit::icon_button_ex(&mut b, icons::UPLOAD_SIMPLE, "", false, 26.0)
+            } else {
+                kit::button_ex(
+                    &mut b,
+                    kit::Kind::Secondary,
+                    Some(icons::UPLOAD_SIMPLE),
+                    t("Upload…"),
+                    true,
+                )
+            }
             .on_hover_text(tf(
                 "Choose files on {} to upload into this folder",
                 &[crate::platform::this_computer()],
@@ -1912,8 +1922,8 @@ impl SftpPanel {
             (t("Permissions"), None, false),
         ];
         for (i, (title, key, right_align)) in titles.iter().enumerate() {
-            if i == 3 && !is_remote {
-                break;
+            if !head_cols.shown(i) {
+                continue;
             }
             let (x0, x1) = head_cols.span(i);
             let cell = egui::Rect::from_min_max(pos2(x0, cols.top()), pos2(x1, cols.bottom()));
@@ -4024,28 +4034,47 @@ fn ago(d: Duration) -> String {
 /// the remote side), Modified (92) and Permissions (72, remote) leave, 12 px apart.
 struct Columns {
     spans: [(f32, f32); 4],
+    /// Which columns fit: in a narrow side Permissions goes first, then Modified, so the names
+    /// keep at least `NAME_MIN`.
+    shown: [bool; 4],
 }
 
 impl Columns {
     fn new(left: f32, right: f32, remote: bool) -> Self {
         const GAP: f32 = 12.0;
+        const NAME_MIN: f32 = 130.0;
+        const MOD_W: f32 = 92.0;
+        const PERM_W: f32 = 72.0;
+        let size_w = if remote { 56.0 } else { 62.0 };
+        let width = right - left;
+        let with_mod = NAME_MIN + GAP + size_w + GAP + MOD_W;
+        let show_mod = width >= with_mod;
+        let show_perm = remote && width >= with_mod + GAP + PERM_W;
         let mut spans = [(0.0, 0.0); 4];
         let mut x = right;
-        if remote {
-            spans[3] = (x - 72.0, x);
-            x -= 72.0 + GAP;
+        if show_perm {
+            spans[3] = (x - PERM_W, x);
+            x -= PERM_W + GAP;
         }
-        spans[2] = (x - 92.0, x);
-        x -= 92.0 + GAP;
-        let size_w = if remote { 56.0 } else { 62.0 };
+        if show_mod {
+            spans[2] = (x - MOD_W, x);
+            x -= MOD_W + GAP;
+        }
         spans[1] = (x - size_w, x);
         x -= size_w + GAP;
         spans[0] = (left, x.max(left + 40.0));
-        Self { spans }
+        Self {
+            spans,
+            shown: [true, true, show_mod, show_perm],
+        }
     }
 
     fn span(&self, i: usize) -> (f32, f32) {
         self.spans[i]
+    }
+
+    fn shown(&self, i: usize) -> bool {
+        self.shown[i]
     }
 }
 
@@ -4116,20 +4145,22 @@ fn paint_file_row(
             meta,
         );
     }
-    let (m0, m1) = cols.span(2);
-    painter
-        .with_clip_rect(egui::Rect::from_min_max(
-            pos2(m0, rect.top()),
-            pos2(m1, rect.bottom()),
-        ))
-        .text(
-            pos2(m0, cy),
-            Align2::LEFT_CENTER,
-            e.modified.map(short_time).unwrap_or_default(),
-            small,
-            meta,
-        );
-    if remote {
+    if cols.shown(2) {
+        let (m0, m1) = cols.span(2);
+        painter
+            .with_clip_rect(egui::Rect::from_min_max(
+                pos2(m0, rect.top()),
+                pos2(m1, rect.bottom()),
+            ))
+            .text(
+                pos2(m0, cy),
+                Align2::LEFT_CENTER,
+                e.modified.map(short_time).unwrap_or_default(),
+                small,
+                meta,
+            );
+    }
+    if remote && cols.shown(3) {
         let (r0, _) = cols.span(3);
         painter.text(
             pos2(r0, cy),
@@ -4748,7 +4779,7 @@ fn tool_group(
 
 /// The Root toggle: a quiet button at rest, root-tinted with a ring while the side runs as
 /// root.
-fn paint_root_button(ui: &Ui, resp: &egui::Response, rect: egui::Rect, on: bool) {
+fn paint_root_button(ui: &Ui, resp: &egui::Response, rect: egui::Rect, on: bool, compact: bool) {
     let p = style::pal(ui);
     let label = t("Root");
     let hovered = resp.hovered() && ui.is_enabled();
@@ -4775,7 +4806,11 @@ fn paint_root_button(ui: &Ui, resp: &egui::Response, rect: egui::Rect, on: bool)
         );
     }
     let g = painter.layout_no_wrap(label.to_string(), style::medium(style::SMALL), color);
-    let w = 14.0 + 5.0 + g.size().x;
+    let w = if compact {
+        14.0
+    } else {
+        14.0 + 5.0 + g.size().x
+    };
     let x = rect.center().x - w / 2.0;
     painter.text(
         pos2(x + 7.0, rect.center().y),
@@ -4788,7 +4823,9 @@ fn paint_root_button(ui: &Ui, resp: &egui::Response, rect: egui::Rect, on: bool)
         style::icon_font(14.0),
         color,
     );
-    painter.galley(pos2(x + 19.0, rect.center().y - g.size().y / 2.0), g, color);
+    if !compact {
+        painter.galley(pos2(x + 19.0, rect.center().y - g.size().y / 2.0), g, color);
+    }
     resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, label));
 }
 
