@@ -2085,9 +2085,17 @@ impl Editor {
                 egui::Frame::NONE
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
+                        // The buttons' width as last drawn: the text stops short of them, so a
+                        // long fingerprint never runs under them.
+                        let buttons_id = egui::Id::new("editor-key-buttons-w");
+                        let buttons_w = ui
+                            .data(|d| d.get_temp::<f32>(buttons_id))
+                            .unwrap_or(if stored { 260.0 } else { 90.0 });
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 10.0;
+                            let text_w = (ui.available_width() - buttons_w - 12.0).max(80.0);
                             ui.vertical(|ui| {
+                                ui.set_max_width(text_w);
                                 ui.spacing_mut().item_spacing = vec2(6.0, 2.0);
                                 ui.horizontal(|ui| {
                                     let title = match (&info, &check) {
@@ -2095,16 +2103,22 @@ impl Editor {
                                         (None, Some(KeyCheck::Valid(k))) => {
                                             tf("{} private key", &[k])
                                         }
-                                        _ if stored => tf(
-                                            "A private key is saved in {}.",
-                                            &[crate::platform::keychain()],
-                                        ),
+                                        _ if stored => match &self.shown_key_info {
+                                            Some(i) => tf("{} private key", &[&i.kind]),
+                                            None => tf(
+                                                "A private key is saved in {}.",
+                                                &[crate::platform::keychain()],
+                                            ),
+                                        },
                                         _ => t("Encrypted private key").to_string(),
                                     };
-                                    ui.label(
-                                        RichText::new(title)
-                                            .font(style::semibold(style::BODY))
-                                            .color(p.text),
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(title)
+                                                .font(style::semibold(style::BODY))
+                                                .color(p.text),
+                                        )
+                                        .truncate(),
                                     );
                                     let encrypted = info.as_ref().is_some_and(|i| i.encrypted)
                                         || matches!(check, Some(KeyCheck::Encrypted));
@@ -2124,12 +2138,9 @@ impl Editor {
                                     Some(i) => i.fingerprint.clone(),
                                     None if stored => match &self.shown_key_info {
                                         Some(i) if !i.comment.is_empty() => {
-                                            format!(
-                                                "{} · {} · {}",
-                                                i.kind, i.fingerprint, i.comment
-                                            )
+                                            format!("{} · {}", i.fingerprint, i.comment)
                                         }
-                                        Some(i) => format!("{} · {}", i.kind, i.fingerprint),
+                                        Some(i) => i.fingerprint.clone(),
                                         None => {
                                             t("Its text is shown only when you ask.").to_string()
                                         }
@@ -2174,6 +2185,11 @@ impl Editor {
                                         #[cfg(debug_assertions)]
                                         crate::devtest::record("editor-show-key", r.rect);
                                         show = r.clicked();
+                                    }
+                                    let used = ui.min_rect().width();
+                                    if (used - buttons_w).abs() > 0.5 {
+                                        ui.data_mut(|d| d.insert_temp(buttons_id, used));
+                                        ui.ctx().request_repaint();
                                     }
                                 },
                             );
