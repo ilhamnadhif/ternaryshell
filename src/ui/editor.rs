@@ -180,7 +180,10 @@ struct KeyInfo {
 fn key_info(text: &str) -> Option<KeyInfo> {
     use russh::keys::ssh_key;
     let text = keys::normalize_key_text(text);
-    let key = ssh_key::PrivateKey::from_openssh(&text).ok()?;
+    // OpenSSH keys tell even when encrypted; PEM and PKCS#8 ones only when they are not.
+    let key = ssh_key::PrivateKey::from_openssh(&text)
+        .ok()
+        .or_else(|| keys::decode_key(&text, None).ok())?;
     let kind = match key.algorithm() {
         ssh_key::Algorithm::Ed25519 => "Ed25519",
         ssh_key::Algorithm::Ecdsa { .. } => "ECDSA",
@@ -298,8 +301,9 @@ pub struct Editor {
     /// Password and passphrase fields show their text (and a saved one, loaded to be read).
     show_password: bool,
     show_passphrase: bool,
-    /// The saved pasted key, while it is shown.
+    /// The saved pasted key, while it is shown, and what it is.
     shown_key: Option<String>,
+    shown_key_info: Option<KeyInfo>,
     /// The last checked key text and what it is.
     key_check: Option<(String, KeyCheck, Option<KeyInfo>)>,
     /// The login method when the editor opened (a saved passphrase belongs to that key).
@@ -408,6 +412,7 @@ impl Editor {
             show_password: false,
             show_passphrase: false,
             shown_key: None,
+            shown_key_info: None,
             key_check: None,
             agent_socket,
             agents,
@@ -2066,6 +2071,8 @@ impl Editor {
         // The key card.
         let mut replace = false;
         let mut show = false;
+        let mut copy = false;
+        let full_key = if stored { self.shown_key.clone() } else { None };
         let width = ui.available_width();
         egui::Frame::NONE
             .fill(p.well)
@@ -2115,9 +2122,18 @@ impl Editor {
                                         format!("{} · {}", i.fingerprint, i.comment)
                                     }
                                     Some(i) => i.fingerprint.clone(),
-                                    None if stored => {
-                                        t("Its text is shown only when you ask.").to_string()
-                                    }
+                                    None if stored => match &self.shown_key_info {
+                                        Some(i) if !i.comment.is_empty() => {
+                                            format!(
+                                                "{} · {} · {}",
+                                                i.kind, i.fingerprint, i.comment
+                                            )
+                                        }
+                                        Some(i) => format!("{} · {}", i.kind, i.fingerprint),
+                                        None => {
+                                            t("Its text is shown only when you ask.").to_string()
+                                        }
+                                    },
                                     None => String::new(),
                                 };
                                 if !line.is_empty() {
@@ -2136,10 +2152,18 @@ impl Editor {
                                 |ui| {
                                     replace = kit::secondary_sm(ui, None, t("Replace…")).clicked();
                                     if stored {
+                                        let c = copy_button(ui, egui::Id::new("editor-key-copied"));
+                                        #[cfg(debug_assertions)]
+                                        crate::devtest::record("editor-copy-key", c.rect);
+                                        copy = c.clicked();
                                         let r = kit::button_ex(
                                             ui,
                                             kit::Kind::Ghost,
-                                            None,
+                                            Some(if self.shown_key.is_some() {
+                                                icons::EYE_SLASH
+                                            } else {
+                                                icons::EYE
+                                            }),
                                             if self.shown_key.is_some() {
                                                 t("Hide")
                                             } else {
@@ -2155,12 +2179,34 @@ impl Editor {
                             );
                         });
                     });
-                // The first lines of the key.
-                let text = if stored {
-                    self.shown_key.clone()
-                } else {
-                    Some(self.key_text.clone())
-                };
+                // A saved key that is shown: all of it, to read, select or copy.
+                if let Some(full) = &full_key {
+                    egui::Frame::NONE
+                        .inner_margin(egui::Margin {
+                            left: 12,
+                            right: 6,
+                            top: 0,
+                            bottom: 10,
+                        })
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical()
+                                .id_salt("editor-shown-key")
+                                .max_height(200.0)
+                                .show(ui, |ui| {
+                                    let mut view = full.trim_end();
+                                    ui.add(
+                                        egui::TextEdit::multiline(&mut view)
+                                            .font(style::mono(11.0))
+                                            .text_color(p.text_muted)
+                                            .frame(egui::Frame::NONE)
+                                            .desired_width(f32::INFINITY)
+                                            .desired_rows(1),
+                                    );
+                                });
+                        });
+                }
+                // The first lines of a key just pasted.
+                let text = (!stored).then(|| self.key_text.clone());
                 if let Some(text) = text {
                     let lines: Vec<&str> = text.trim().lines().map(str::trim).collect();
                     let mut shown: Vec<String> = Vec::new();
@@ -2230,9 +2276,31 @@ impl Editor {
                 );
                 self.import_key_button(&mut right);
             });
-        if show && self.shown_key.take().is_none() {
+        if copy {
+            let key = match &self.shown_key {
+                Some(k) => Ok(Some(k.clone())),
+                None => secrets::get(self.draft.id, SecretKind::PrivateKey),
+            };
+            match key {
+                Ok(Some(key)) => {
+                    ui.ctx().copy_text(key);
+                    mark_copied(ui.ctx(), egui::Id::new("editor-key-copied"));
+                }
+                Ok(None) => self.set_error(tf(
+                    "The private key is not in {} any more.",
+                    &[crate::platform::keychain()],
+                )),
+                Err(e) => self.set_error(format!("{e:#}")),
+            }
+        }
+        if show && self.shown_key.take().is_some() {
+            self.shown_key_info = None;
+        } else if show {
             match secrets::get(self.draft.id, SecretKind::PrivateKey) {
-                Ok(Some(key)) => self.shown_key = Some(key),
+                Ok(Some(key)) => {
+                    self.shown_key_info = key_info(&key);
+                    self.shown_key = Some(key);
+                }
                 Ok(None) => self.set_error(tf(
                     "The private key is not in {} any more.",
                     &[crate::platform::keychain()],
@@ -3475,7 +3543,36 @@ fn method_segments(
     out
 }
 
-/// How a secret field looks: saved (a check, Show and Forget), or a field to type in.
+/// How long a Copy button says "Copied" after it was used.
+const COPIED_FOR: f64 = 2.0;
+
+/// A quiet Copy button; it reads "Copied" for a moment after `mark_copied`.
+fn copy_button(ui: &mut Ui, id: egui::Id) -> egui::Response {
+    let now = ui.input(|i| i.time);
+    let copied = ui
+        .data(|d| d.get_temp::<f64>(id))
+        .is_some_and(|at| now - at < COPIED_FOR);
+    if copied {
+        let left = ui.data(|d| d.get_temp::<f64>(id)).unwrap_or(now) + COPIED_FOR - now;
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f64(left.max(0.05)));
+    }
+    kit::button_ex(
+        ui,
+        kit::Kind::Ghost,
+        Some(if copied { icons::CHECK } else { icons::COPY }),
+        if copied { t("Copied") } else { t("Copy") },
+        true,
+    )
+}
+
+fn mark_copied(ctx: &egui::Context, id: egui::Id) {
+    let now = ctx.input(|i| i.time);
+    ctx.data_mut(|d| d.insert_temp(id, now));
+    ctx.request_repaint();
+}
+
+/// How a secret field looks: saved (a check, Show, Copy and Forget), or a field to type in.
 struct SecretUi<'a> {
     text: &'a mut String,
     shown: &'a mut bool,
@@ -3518,6 +3615,26 @@ fn secret_block(ui: &mut Ui, s: SecretUi, problem: &mut Option<Problem>) {
         if kit::button_ex(&mut right, kit::Kind::Ghost, None, s.forget_label, true).clicked() {
             *s.clear = true;
             s.text.clear();
+        }
+        let copied_id = egui::Id::new(("secret-copied", s.record));
+        let copy = copy_button(&mut right, copied_id);
+        #[cfg(debug_assertions)]
+        crate::devtest::record(format!("{}-copy", s.record), copy.rect);
+        if copy.clicked() {
+            match secrets::get(s.saved.0, s.saved.1) {
+                Ok(Some(value)) => {
+                    right.ctx().copy_text(value);
+                    mark_copied(right.ctx(), copied_id);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    *problem = Some(Problem {
+                        message: format!("{e:#}"),
+                        section: Section::Login,
+                        forward: None,
+                    })
+                }
+            }
         }
         let show = kit::button_ex(
             &mut right,
@@ -3984,6 +4101,25 @@ fn shorten(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A saved key that is shown says what it is, also in the classic PEM format.
+    #[test]
+    fn key_info_reads_pem_keys_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pem");
+        assert!(
+            std::process::Command::new("ssh-keygen")
+                .args(["-q", "-t", "rsa", "-b", "2048", "-m", "PEM", "-N", "", "-f"])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let pem = std::fs::read_to_string(&path).unwrap();
+        let info = key_info(&pem).expect("a PEM RSA key is read");
+        assert_eq!(info.kind, "RSA");
+        assert!(info.fingerprint.starts_with("SHA256:"));
+    }
 
     #[test]
     fn forward_destination_is_split() {

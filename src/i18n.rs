@@ -739,6 +739,7 @@ const ID: &[(&str, &str)] = &[
     ("Connection cancelled.", "Koneksi dibatalkan."),
     ("Connection closed.", "Koneksi ditutup."),
     ("Copy", "Salin"),
+    ("Copied", "Tersalin"),
     ("Copy Address", "Salin Alamat"),
     ("Copy Path", "Salin Path"),
     ("Copy text when selected", "Salin teks saat dipilih"),
