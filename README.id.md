@@ -15,7 +15,7 @@ dalam ±0,1 detik, CPU 0% saat diam, dan memakai sekitar 70 MB memori dengan sat
 - **Koneksi tersimpan** dalam grup bertingkat, dengan drag and drop, pencarian fuzzy, dan quick connect
   (`⌘K`, `Ctrl+Shift+K` di Windows dan Linux). Password dan passphrase disimpan di keychain sistem
   (Keychain macOS, Credential Manager Windows, Secret Service di Linux), bukan di file TernaryShell. Tombol **Show** di
-  Edit Connection menampilkan yang tersimpan.
+  Edit Connection menampilkan yang tersimpan (key utuh), dan **Copy** menyalinnya ke clipboard.
 - **Terminal sungguhan** (alacritty_terminal): warna 24-bit, mouse untuk vim/htop/tmux, IME, CJK,
   dan garis kotak yang digambar presisi.
 - **Tab dan split pane** yang memakai satu koneksi SSH bersama.

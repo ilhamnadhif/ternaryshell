@@ -16,7 +16,7 @@ memory with a session open.
   (`⌘K`, `Ctrl+Shift+K` on Windows and Linux). Passwords and passphrases live in the system's
   keychain (the macOS Keychain, Windows Credential Manager, the Secret Service on Linux), not in
   TernaryShell's files. **Show** in Edit
-  Connection reveals a saved one.
+  Connection reveals a saved one (the whole key), and **Copy** puts it on the clipboard.
 - **A real terminal** (alacritty_terminal): 24-bit colour, mouse reporting for vim/htop/tmux, IME,
   CJK, and box drawing drawn pixel-exact.
 - **Tabs and split panes** that share one SSH connection.
