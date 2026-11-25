@@ -19,7 +19,7 @@ use crate::bookmarks::transfer::{
     ExportScope, ImportPlan, ItemStatus, MatchedBy, Resolution, SourceKind,
 };
 use crate::bookmarks::{BookmarkStore, search};
-use crate::i18n::{Language, t, tf, tn};
+use crate::i18n::{t, tf, tn};
 use crate::settings::{CursorStyle, FontChoice, QuickCommand, Settings, ThemeMode};
 use crate::term::scheme::{SCHEMES, Scheme};
 
@@ -2523,12 +2523,6 @@ fn settings_index() -> Vec<(SettingsTab, &'static str, &'static str, &'static st
     vec![
         (
             General,
-            t("Language"),
-            t("Language"),
-            t("The menu bar follows the system language."),
-        ),
-        (
-            General,
             t("Connections"),
             t("Keepalive"),
             t("Checks the server this often, so a dead connection is noticed within seconds."),
@@ -3018,48 +3012,6 @@ fn small(text: impl Into<String>, color: Color32) -> egui::WidgetText {
 fn general(ui: &mut Ui, s: &mut Settings, q: Search) -> bool {
     let p = style::pal(ui);
     let mut check_now = false;
-    let g = t("Language");
-    q.group(
-        ui,
-        g,
-        &[(
-            t("Language"),
-            t("The menu bar follows the system language."),
-        )],
-        None,
-        |ui, rows| {
-            q.row(
-                ui,
-                rows,
-                g,
-                t("Language"),
-                Some(small(
-                    t("The menu bar follows the system language."),
-                    p.text_faint,
-                )),
-                t("The menu bar follows the system language."),
-                |ui| {
-                    egui::ComboBox::from_id_salt("lang")
-                        .icon(forms::updown_caret)
-                        .width(200.0)
-                        .selected_text(match s.language {
-                            Language::System => t("System (English)"),
-                            Language::English => "English",
-                            Language::Indonesian => "Bahasa Indonesia",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut s.language, Language::System, t("System"));
-                            ui.selectable_value(&mut s.language, Language::English, "English");
-                            ui.selectable_value(
-                                &mut s.language,
-                                Language::Indonesian,
-                                "Bahasa Indonesia",
-                            );
-                        });
-                },
-            );
-        },
-    );
     let g = t("Connections");
     let keep = t("Checks the server this often, so a dead connection is noticed within seconds.");
     let ask = t("Only when something is still running there.");
@@ -3355,8 +3307,8 @@ fn accent_picker(ui: &mut Ui, accent: &mut crate::settings::Accent) {
     for a in Accent::ALL.iter().rev() {
         let color = accent_swatch(*a, dark);
         let name = match a {
+            Accent::Indigo => t("Indigo"),
             Accent::Blue => t("Blue"),
-            Accent::Violet => t("Violet"),
             Accent::Green => t("Green"),
             Accent::Orange => t("Orange"),
             Accent::Pink => t("Pink"),
@@ -3397,18 +3349,18 @@ fn accent_picker(ui: &mut Ui, accent: &mut crate::settings::Accent) {
 fn accent_swatch(a: crate::settings::Accent, dark: bool) -> Color32 {
     use crate::settings::Accent;
     let hex = match (a, dark) {
-        (Accent::Blue, true) => 0x3a7be0,
+        (Accent::Indigo, true) => 0x5b52dc,
+        (Accent::Indigo, false) => 0x4b42c4,
+        (Accent::Blue, true) => 0x2e6be6,
         (Accent::Blue, false) => 0x1f5fbf,
-        (Accent::Violet, true) => 0x7a62e6,
-        (Accent::Violet, false) => 0x6246d6,
-        (Accent::Green, true) => 0x2f9e66,
-        (Accent::Green, false) => 0x1c7f4c,
-        (Accent::Orange, true) => 0xd9702b,
-        (Accent::Orange, false) => 0xc25a14,
-        (Accent::Pink, true) => 0xcf4f91,
-        (Accent::Pink, false) => 0xb83a7c,
-        (Accent::Graphite, true) => 0x6b6b6b,
-        (Accent::Graphite, false) => 0x2b2b2b,
+        (Accent::Green, true) => 0x0f8572,
+        (Accent::Green, false) => 0x0f7a68,
+        (Accent::Orange, true) => 0xcf4422,
+        (Accent::Orange, false) => 0xc73d1d,
+        (Accent::Pink, true) => 0xc43c82,
+        (Accent::Pink, false) => 0xb0326a,
+        (Accent::Graphite, true) => 0x5a5a64,
+        (Accent::Graphite, false) => 0x27272a,
     };
     Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
 }

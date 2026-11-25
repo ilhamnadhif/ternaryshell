@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::bookmarks::store::NewerSchema;
 use crate::bookmarks::transfer::{self, ExportScope, ImportPlan};
 use crate::bookmarks::{Auth, Bookmark, BookmarkStore, ssh_config};
-use crate::i18n::{self, Language, t, tf, tn};
+use crate::i18n::{t, tf, tn};
 use crate::paths;
 use crate::secrets::{self, SecretKind};
 use crate::settings::{FontChoice, Settings, ThemeMode};
@@ -39,7 +39,6 @@ use crate::ui::{fonts, icons, keys, style, terminal};
 /// Settings that need work when they change.
 #[derive(Clone, PartialEq)]
 struct Applied {
-    language: Language,
     theme: ThemeMode,
     look: (crate::settings::Accent, crate::settings::Density),
     font: FontChoice,
@@ -50,7 +49,6 @@ struct Applied {
 impl Applied {
     fn of(s: &Settings) -> Self {
         Self {
-            language: s.language,
             theme: s.theme,
             look: (s.accent, s.density),
             font: fonts::effective_choice(&s.font),
@@ -213,7 +211,6 @@ impl TernaryShellApp {
             }
             Settings::default()
         });
-        i18n::set_language(settings.language);
         let mut store_writable = true;
         let store = match BookmarkStore::load(&paths::bookmarks_file()) {
             Ok(s) => s,
@@ -535,14 +532,6 @@ impl TernaryShellApp {
                     }
                     "light" => {
                         self.settings.theme = ThemeMode::Light;
-                        None
-                    }
-                    "indonesian" => {
-                        self.settings.language = Language::Indonesian;
-                        None
-                    }
-                    "english" => {
-                        self.settings.language = Language::English;
                         None
                     }
                     _ => None,
@@ -956,13 +945,6 @@ impl TernaryShellApp {
         self.settings.clamp();
         let now = Applied::of(&self.settings);
         if now != self.applied || self.first_frame {
-            if now.language != self.applied.language {
-                i18n::set_language(now.language);
-                #[cfg(target_os = "macos")]
-                {
-                    self.menu = Some(AppMenu::install());
-                }
-            }
             if now.theme != self.applied.theme || now.look != self.applied.look {
                 style::set_preferences(now.look.0, now.look.1);
                 style::apply(ctx, now.theme);

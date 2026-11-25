@@ -46,8 +46,16 @@ const BUILT_IN: FontPreset = FontPreset {
     faces: [None, None, None, None],
 };
 
+/// JetBrains Mono, bundled with the app: the family default monospace font on every system.
+pub const JETBRAINS: FontPreset = FontPreset {
+    name: "JetBrains Mono (built-in)",
+    path: None,
+    faces: [None, None, None, None],
+};
+
 #[cfg(target_os = "macos")]
 pub const PRESETS: &[FontPreset] = &[
+    JETBRAINS,
     FontPreset {
         name: "Menlo",
         path: Some("/System/Library/Fonts/Menlo.ttc"),
@@ -102,6 +110,7 @@ pub const PRESETS: &[FontPreset] = &[
 
 #[cfg(windows)]
 pub const PRESETS: &[FontPreset] = &[
+    JETBRAINS,
     FontPreset {
         name: "Consolas",
         path: Some("consola.ttf"),
@@ -137,6 +146,7 @@ pub const PRESETS: &[FontPreset] = &[
 
 #[cfg(not(any(target_os = "macos", windows)))]
 pub const PRESETS: &[FontPreset] = &[
+    JETBRAINS,
     BUILT_IN,
     FontPreset {
         name: "DejaVu Sans Mono",
@@ -207,14 +217,8 @@ const SYMBOLS: (&str, &str) = ("symbols", "seguisym.ttf");
 #[cfg(not(any(target_os = "macos", windows)))]
 const SYMBOLS: (&str, &str) = ("symbols", "DejaVuSans.ttf");
 
-/// The terminal font when none was chosen: the platform's usual one.
-const DEFAULT_FONT: &str = if cfg!(target_os = "macos") {
-    "Menlo"
-} else if cfg!(windows) {
-    "Consolas"
-} else {
-    "Hack (built-in)"
-};
+/// The terminal font when none was chosen: JetBrains Mono, bundled, the same on every system.
+const DEFAULT_FONT: &str = JETBRAINS.name;
 
 /// The system's font folders (Windows and Linux).
 #[cfg(windows)]
@@ -302,10 +306,14 @@ fn is_system_font(path: &Path) -> bool {
     path.starts_with("/usr/share/fonts")
 }
 
-/// The UI fonts, bundled: Inter in three weights and the Phosphor icons.
+/// The UI & monospace fonts, bundled: Inter in three weights, JetBrains Mono, and Phosphor icons.
 const INTER: &[u8] = include_bytes!("../../assets/fonts/Inter-Regular.ttf");
 const INTER_MEDIUM: &[u8] = include_bytes!("../../assets/fonts/Inter-Medium.ttf");
 const INTER_SEMIBOLD: &[u8] = include_bytes!("../../assets/fonts/Inter-SemiBold.ttf");
+const JB_REGULAR: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Regular.ttf");
+const JB_BOLD: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Bold.ttf");
+const JB_ITALIC: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-Italic.ttf");
+const JB_BOLD_ITALIC: &[u8] = include_bytes!("../../assets/fonts/JetBrainsMono-BoldItalic.ttf");
 const PHOSPHOR: &[u8] = include_bytes!("../../assets/fonts/Phosphor.ttf");
 
 /// Font families of the UI beyond egui's two: Inter Medium and SemiBold, and the icons alone.
@@ -410,7 +418,29 @@ pub fn definitions(choice: &FontChoice, load_cjk: bool) -> FontDefinitions {
     // and the renderer fakes bold).
     let mut faces: [Option<String>; 4] = [None, None, None, None];
     let keys = [TERM_REGULAR, TERM_BOLD, TERM_ITALIC, TERM_BOLD_ITALIC];
+    let font = |bytes: &'static [u8]| Arc::new(FontData::from_static(bytes));
+    for (key, bytes) in [
+        ("JetBrainsMono", JB_REGULAR),
+        ("JetBrainsMono-Bold", JB_BOLD),
+        ("JetBrainsMono-Italic", JB_ITALIC),
+        ("JetBrainsMono-BoldItalic", JB_BOLD_ITALIC),
+    ] {
+        defs.font_data.insert(key.into(), font(bytes));
+    }
     match (preset(choice), &choice.path) {
+        (Some(p), _) if p.name == JETBRAINS.name => {
+            for (i, key) in [
+                "JetBrainsMono",
+                "JetBrainsMono-Bold",
+                "JetBrainsMono-Italic",
+                "JetBrainsMono-BoldItalic",
+            ]
+            .iter()
+            .enumerate()
+            {
+                faces[i] = Some((*key).to_string());
+            }
+        }
         (Some(p), _) => {
             if let Some(base) = p.path {
                 for (i, face) in p.faces.iter().enumerate() {
@@ -444,7 +474,7 @@ pub fn definitions(choice: &FontChoice, load_cjk: bool) -> FontDefinitions {
         defs.families
             .insert(FontFamily::Name((*key).into()), family);
     }
-    let mut mono = vec![regular, "Hack".to_string()];
+    let mut mono = vec![regular, "JetBrainsMono".to_string(), "Hack".to_string()];
     mono.extend(fallbacks.iter().cloned());
     mono.dedup();
     defs.families.insert(FontFamily::Monospace, mono);
@@ -452,7 +482,6 @@ pub fn definitions(choice: &FontChoice, load_cjk: bool) -> FontDefinitions {
     // UI: Inter, with the icon font right behind it so icons can sit inside ordinary text.
     // The icons live in the Private Use Area, like the Powerline and Nerd Font glyphs that
     // remote prompts print, so they stay out of the terminal and monospace families above.
-    let font = |bytes: &'static [u8]| Arc::new(FontData::from_static(bytes));
     defs.font_data.insert("Inter".into(), font(INTER));
     defs.font_data
         .insert("Inter-Medium".into(), font(INTER_MEDIUM));
@@ -490,7 +519,8 @@ pub fn has_real_face(choice: &FontChoice, bold: bool, italic: bool) -> bool {
         (false, true) => 2,
         (true, true) => 3,
     };
-    preset(choice).is_some_and(|p| p.path.is_some() && p.faces[idx].is_some())
+    preset(choice)
+        .is_some_and(|p| p.name == JETBRAINS.name || (p.path.is_some() && p.faces[idx].is_some()))
 }
 
 /// Installs the fonts. Returns false when a font file the user picked could not be used (the

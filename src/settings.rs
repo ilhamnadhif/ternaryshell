@@ -7,7 +7,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::i18n::Language;
 use crate::paths;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,8 +32,9 @@ pub enum CursorStyle {
 #[serde(rename_all = "snake_case")]
 pub enum Accent {
     #[default]
+    #[serde(alias = "violet")]
+    Indigo,
     Blue,
-    Violet,
     Green,
     Orange,
     Pink,
@@ -43,8 +43,8 @@ pub enum Accent {
 
 impl Accent {
     pub const ALL: [Accent; 6] = [
+        Accent::Indigo,
         Accent::Blue,
-        Accent::Violet,
         Accent::Green,
         Accent::Orange,
         Accent::Pink,
@@ -53,8 +53,8 @@ impl Accent {
 
     pub fn name(self) -> &'static str {
         match self {
+            Accent::Indigo => "Indigo",
             Accent::Blue => "Blue",
-            Accent::Violet => "Violet",
             Accent::Green => "Green",
             Accent::Orange => "Orange",
             Accent::Pink => "Pink",
@@ -110,7 +110,6 @@ pub struct FontChoice {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
-    pub language: Language,
     pub theme: ThemeMode,
     pub accent: Accent,
     pub density: Density,
@@ -158,20 +157,13 @@ pub struct RecentConnection {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            language: Language::System,
             theme: ThemeMode::System,
-            accent: Accent::Blue,
+            accent: Accent::Indigo,
             density: Density::Comfortable,
             scheme_dark: "TernaryShell Dark".into(),
             scheme_light: "TernaryShell Light".into(),
             font: FontChoice::default(),
-            // Menlo at 13 matches the other macOS terminals; Consolas and Hack read better a
-            // point larger.
-            font_size: if cfg!(target_os = "macos") {
-                13.0
-            } else {
-                14.0
-            },
+            font_size: 13.0,
             scrollback: 10_000,
             cursor_style: CursorStyle::Block,
             cursor_blink: false,
@@ -262,8 +254,9 @@ mod tests {
     fn partial_file_uses_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
-        std::fs::write(&path, r#"{"font_size": 99, "scrollback": 5000}"#).unwrap();
+        std::fs::write(&path, r#"{"language": "indonesian", "accent": "violet", "font_size": 99, "scrollback": 5000}"#).unwrap();
         let s = Settings::load(&path).unwrap();
+        assert_eq!(s.accent, Accent::Indigo);
         assert_eq!(s.font_size, Settings::MAX_FONT);
         assert_eq!(s.scrollback, 5000);
         assert_eq!(s.keepalive_secs, 30);
