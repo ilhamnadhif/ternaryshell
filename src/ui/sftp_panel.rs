@@ -1242,7 +1242,7 @@ impl SftpPanel {
             Align2::CENTER_CENTER,
             icons::FOLDER_SIMPLE,
             style::icon_font(15.0),
-            p.text_muted,
+            p.folder,
         );
         x += 15.0 + 8.0;
         let title =
@@ -1420,7 +1420,7 @@ impl SftpPanel {
                 Align2::CENTER_CENTER,
                 icons::LAPTOP,
                 style::icon_font(16.0),
-                p.text_muted,
+                icons::host_color(icons::LAPTOP, &p),
             );
         }
         let name_x = left + lead_w + 7.0;

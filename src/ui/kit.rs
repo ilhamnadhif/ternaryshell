@@ -1921,9 +1921,6 @@ pub fn paint_host_glyph(
     p: &Palette,
 ) {
     let side = rect.width();
-    // Redesign 3.1: a plain icon in the faint text colour; the label colour lives on the group
-    // dot, the tab line, the canvas edge and the status bar instead.
-    let _ = label;
     let size = if side >= 50.0 {
         28.0
     } else if side >= 38.0 {
@@ -1933,7 +1930,7 @@ pub fn paint_host_glyph(
     } else {
         15.0
     };
-    let color = p.text_faint;
+    let color = label.unwrap_or_else(|| icons::host_color(icon, p));
     painter.text(
         rect.center(),
         Align2::CENTER_CENTER,

@@ -686,7 +686,8 @@ impl Sidebar {
                 Some(g) => (
                     g.name.clone(),
                     Some(
-                        label_rgb(cx.store.group_label(Some(g.id)), p.dark).unwrap_or(p.text_ghost),
+                        label_rgb(cx.store.group_label(Some(g.id)), p.dark)
+                            .unwrap_or(p.accent_text),
                     ),
                 ),
                 None => (t("Ungrouped").to_string(), None),
@@ -729,7 +730,8 @@ impl Sidebar {
                 continue;
             };
             let name = g.name.clone();
-            let color = label_rgb(cx.store.group_label(Some(*gid)), p.dark).unwrap_or(p.text_ghost);
+            let color =
+                label_rgb(cx.store.group_label(Some(*gid)), p.dark).unwrap_or(p.accent_text);
             let count = cx
                 .store
                 .bookmarks

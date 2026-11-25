@@ -78,19 +78,45 @@ impl FileKind {
     pub fn icon(self, p: &Palette) -> (&'static str, Color32) {
         use crate::bookmarks::LabelColor as L;
         let c = |l: L| style::label_color(l, p.dark);
+        let slate = if p.dark {
+            Color32::from_rgb(0x8c, 0x96, 0xab)
+        } else {
+            Color32::from_rgb(0x5c, 0x67, 0x7d)
+        };
         match self {
             FileKind::Folder => (FOLDER_SIMPLE, p.folder),
             FileKind::Link => (LINK_SIMPLE, c(L::Teal)),
             FileKind::Config => (FILE_CODE, c(L::Violet)),
             FileKind::Code => (FILE_CODE, c(L::Blue)),
             FileKind::Script => (FILE_CODE, c(L::Green)),
-            FileKind::Text => (FILE_TEXT, p.text_faint),
+            FileKind::Text => (FILE_TEXT, slate),
             FileKind::Image => (FILE_IMAGE, c(L::Pink)),
-            FileKind::Archive => (FILE_ZIP, c(L::Yellow)),
+            FileKind::Archive => (FILE_ZIP, c(L::Orange)),
             FileKind::Pdf => (FILE_PDF, c(L::Red)),
-            FileKind::Secret => (FILE_LOCK, p.text_faint),
-            FileKind::Other => (FILE, p.text_faint),
+            FileKind::Secret => (FILE_LOCK, p.warn),
+            FileKind::Other => (FILE, slate),
         }
+    }
+}
+
+/// Calm, desaturated tint for machine/host identity glyphs (sidebar hosts and SFTP Local/Remote
+/// headers) when no custom environment label is set. Chrome and toolbar icons stay monochrome.
+pub fn host_color(icon: &str, p: &Palette) -> Color32 {
+    let pick = |dark: (u8, u8, u8), light: (u8, u8, u8)| {
+        let (r, g, b) = if p.dark { dark } else { light };
+        Color32::from_rgb(r, g, b)
+    };
+    match icon {
+        HARD_DRIVES => pick((0x74, 0x9b, 0xd4), (0x3b, 0x69, 0xad)),
+        LAPTOP | DATABASE => pick((0x5d, 0xb5, 0xbd), (0x23, 0x78, 0x82)),
+        SHIELD_CHECK => pick((0xd6, 0xa3, 0x54), (0x9c, 0x64, 0x14)),
+        CPU => pick((0x97, 0x8e, 0xe0), (0x5a, 0x4f, 0xc4)),
+        CIRCUITRY => pick((0x5e, 0xb5, 0x89), (0x26, 0x7a, 0x4e)),
+        HARD_DRIVE => pick((0xd9, 0x8d, 0x59), (0xa8, 0x55, 0x1a)),
+        DESKTOP_TOWER => pick((0x81, 0x97, 0xd6), (0x43, 0x5c, 0xa6)),
+        CLOUD => pick((0x68, 0xb2, 0xcf), (0x1f, 0x76, 0x96)),
+        CUBE => pick((0xcc, 0x7e, 0xa8), (0xa3, 0x3f, 0x77)),
+        _ => p.text_muted,
     }
 }
 

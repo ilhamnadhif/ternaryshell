@@ -17,6 +17,7 @@ use eframe::egui::{
 };
 
 use crate::term::core::{self as tcore, GridSize, TermShared};
+use crate::term::highlight;
 use crate::term::input::{self, KeyModes, Mods, MouseAction, MouseButton};
 use crate::term::scheme::{Scheme, xterm_256};
 use crate::ui::fonts;
@@ -818,9 +819,45 @@ pub fn show(
 
     // ----- render ------------------------------------------------------------------------
     let painter = ui.painter_at(rect);
+    let scheme = style.scheme;
+    // Client-side smart highlighting for plain unstyled terminal lines (skipped in full-screen
+    // TUI apps such as vim, htop, or tmux).
+    let row_highlights: Vec<Option<Vec<Option<Color32>>>> = if !mode.contains(TermMode::ALT_SCREEN)
+    {
+        let grid = term.grid();
+        let disp_off = grid.display_offset();
+        let mut row_bytes = vec![b' '; size.cols];
+        let mut row_plain = vec![false; size.cols];
+        (0..size.rows)
+            .map(|row| {
+                let line = alacritty_terminal::index::Line(row as i32 - disp_off as i32);
+                let grid_row = &grid[line];
+                for col in 0..size.cols {
+                    let c = &grid_row[Column(col)];
+                    let is_plain = c.fg == Color::Named(NamedColor::Foreground)
+                        && c.bg == Color::Named(NamedColor::Background)
+                        && !c.flags.intersects(
+                            Flags::INVERSE
+                                | Flags::DIM
+                                | Flags::HIDDEN
+                                | Flags::WIDE_CHAR
+                                | Flags::WIDE_CHAR_SPACER,
+                        );
+                    row_plain[col] = is_plain;
+                    row_bytes[col] = if c.c.is_ascii() && !c.c.is_ascii_control() {
+                        c.c as u8
+                    } else {
+                        b' '
+                    };
+                }
+                highlight::highlight_row(&row_bytes, &row_plain, scheme)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let content = term.renderable_content();
     let colors = content.colors;
-    let scheme = style.scheme;
     let default_bg = palette(257, colors, scheme);
     painter.rect_filled(rect, CornerRadius::ZERO, default_bg);
 
@@ -861,6 +898,15 @@ pub fn show(
             continue;
         }
         let mut fg = resolve_fg(indexed.cell.fg, flags, colors, scheme);
+        if let Some(hl) = row_highlights
+            .get(row)
+            .and_then(|r| r.as_ref())
+            .and_then(|cols| cols.get(col))
+            .copied()
+            .flatten()
+        {
+            fg = hl;
+        }
         let mut bg = resolve_bg(indexed.cell.bg, colors, scheme);
         if flags.contains(Flags::INVERSE) {
             let new_fg = bg.unwrap_or(default_bg);
