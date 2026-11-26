@@ -4844,7 +4844,7 @@ dependencies = [
 
 [[package]]
 name = "ternaryshell"
-version = "1.6.4"
+version = "1.6.5"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
