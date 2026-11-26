@@ -545,10 +545,10 @@ h2 .q { color: var(--fg-3); }
 .win .fr.sel { background: rgba(70,130,235,.16); }
 .win .fr.new { animation: newrow 1.6s ease-out both; }
 @keyframes newrow { from { background: rgba(79,191,133,.18); } }
-.win .fr .ic { width: 18px; font-size: 14px; color: var(--faint); margin-right: 9px; display: grid; place-items: center; }
-.win .fr .ic.dir { color: #9aa3ae; }
-.win .fr .ic.dir .i { fill: currentColor; fill-opacity: .9; stroke: none; }
-.win .fr .ic.cfg { color: #a48bf0; } .win .fr .ic.code { color: #4fbf85; } .win .fr .ic.zip { color: #e2b445; } .win .fr .ic.lnk { color: #5fb8c2; }
+.win .fr .ic { width: 18px; font-size: 14px; color: #8b929e; margin-right: 9px; display: grid; place-items: center; }
+.win .fr .ic.dir { color: #d6a354; }
+.win .fr .ic.dir .i { fill: currentColor; fill-opacity: .92; stroke: none; }
+.win .fr .ic.cfg, .win .fr .ic.code, .win .fr .ic.zip, .win .fr .ic.lnk { color: #8b929e; }
 .win .fr .nm { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .win .fr .nm em { font-style: normal; color: var(--faint); margin-left: 6px; font-size: 11.5px; }
 .win .fr .sz { width: 64px; text-align: right; color: var(--faint); font-size: 11.5px; }

@@ -59,6 +59,7 @@ static NEXT_TOAST_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone, Debug)]
 pub struct Toast {
     id: u64,
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
     kind: Kind,
     title: String,
     detail: Option<String>,

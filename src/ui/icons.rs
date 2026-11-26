@@ -70,31 +70,39 @@ impl FileKind {
             _ if matches!(lower.as_str(), "dockerfile" | "makefile" | "caddyfile") => {
                 FileKind::Config
             }
-            _ => FileKind::Text,
+            _ if matches!(
+                lower.as_str(),
+                "readme" | "license" | "licence" | "changelog" | "authors" | "notice"
+            ) =>
+            {
+                FileKind::Text
+            }
+            _ => FileKind::Other,
         }
     }
 
-    /// The icon and its colour (the label colours, so kinds read at a glance).
+    /// The icon and its colour. Folders keep a warm amber tint so navigation structure separates
+    /// cleanly from files; sensitive key/credential files reuse that muted amber on a lock glyph;
+    /// every regular file stays a unified calm neutral and communicates its type through glyph
+    /// shape rather than competing rainbow hues.
     pub fn icon(self, p: &Palette) -> (&'static str, Color32) {
-        use crate::bookmarks::LabelColor as L;
-        let c = |l: L| style::label_color(l, p.dark);
-        let slate = if p.dark {
-            Color32::from_rgb(0x8c, 0x96, 0xab)
+        let neutral = if p.dark {
+            Color32::from_rgb(0x8b, 0x92, 0x9e)
         } else {
-            Color32::from_rgb(0x5c, 0x67, 0x7d)
+            Color32::from_rgb(0x61, 0x68, 0x75)
         };
         match self {
             FileKind::Folder => (FOLDER_SIMPLE, p.folder),
-            FileKind::Link => (LINK_SIMPLE, c(L::Teal)),
-            FileKind::Config => (FILE_CODE, c(L::Violet)),
-            FileKind::Code => (FILE_CODE, c(L::Blue)),
-            FileKind::Script => (FILE_CODE, c(L::Green)),
-            FileKind::Text => (FILE_TEXT, slate),
-            FileKind::Image => (FILE_IMAGE, c(L::Pink)),
-            FileKind::Archive => (FILE_ZIP, c(L::Orange)),
-            FileKind::Pdf => (FILE_PDF, c(L::Red)),
-            FileKind::Secret => (FILE_LOCK, p.warn),
-            FileKind::Other => (FILE, slate),
+            FileKind::Link => (LINK_SIMPLE, neutral),
+            FileKind::Config => (FILE_CODE, neutral),
+            FileKind::Code => (FILE_CODE, neutral),
+            FileKind::Script => (TERMINAL_WINDOW, neutral),
+            FileKind::Text => (FILE_TEXT, neutral),
+            FileKind::Image => (FILE_IMAGE, neutral),
+            FileKind::Archive => (FILE_ZIP, neutral),
+            FileKind::Pdf => (FILE_PDF, neutral),
+            FileKind::Secret => (FILE_LOCK, p.folder),
+            FileKind::Other => (FILE, neutral),
         }
     }
 }
@@ -237,6 +245,64 @@ pub fn paint_logo(painter: &Painter, rect: Rect) {
                 painter.circle_filled(point(c, r), 52.0 * s, LOGO_INK);
             } else {
                 painter.circle_filled(point(c, r), 30.0 * s, LOGO_INK.gamma_multiply(0.32));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_kinds_and_restrained_icon_palette() {
+        assert_eq!(FileKind::of("logs", true, false, false), FileKind::Folder);
+        assert_eq!(FileKind::of("current", false, true, false), FileKind::Link);
+        assert_eq!(
+            FileKind::of("server-bin", false, false, true),
+            FileKind::Script
+        );
+        assert_eq!(FileKind::of("main.go", false, false, false), FileKind::Code);
+        assert_eq!(
+            FileKind::of("config.yaml", false, false, false),
+            FileKind::Config
+        );
+        assert_eq!(
+            FileKind::of("Dockerfile", false, false, false),
+            FileKind::Config
+        );
+        assert_eq!(FileKind::of("README", false, false, false), FileKind::Text);
+        assert_eq!(FileKind::of(".env", false, false, false), FileKind::Secret);
+        assert_eq!(
+            FileKind::of("server.pem", false, false, false),
+            FileKind::Secret
+        );
+        assert_eq!(
+            FileKind::of("blob.dat", false, false, false),
+            FileKind::Other
+        );
+
+        for dark in [true, false] {
+            let p = style::palette(dark);
+            let (_, folder_color) = FileKind::Folder.icon(&p);
+            let (secret_glyph, secret_color) = FileKind::Secret.icon(&p);
+            assert_eq!(folder_color, p.folder);
+            assert_eq!(secret_glyph, FILE_LOCK);
+            assert_eq!(secret_color, p.folder);
+
+            let (script_glyph, script_color) = FileKind::Script.icon(&p);
+            assert_eq!(script_glyph, TERMINAL_WINDOW);
+            for kind in [
+                FileKind::Link,
+                FileKind::Config,
+                FileKind::Code,
+                FileKind::Text,
+                FileKind::Image,
+                FileKind::Archive,
+                FileKind::Pdf,
+                FileKind::Other,
+            ] {
+                assert_eq!(kind.icon(&p).1, script_color);
             }
         }
     }
