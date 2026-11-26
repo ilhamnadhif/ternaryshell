@@ -94,6 +94,8 @@ fn a_server_that_stops_answering_is_noticed() {
     let server = TestServer::start();
     let conn = connect(&rt, &server);
 
+    // Wait for the initial latency ping before probing and stopping sshd.
+    wait_for(5, "initial latency", || conn.shared.lock().latency);
     // A healthy server answers the check right away: nothing changes.
     let received = conn.received();
     conn.probe(ProbeReason::NetworkChanged);
@@ -139,11 +141,23 @@ fn no_reply_probe_closes_dead_connection() {
     let server = TestServer::start();
     let conn = connect(&rt, &server);
 
+    // Let OpenSSH's post-auth messages and the initial latency ping finish before stopping sshd.
+    wait_for(5, "initial latency", || conn.shared.lock().latency);
+    let received = conn.received();
+    conn.probe(ProbeReason::NoReply);
+    wait_for(5, "healthy probe answer", || {
+        (conn.received() > received).then_some(())
+    });
+    std::thread::sleep(Duration::from_millis(300));
+
     let sessions = session_processes(&server);
     assert!(!sessions.is_empty(), "no sshd session process found");
     signal(&sessions, "-STOP");
     let _cont = ContGuard(sessions);
     conn.probe(ProbeReason::NoReply);
+    wait_for(5, "checking", || {
+        conn.shared.lock().checking_since.is_some().then_some(())
+    });
     let state = wait_for(20, "closed", || {
         let s = conn.state();
         s.is_closed().then_some(s)
