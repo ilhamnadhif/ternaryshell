@@ -209,6 +209,29 @@ enum Part {
     Target,
 }
 
+/// Wraps an argument in single quotes when it contains whitespace or shell metacharacters.
+fn shell_quote(s: &str) -> String {
+    let safe = !s.is_empty()
+        && s.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '_' | '-' | '.' | '/' | ':' | '@' | '~' | '+' | '=')
+        });
+    if safe {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+fn bracket_host(host: &str) -> String {
+    let h = host.trim();
+    if h.contains(':') && !h.starts_with('[') {
+        format!("[{h}]")
+    } else {
+        h.to_string()
+    }
+}
+
 /// The connection as the equivalent `ssh` command line.
 fn ssh_command(
     b: &Bookmark,
@@ -222,23 +245,27 @@ fn ssh_command(
         flag(format!("-p {}", b.port));
     }
     match auth {
-        Auth::Key { path } if !path.trim().is_empty() => flag(format!("-i {}", path.trim())),
-        Auth::KeychainKey => flag(format!("-i {}", t("‹pasted key›"))),
-        Auth::Agent { socket } if !socket.trim().is_empty() => {
-            flag(format!("-o IdentityAgent={}", socket.trim()))
+        Auth::Key { path } if !path.trim().is_empty() => {
+            flag(format!("-i {}", shell_quote(path.trim())))
         }
+        Auth::KeychainKey => flag(format!("-i {}", t("‹pasted key›"))),
+        Auth::Agent { socket } if !socket.trim().is_empty() => flag(format!(
+            "-o {}",
+            shell_quote(&format!("IdentityAgent={}", socket.trim()))
+        )),
         _ => {}
     }
     if let Ok(chain) = store.jump_chain(b)
         && !chain.is_empty()
     {
         let hops: Vec<String> = chain.iter().map(|h| h.address()).collect();
-        flag(format!("-J {}", hops.join(",")));
+        flag(format!("-J {}", shell_quote(&hops.join(","))));
     }
     for f in forwards {
+        let fh = bracket_host(&f.host);
         flag(match f.kind {
-            ForwardKind::Local => format!("-L {}:{}:{}", f.listen_port, f.host, f.port),
-            ForwardKind::Remote => format!("-R {}:{}:{}", f.listen_port, f.host, f.port),
+            ForwardKind::Local => format!("-L {}:{}:{}", f.listen_port, fh, f.port),
+            ForwardKind::Remote => format!("-R {}:{}:{}", f.listen_port, fh, f.port),
             ForwardKind::Dynamic => format!("-D {}", f.listen_port),
         });
     }
@@ -255,7 +282,7 @@ fn ssh_command(
         if target.is_empty() {
             "host".to_string()
         } else {
-            target
+            shell_quote(&target)
         },
         Part::Target,
     ));
@@ -273,6 +300,7 @@ enum TestState {
 }
 
 pub struct Editor {
+    session_id: Uuid,
     pub draft: Bookmark,
     pub is_new: bool,
     section: Section,
@@ -306,8 +334,9 @@ pub struct Editor {
     shown_key_info: Option<KeyInfo>,
     /// The last checked key text and what it is.
     key_check: Option<(String, KeyCheck, Option<KeyInfo>)>,
-    /// The login method when the editor opened (a saved passphrase belongs to that key).
+    /// The login method and endpoint when the editor opened (saved secrets belong to these).
     original_auth: Auth,
+    original_endpoint: (String, u16, String),
     agent_socket: String,
     agents: Vec<(&'static str, String)>,
     /// "Other socket…" is picked in the agent list.
@@ -321,6 +350,8 @@ pub struct Editor {
     /// Tags used by the other connections of the group (suggested for a new one).
     tag_suggestions: Option<(Option<Uuid>, Vec<String>)>,
     test: Option<TestState>,
+    /// Form fingerprint when `test` was started (changing any field clears stale test status).
+    test_inputs: u64,
 }
 
 #[allow(clippy::large_enum_variant)] // short-lived, returned once per frame
@@ -335,7 +366,11 @@ pub enum EditorResult {
     },
     /// Connect and log in with this bookmark (as typed), then close: "Test Connection". The
     /// app starts the connection and hands it back with [`Editor::start_test`].
-    Test(Bookmark),
+    Test {
+        bookmark: Bookmark,
+        secrets: SecretSet,
+        use_keychain: bool,
+    },
 }
 
 fn ssh_keys() -> Vec<String> {
@@ -386,7 +421,13 @@ impl Editor {
         let other_agent =
             !agent_socket.is_empty() && !agents.iter().any(|(_, p)| *p == agent_socket);
         Self {
+            session_id: Uuid::new_v4(),
             original_auth: bookmark.auth.clone(),
+            original_endpoint: (
+                bookmark.host.trim().to_ascii_lowercase(),
+                bookmark.port,
+                bookmark.username.trim().to_string(),
+            ),
             port_text: bookmark.port.to_string(),
             tags: bookmark.tags.clone(),
             tag_input: String::new(),
@@ -421,6 +462,7 @@ impl Editor {
             command: None,
             tag_suggestions: None,
             test: None,
+            test_inputs: 0,
         }
     }
 
@@ -444,7 +486,7 @@ impl Editor {
         self.section = Section::Login;
     }
 
-    /// A fingerprint of the fields a save checks (the forwards are checked as they are typed).
+    /// A fingerprint of the fields a save or test checks.
     fn inputs_hash(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -454,16 +496,30 @@ impl Editor {
             &self.port_text,
             &self.draft.username,
             self.auth,
-            &self.key_path,
-            &self.key_text,
-            &self.agent_socket,
+            &self.password,
+            &self.passphrase,
+            self.clear_password,
+            self.clear_passphrase,
         )
             .hash(&mut h);
+        (
+            &self.key_path,
+            &self.key_text,
+            self.replace_stored_key,
+            &self.agent_socket,
+            self.draft.jump,
+            self.draft.legacy_algorithms,
+        )
+            .hash(&mut h);
+        for r in &self.forwards {
+            (r.kind as u8, &r.listen, &r.dest).hash(&mut h);
+        }
         h.finish()
     }
 
     /// The connection started for "Test Connection".
     pub fn start_test(&mut self, connection: Connection) {
+        self.test_inputs = self.inputs_hash();
         self.test = Some(TestState::Running(connection));
     }
 
@@ -754,178 +810,235 @@ impl Editor {
             664.0f32.min(screen.height() - 40.0),
         );
         let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
-        // A mistake in a field goes away as soon as the form is edited.
-        if self.problem.as_ref().is_some_and(|p| p.forward.is_none())
-            && self.inputs_hash() != self.problem_inputs
-        {
+        // Any validation or Keychain error clears once the user edits the form.
+        let cur_inputs = self.inputs_hash();
+        if self.problem.is_some() && cur_inputs != self.problem_inputs {
             self.problem = None;
+        }
+        // Changing any connection setting invalidates a previous test run.
+        if self.test.is_some() && cur_inputs != self.test_inputs {
+            if let Some(TestState::Running(c)) = self.test.take() {
+                c.disconnect();
+            }
+            self.test = None;
         }
         let forward_problems = self.forward_problems();
-        // A forward mistake that is fixed no longer holds saving back.
-        if self
-            .problem
-            .as_ref()
-            .is_some_and(|p| p.forward.is_some() && forward_problems.is_empty())
-        {
-            self.problem = None;
-        }
         let live_problem = !forward_problems.is_empty();
         let mut save = false;
         let mut save_connect = enter && !live_problem;
         let mut test = false;
         let (cmd_parts, cmd_plain) = self.same_as(store);
-        let modal = style::modal(ctx, egui::Id::new("bookmark-editor")).show(ctx, |ui| {
-            ui.set_width(size.x);
-            ui.set_height(size.y);
-            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-            let p = style::pal(ui);
-            let full = Rect::from_min_size(ui.max_rect().min, size);
-            let nav = Rect::from_min_size(full.min, vec2(NAV_W, size.y));
-            forms::paint_nav(ui.painter(), nav, &p);
-            self.nav(ui, nav, store, &forward_problems);
+        let modal = style::modal(ctx, egui::Id::new(("bookmark-editor", self.session_id))).show(
+            ctx,
+            |ui| {
+                ui.set_width(size.x);
+                ui.set_height(size.y);
+                ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                let p = style::pal(ui);
+                let full = Rect::from_min_size(ui.max_rect().min, size);
+                let nav = Rect::from_min_size(full.min, vec2(NAV_W, size.y));
+                forms::paint_nav(ui.painter(), nav, &p);
+                self.nav(ui, nav, store, &forward_problems);
 
-            let main = Rect::from_min_max(pos2(nav.right(), full.top()), full.max);
-            let title = match self.section {
-                Section::Server if self.is_new => t("New connection"),
-                Section::Server => t("Server"),
-                Section::Login => t("Login"),
-                Section::Network => t("Network"),
-                Section::Session => t("Session"),
-            };
-            if forms::sheet_head(
-                ui,
-                main.left() + 24.0,
-                main.top() + 20.0,
-                main.right() - 24.0,
-                title,
-            ) {
-                result = EditorResult::Cancel;
-            }
-            // Footer, "Same as", then the body in what is left.
-            let foot = Rect::from_min_max(pos2(main.left(), main.bottom() - 55.0), main.max);
-            forms::paint_footer(ui.painter(), foot, false, &p);
-            let cmd = Rect::from_min_max(
-                pos2(main.left() + 24.0, foot.top() - 14.0 - 36.0),
-                pos2(main.right() - 24.0, foot.top() - 14.0),
-            );
-            self.same_as_line(ui, cmd, &cmd_parts, &cmd_plain);
-            let body = Rect::from_min_max(
-                pos2(main.left() + 24.0, main.top() + 62.0),
-                pos2(main.right() - 24.0, cmd.top() - 12.0),
-            );
-            let mut body_ui = ui.new_child(egui::UiBuilder::new().max_rect(body));
-            egui::ScrollArea::vertical()
-                .id_salt(("editor-form", self.section as u8))
-                .auto_shrink([false, false])
-                .show(&mut body_ui, |ui| {
-                    ui.set_width(body.width());
-                    style::form_spacing(ui);
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    match self.section {
-                        Section::Server => self.server_section(ui, store),
-                        Section::Login => self.login_section(ui),
-                        Section::Network => self.network_section(ui, store, &forward_problems),
-                        Section::Session => self.session_section(ui),
-                    }
-                });
-            // Footer content.
-            let mut f = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(foot.shrink2(vec2(16.0, 12.0)))
-                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
-            );
-            f.spacing_mut().item_spacing.x = 8.0;
-            let problem_text = if live_problem {
-                let n = forward_problems.len();
-                Some(if n == 1 {
-                    t("1 problem in Network").to_string()
-                } else {
-                    tf("{} problems in Network", &[&n.to_string()])
-                })
-            } else {
-                self.problem.as_ref().map(|prob| {
-                    if prob.section == Section::Network && prob.forward.is_some() {
-                        t("1 problem in Network").to_string()
-                    } else {
-                        prob.message.clone()
-                    }
-                })
-            };
-            match problem_text {
-                Some(text) => {
-                    f.spacing_mut().item_spacing.x = 7.0;
-                    kit::icon(&mut f, icons::WARNING_CIRCLE, 15.0, p.err);
-                    let w = (f.available_width() - 330.0).max(60.0);
-                    f.allocate_ui_with_layout(
-                        vec2(w, 30.0),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(&text).font(style::medium(12.5)).color(p.err),
-                                )
-                                .truncate(),
-                            )
-                            .on_hover_text(&text);
-                        },
-                    );
-                    f.spacing_mut().item_spacing.x = 8.0;
-                }
-                None => {
-                    test = self.test_status(&mut f);
-                }
-            }
-            f.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_enabled_ui(!live_problem, |ui| {
-                    let sc = super::keys::Shortcut::SaveAndConnect.label();
-                    let r = kit::button_kbd(
-                        ui,
-                        kit::Kind::Primary,
-                        None,
-                        t("Save & Connect"),
-                        Some(&sc),
-                        false,
-                        false,
-                    );
-                    #[cfg(debug_assertions)]
-                    crate::devtest::record("editor-save-connect", r.rect);
-                    if r.clicked() {
-                        save_connect = true;
-                    }
-                    if kit::secondary(ui, None, t("Save")).clicked() {
-                        save = true;
-                    }
-                });
-                if kit::secondary(ui, None, t("Cancel")).clicked() {
+                let main = Rect::from_min_max(pos2(nav.right(), full.top()), full.max);
+                let title = match self.section {
+                    Section::Server if self.is_new => t("New connection"),
+                    Section::Server => t("Server"),
+                    Section::Login => t("Login"),
+                    Section::Network => t("Network"),
+                    Section::Session => t("Session"),
+                };
+                if forms::sheet_head(
+                    ui,
+                    main.left() + 24.0,
+                    main.top() + 20.0,
+                    main.right() - 24.0,
+                    title,
+                ) {
                     result = EditorResult::Cancel;
                 }
-            });
-        });
+                // Footer, "Same as", then the body in what is left.
+                let foot = Rect::from_min_max(pos2(main.left(), main.bottom() - 55.0), main.max);
+                forms::paint_footer(ui.painter(), foot, false, &p);
+                let cmd = Rect::from_min_max(
+                    pos2(main.left() + 24.0, foot.top() - 14.0 - 36.0),
+                    pos2(main.right() - 24.0, foot.top() - 14.0),
+                );
+                self.same_as_line(ui, cmd, &cmd_parts, &cmd_plain);
+                let body = Rect::from_min_max(
+                    pos2(main.left() + 24.0, main.top() + 62.0),
+                    pos2(main.right() - 24.0, cmd.top() - 12.0),
+                );
+                let mut body_ui = ui.new_child(egui::UiBuilder::new().max_rect(body));
+                egui::ScrollArea::vertical()
+                    .id_salt(("editor-form", self.section as u8))
+                    .auto_shrink([false, false])
+                    .show(&mut body_ui, |ui| {
+                        ui.set_width(body.width());
+                        style::form_spacing(ui);
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        match self.section {
+                            Section::Server => self.server_section(ui, store),
+                            Section::Login => self.login_section(ui),
+                            Section::Network => self.network_section(ui, store, &forward_problems),
+                            Section::Session => self.session_section(ui),
+                        }
+                    });
+                // Footer content.
+                let mut f = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(foot.shrink2(vec2(16.0, 12.0)))
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                );
+                f.spacing_mut().item_spacing.x = 8.0;
+                let problem_text = if live_problem {
+                    let n = forward_problems.len();
+                    Some(if n == 1 {
+                        t("1 problem in Network").to_string()
+                    } else {
+                        tf("{} problems in Network", &[&n.to_string()])
+                    })
+                } else {
+                    self.problem.as_ref().map(|prob| {
+                        if prob.section == Section::Network && prob.forward.is_some() {
+                            t("1 problem in Network").to_string()
+                        } else {
+                            prob.message.clone()
+                        }
+                    })
+                };
+                match problem_text {
+                    Some(text) => {
+                        f.spacing_mut().item_spacing.x = 7.0;
+                        kit::icon(&mut f, icons::WARNING_CIRCLE, 15.0, p.err);
+                        let w = (f.available_width() - 330.0).max(60.0);
+                        f.allocate_ui_with_layout(
+                            vec2(w, 30.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(&text).font(style::medium(12.5)).color(p.err),
+                                    )
+                                    .truncate(),
+                                )
+                                .on_hover_text(&text);
+                            },
+                        );
+                        f.spacing_mut().item_spacing.x = 8.0;
+                    }
+                    None => {
+                        test = self.test_status(&mut f);
+                    }
+                }
+                f.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_enabled_ui(!live_problem, |ui| {
+                        let sc = super::keys::Shortcut::SaveAndConnect.label();
+                        let r = kit::button_kbd(
+                            ui,
+                            kit::Kind::Primary,
+                            None,
+                            t("Save & Connect"),
+                            Some(&sc),
+                            false,
+                            false,
+                        );
+                        #[cfg(debug_assertions)]
+                        crate::devtest::record("editor-save-connect", r.rect);
+                        if r.clicked() {
+                            save_connect = true;
+                        }
+                        if kit::secondary(ui, None, t("Save")).clicked() {
+                            save = true;
+                        }
+                    });
+                    if kit::secondary(ui, None, t("Cancel")).clicked() {
+                        result = EditorResult::Cancel;
+                    }
+                });
+            },
+        );
         if (save || save_connect) && matches!(result, EditorResult::Open) && self.validate() {
             result = self.saved(save_connect);
         }
         if test && matches!(result, EditorResult::Open) {
+            self.test_inputs = self.inputs_hash();
             let mut probe = self.current().0;
-            if let Ok(target) = crate::bookmarks::model::parse_target(&probe.host) {
-                if let Some(u) = target.user {
-                    probe.username = u;
+            probe.forwards.clear();
+            let port_valid = self.port_text.trim().parse::<u16>().ok().filter(|&p| p > 0);
+            match crate::bookmarks::model::parse_target(&probe.host) {
+                Ok(target) => {
+                    if let Some(u) = target.user {
+                        probe.username = u;
+                    }
+                    probe.host = target.host;
+                    match target.port.or(port_valid) {
+                        Some(port) => {
+                            probe.port = port;
+                            let mut secrets = SecretSet::default();
+                            if matches!(probe.auth, Auth::Password) && !self.password.is_empty() {
+                                secrets.password = Some(self.password.clone());
+                            }
+                            if self.new_pasted_key() && !self.key_text.trim().is_empty() {
+                                secrets.private_key =
+                                    Some(keys::normalize_key_text(&self.key_text));
+                            }
+                            if probe.auth.uses_key() && !self.passphrase.is_empty() {
+                                secrets.passphrase = Some(self.passphrase.clone());
+                            }
+                            let same_endpoint = (
+                                probe.host.trim().to_ascii_lowercase(),
+                                probe.port,
+                                probe.username.trim().to_string(),
+                            ) == self.original_endpoint;
+                            let cleared = match probe.auth {
+                                Auth::Password => self.clear_password,
+                                Auth::Key { .. } => self.clear_passphrase,
+                                Auth::KeychainKey => self.clear_passphrase && self.new_pasted_key(),
+                                Auth::Agent { .. } => false,
+                            };
+                            let use_keychain = !self.is_new
+                                && same_endpoint
+                                && probe.auth == self.original_auth
+                                && !cleared;
+                            result = EditorResult::Test {
+                                bookmark: probe,
+                                secrets,
+                                use_keychain,
+                            };
+                        }
+                        None => {
+                            self.test = Some(TestState::Failed(
+                                t("Port must be a number between 1 and 65535.").into(),
+                            ));
+                        }
+                    }
                 }
-                probe.host = target.host;
-                if let Some(port) = target.port {
-                    probe.port = port;
+                Err(e) => {
+                    self.test = Some(TestState::Failed(e));
                 }
-                result = EditorResult::Test(probe);
-            } else {
-                self.test = Some(TestState::Failed(t("Host is required.").into()));
             }
         }
         if super::dialogs::escape_only(ctx, &modal) && matches!(result, EditorResult::Open) {
             result = EditorResult::Cancel;
         }
-        if matches!(result, EditorResult::Cancel | EditorResult::Save { .. })
-            && let Some(TestState::Running(c)) = &self.test
-        {
-            c.disconnect();
+        if matches!(result, EditorResult::Cancel | EditorResult::Save { .. }) {
+            if let Some(TestState::Running(c)) = &self.test {
+                c.disconnect();
+            }
+            // Drop any undo history for secret fields from egui memory.
+            ctx.data_mut(|d| {
+                for key in [
+                    "editor-show-password",
+                    "editor-show-passphrase",
+                    "editor-key-text-input",
+                ] {
+                    d.remove::<egui::text_edit::TextEditState>(egui::Id::new((
+                        key,
+                        self.session_id,
+                    )));
+                }
+            });
         }
         result
     }
@@ -1684,7 +1797,7 @@ impl Editor {
     /// removes the last one.
     fn tags_input(&mut self, ui: &mut Ui) {
         let p = style::pal(ui);
-        let id = egui::Id::new("editor-tag-input");
+        let id = egui::Id::new(("editor-tag-input", self.session_id));
         let focused = ui.memory(|m| m.has_focus(id));
         let width = ui.available_width();
         let mut remove = None;
@@ -1734,6 +1847,7 @@ impl Editor {
                             remove = Some(i);
                         }
                     }
+                    let was_empty = self.tag_input.is_empty();
                     let edit = ui.add(
                         egui::TextEdit::singleline(&mut self.tag_input)
                             .id(id)
@@ -1751,7 +1865,8 @@ impl Editor {
                         self.take_tag_input();
                     }
                     if edit.has_focus()
-                        && self.tag_input.is_empty()
+                        && was_empty
+                        && !edit.changed()
                         && ui.input(|i| i.key_pressed(egui::Key::Backspace))
                     {
                         self.tags.pop();
@@ -1898,10 +2013,13 @@ impl Editor {
         match self.auth {
             AuthKind::Password => {
                 let id = self.draft.id;
+                let session_id = self.session_id;
+                let mut kc_err = None;
                 frow(ui, t("Password"), false, |ui| {
                     secret_block(
                         ui,
                         SecretUi {
+                            session_id,
                             text: &mut self.password,
                             shown: &mut self.show_password,
                             had: self.had_password,
@@ -1911,9 +2029,12 @@ impl Editor {
                             saved: (id, SecretKind::Password),
                             record: "editor-show-password",
                         },
-                        &mut self.problem,
+                        &mut kc_err,
                     );
                 });
+                if let Some(err) = kc_err {
+                    self.set_error(err);
+                }
                 help_row(
                     ui,
                     &tf(
@@ -1933,22 +2054,29 @@ impl Editor {
                     ui.add_space(16.0);
                 }
                 let id = self.draft.id;
+                let session_id = self.session_id;
+                let key_changed = self.new_pasted_key() || self.auth_now() != self.original_auth;
+                let mut kc_err = None;
                 frow(ui, t("Key passphrase"), false, |ui| {
                     secret_block(
                         ui,
                         SecretUi {
+                            session_id,
                             text: &mut self.passphrase,
                             shown: &mut self.show_passphrase,
-                            had: self.had_passphrase,
+                            had: self.had_passphrase && !key_changed,
                             clear: &mut self.clear_passphrase,
                             forget_label: t("Forget saved passphrase"),
                             hint: t("Only if the key is encrypted"),
                             saved: (id, SecretKind::Passphrase),
                             record: "editor-show-passphrase",
                         },
-                        &mut self.problem,
+                        &mut kc_err,
                     );
                 });
+                if let Some(err) = kc_err {
+                    self.set_error(err);
+                }
                 help_row(
                     ui,
                     &tf(
@@ -2027,11 +2155,12 @@ impl Editor {
             // The field to paste the key into.
             let empty_bad = problem && self.key_text.trim().is_empty();
             let key_box = egui::ScrollArea::vertical()
-                .id_salt("editor-key-scroll")
+                .id_salt(("editor-key-scroll", self.session_id))
                 .max_height(120.0)
                 .show(ui, |ui| {
                     ui.add(
                         style::input_multiline(&mut self.key_text)
+                            .id(egui::Id::new(("editor-key-text-input", self.session_id)))
                             .font(style::mono(11.5))
                             .hint_text("-----BEGIN OPENSSH PRIVATE KEY-----\n…\n-----END OPENSSH PRIVATE KEY-----")
                             .desired_rows(5)
@@ -2121,7 +2250,12 @@ impl Editor {
                                         .truncate(),
                                     );
                                     let encrypted = info.as_ref().is_some_and(|i| i.encrypted)
-                                        || matches!(check, Some(KeyCheck::Encrypted));
+                                        || matches!(check, Some(KeyCheck::Encrypted))
+                                        || (stored
+                                            && self
+                                                .shown_key_info
+                                                .as_ref()
+                                                .is_some_and(|i| i.encrypted));
                                     if encrypted {
                                         kit::badge(
                                             ui,
@@ -2327,6 +2461,7 @@ impl Editor {
         if replace {
             self.replace_stored_key = true;
             self.shown_key = None;
+            self.shown_key_info = None;
             self.key_text.clear();
         }
     }
@@ -2354,14 +2489,14 @@ impl Editor {
                 .set_directory(paths::home_dir().join(".ssh"))
                 .pick_file()
         {
-            match std::fs::read(&path) {
-                Ok(data) if data.len() <= keys::MAX_KEY_TEXT => {
-                    self.key_text = String::from_utf8_lossy(&data).into_owned();
+            match keys::read_key_file(&path) {
+                Ok(text) => {
+                    self.key_text = text;
                     self.replace_stored_key = true;
                     self.shown_key = None;
+                    self.shown_key_info = None;
                 }
-                Ok(_) => self.set_error(t("This does not look like a private key.").into()),
-                Err(e) => self.set_error(format!("{}: {e}", path.display())),
+                Err(e) => self.set_error(e.to_string()),
             }
         }
     }
@@ -2486,14 +2621,27 @@ impl Editor {
         let dark = p.dark;
         // Jump host: the select on the right of its label.
         let own = self.draft.id;
+        // Count the deepest existing downstream chain passing through `own`, so picking a jump
+        // host here can never push any dependent bookmark past `MAX_JUMPS`.
+        let downstream_depth = store
+            .bookmarks
+            .iter()
+            .filter_map(|b| {
+                let chain = store.jump_chain(b).ok()?;
+                let pos = chain.iter().position(|hop| hop.id == own)?;
+                Some(chain.len() - pos)
+            })
+            .max()
+            .unwrap_or(0);
         let mut options: Vec<(String, String, Uuid)> = store
             .bookmarks
             .iter()
             .filter(|b| b.id != own)
             .filter(|b| {
-                store
-                    .jump_chain(b)
-                    .is_ok_and(|chain| chain.iter().all(|hop| hop.id != own))
+                store.jump_chain(b).is_ok_and(|chain| {
+                    chain.iter().all(|hop| hop.id != own)
+                        && chain.len() + 1 + downstream_depth <= crate::bookmarks::store::MAX_JUMPS
+                })
             })
             .map(|b| (b.display_name(), b.address(), b.id))
             .collect();
@@ -3598,12 +3746,13 @@ struct SecretUi<'a> {
     hint: &'a str,
     saved: (Uuid, SecretKind),
     record: &'a str,
+    session_id: Uuid,
 }
 
-fn secret_block(ui: &mut Ui, s: SecretUi, problem: &mut Option<Problem>) {
+fn secret_block(ui: &mut Ui, s: SecretUi, error: &mut Option<String>) {
     let p = style::pal(ui);
     let saved = s.had && !*s.clear;
-    if saved && !*s.shown {
+    if saved && !*s.shown && s.text.is_empty() {
         // Saved: a green check and plain text (Redesign 3.1: no tinted band).
         let width = ui.available_width();
         let (r, _) = ui.allocate_exact_size(vec2(width, 30.0), Sense::hover());
@@ -3632,7 +3781,7 @@ fn secret_block(ui: &mut Ui, s: SecretUi, problem: &mut Option<Problem>) {
             *s.clear = true;
             s.text.clear();
         }
-        let copied_id = egui::Id::new(("secret-copied", s.record));
+        let copied_id = egui::Id::new(("secret-copied", s.record, s.session_id));
         let copy = copy_button(&mut right, copied_id);
         #[cfg(debug_assertions)]
         crate::devtest::record(format!("{}-copy", s.record), copy.rect);
@@ -3643,13 +3792,7 @@ fn secret_block(ui: &mut Ui, s: SecretUi, problem: &mut Option<Problem>) {
                     mark_copied(right.ctx(), copied_id);
                 }
                 Ok(None) => {}
-                Err(e) => {
-                    *problem = Some(Problem {
-                        message: format!("{e:#}"),
-                        section: Section::Login,
-                        forward: None,
-                    })
-                }
+                Err(e) => *error = Some(format!("{e:#}")),
             }
         }
         let show = kit::button_ex(
@@ -3668,13 +3811,7 @@ fn secret_block(ui: &mut Ui, s: SecretUi, problem: &mut Option<Problem>) {
                     *s.shown = true;
                 }
                 Ok(None) => {}
-                Err(e) => {
-                    *problem = Some(Problem {
-                        message: format!("{e:#}"),
-                        section: Section::Login,
-                        forward: None,
-                    })
-                }
+                Err(e) => *error = Some(format!("{e:#}")),
             }
         }
         return;
@@ -3693,15 +3830,18 @@ fn secret_block(ui: &mut Ui, s: SecretUi, problem: &mut Option<Problem>) {
         s.shown,
         &hint,
         saved.then_some(s.saved),
-        problem,
+        error,
         s.record,
+        s.session_id,
     );
-    if s.had && *s.clear {
+    if s.had && *s.clear && s.text.is_empty() {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             kit::badge(ui, t("Will be forgotten"), Tone::Warn, Some(icons::TRASH));
             if kit::button_ex(ui, kit::Kind::Ghost, None, t("Keep"), true).clicked() {
                 *s.clear = false;
+                s.text.clear();
+                *s.shown = false;
             }
         });
     }
@@ -3710,17 +3850,20 @@ fn secret_block(ui: &mut Ui, s: SecretUi, problem: &mut Option<Problem>) {
 /// A password field with an eye button inside it. Showing a value that is saved (`saved`) and
 /// not typed over loads it from the Keychain into the field, to be read or copied; saving it
 /// unchanged stores the same value.
+#[allow(clippy::too_many_arguments)]
 fn secret_input(
     ui: &mut Ui,
     text: &mut String,
     shown: &mut bool,
     hint: &str,
     saved: Option<(Uuid, SecretKind)>,
-    problem: &mut Option<Problem>,
-    _record: &str,
+    error: &mut Option<String>,
+    record: &str,
+    session_id: Uuid,
 ) -> egui::Response {
     let field = ui.add(
         style::input(text)
+            .id(egui::Id::new((record, session_id)))
             .password(!*shown)
             .hint_text(hint)
             .margin(egui::Margin {
@@ -3735,7 +3878,11 @@ fn secret_input(
         vec2(18.0, 18.0),
     );
     let resp = ui
-        .interact(eye, egui::Id::new(_record), Sense::click())
+        .interact(
+            eye,
+            egui::Id::new((record, "eye", session_id)),
+            Sense::click(),
+        )
         .on_hover_text(if *shown { t("Hide") } else { t("Show") });
     kit::paint_icon_button(
         ui,
@@ -3747,7 +3894,7 @@ fn secret_input(
         false,
     );
     #[cfg(debug_assertions)]
-    crate::devtest::record(_record, eye);
+    crate::devtest::record(record, eye);
     if resp.clicked() {
         *shown = !*shown;
         if *shown
@@ -3757,13 +3904,7 @@ fn secret_input(
             match secrets::get(id, kind) {
                 Ok(Some(value)) => *text = value,
                 Ok(None) => {}
-                Err(e) => {
-                    *problem = Some(Problem {
-                        message: format!("{e:#}"),
-                        section: Section::Login,
-                        forward: None,
-                    })
-                }
+                Err(e) => *error = Some(format!("{e:#}")),
             }
         }
     }

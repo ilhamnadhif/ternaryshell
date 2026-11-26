@@ -965,11 +965,13 @@ impl Sidebar {
             painter.circle_filled(pos2(x + 4.0, cy), 4.0, c);
         }
         x += 8.0 + 8.0;
-        // Right side: + and ⋯ while hovered, the count otherwise.
+        // Right side: + and ⋯ while hovered (or while its popup menu is open), the count otherwise.
         let mut right = rect.right() - 8.0;
         let mut add = None;
         let mut more = None;
-        if hovered && group.is_some() {
+        let more_popup_id = egui::Id::new(("section-more-menu", key));
+        let more_open = egui::Popup::is_id_open(ui.ctx(), more_popup_id);
+        if (hovered || more_open) && group.is_some() {
             let more_r = Rect::from_min_size(pos2(right - 20.0, cy - 10.0), vec2(20.0, 20.0));
             let add_r = Rect::from_min_size(
                 pos2(more_r.left() - 2.0 - 20.0, cy - 10.0),
@@ -1071,8 +1073,9 @@ impl Sidebar {
             }
         }
         if let Some(m) = &more {
-            let popup =
-                egui::Popup::menu(m).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+            let popup = egui::Popup::menu(m)
+                .id(more_popup_id)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
             popup.show(|ui| self.group_menu(ui, cx, gid));
         }
         let popup = egui::Popup::context_menu(&resp)
@@ -1487,11 +1490,13 @@ impl Sidebar {
         let icon = kit::host_icon(b.host_icon());
         kit::paint_host_glyph(&painter, glyph, icon, label_color, status, bg, &p);
 
-        // Right side: the hover actions, why it matched, or how many tabs are open on it.
+        // Right side: the hover actions (kept while its popup menu is open), why it matched, or how many tabs are open on it.
         let mut right = rect.right() - 6.0;
         let mut connect_click = false;
         let mut more_resp = None;
-        if hovered && hit.is_none() {
+        let more_popup_id = egui::Id::new(("row-more-menu", id));
+        let more_open = egui::Popup::is_id_open(ui.ctx(), more_popup_id);
+        if (hovered || more_open) && hit.is_none() {
             let more_r = Rect::from_min_size(pos2(right - 20.0, cy - 10.0), vec2(20.0, 20.0));
             let go_r = Rect::from_min_size(
                 pos2(more_r.left() - 2.0 - 20.0, cy - 10.0),
@@ -1589,7 +1594,9 @@ impl Sidebar {
             }
         }
         if let Some(more) = &more_resp {
-            egui::Popup::menu(more).show(|ui| host_menu(ui, cx, b));
+            egui::Popup::menu(more)
+                .id(more_popup_id)
+                .show(|ui| host_menu(ui, cx, b));
         }
         resp.context_menu(|ui| {
             self.selected = Some(id);
@@ -1780,6 +1787,7 @@ impl Sidebar {
         let resp = egui::Area::new(egui::Id::new("sidebar-hover-card"))
             .order(Order::Foreground)
             .fixed_pos(pos2(cx.right - 12.0, top - 8.0))
+            .constrain_to(ctx.content_rect().shrink(8.0))
             .show(ctx, |ui| {
                 let p = style::pal(ui);
                 kit::popover_frame(ui)

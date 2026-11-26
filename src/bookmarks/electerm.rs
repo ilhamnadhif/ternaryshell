@@ -54,6 +54,10 @@ fn s<'a>(v: &'a Value, key: &str) -> &'a str {
         .unwrap_or("")
 }
 
+fn raw_str<'a>(v: &'a Value, key: &str) -> &'a str {
+    v.get(key).and_then(Value::as_str).unwrap_or("")
+}
+
 fn ids(v: &Value, key: &str) -> Vec<String> {
     v.get(key)
         .and_then(Value::as_array)
@@ -70,8 +74,14 @@ fn port(v: &Value) -> u16 {
         Some(Value::Number(n)) => n
             .as_u64()
             .and_then(|p| u16::try_from(p).ok())
+            .filter(|&p| p > 0)
             .unwrap_or(DEFAULT_PORT),
-        Some(Value::String(t)) => t.trim().parse().unwrap_or(DEFAULT_PORT),
+        Some(Value::String(t)) => t
+            .trim()
+            .parse::<u16>()
+            .ok()
+            .filter(|&p| p > 0)
+            .unwrap_or(DEFAULT_PORT),
         _ => DEFAULT_PORT,
     }
 }
@@ -247,7 +257,8 @@ pub fn read(value: &Value) -> Result<Incoming> {
         }
 
         // Credentials can come from a saved profile.
-        let profile = (s(b, "authType") == "profiles")
+        let auth_type = s(b, "authType");
+        let profile = (auth_type == "profiles")
             .then(|| profiles.get(s(b, "profile")).copied())
             .flatten();
         let field = |key: &str| -> String {
@@ -257,20 +268,39 @@ pub fn read(value: &Value) -> Result<Incoming> {
             }
             profile.map(|p| s(p, key).to_string()).unwrap_or_default()
         };
+        let raw_field = |key: &str| -> (String, bool) {
+            let own = raw_str(b, key);
+            if !own.is_empty() {
+                return (own.to_string(), false);
+            }
+            (
+                profile
+                    .map(|p| raw_str(p, key).to_string())
+                    .unwrap_or_default(),
+                true,
+            )
+        };
 
         let mut secret = SecretSet::default();
-        let mut password = field("password");
-        let encrypted_flag = b
+        let (mut password, pw_from_profile) = raw_field("password");
+        let encrypted_src = if pw_from_profile {
+            profile.unwrap_or(b)
+        } else {
+            b
+        };
+        let encrypted_flag = encrypted_src
             .get("passwordEncrypted")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        if encrypted_flag && !s(b, "password").is_empty() {
-            password = legacy_decode(s(b, "password"));
+        if encrypted_flag && !password.is_empty() {
+            password = legacy_decode(&password);
         }
-        let key_text = field("privateKey");
+        let (key_text, _) = raw_field("privateKey");
         let key_path = field("privateKeyPath");
-        let passphrase = field("passphrase");
-        let auth = if !key_text.is_empty() {
+        let (passphrase, _) = raw_field("passphrase");
+        let auth = if auth_type.eq_ignore_ascii_case("password") {
+            Auth::Password
+        } else if !key_text.trim().is_empty() {
             secret.private_key = Some(if key_text.ends_with('\n') {
                 key_text
             } else {
@@ -303,6 +333,9 @@ pub fn read(value: &Value) -> Result<Incoming> {
         if start_dir.is_empty() {
             start_dir = s(b, "startDirectoryRemote").to_string();
         }
+        start_dir.retain(|c| !c.is_control());
+        let mut local_start_dir = s(b, "startDirectoryLocal").to_string();
+        local_start_dir.retain(|c| !c.is_control());
         let startup_command = b
             .get("runScripts")
             .and_then(Value::as_array)
@@ -346,7 +379,7 @@ pub fn read(value: &Value) -> Result<Incoming> {
             tags: Vec::new(),
             notes: s(b, "description").to_string(),
             start_dir,
-            local_start_dir: s(b, "startDirectoryLocal").to_string(),
+            local_start_dir,
             startup_command,
             ..Default::default()
         });

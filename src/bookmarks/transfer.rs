@@ -350,7 +350,14 @@ fn read_ternaryshell(value: serde_json::Value) -> Result<Incoming> {
     }
     let mut bookmarks = Vec::with_capacity(file.bookmarks.len());
     let mut secrets = HashMap::new();
-    for e in file.bookmarks {
+    let mut seen_ids = HashSet::new();
+    for mut e in file.bookmarks {
+        e.bookmark.start_dir.retain(|c| !c.is_control());
+        e.bookmark.local_start_dir.retain(|c| !c.is_control());
+        if !seen_ids.insert(e.bookmark.id) {
+            e.bookmark.id = Uuid::new_v4();
+            seen_ids.insert(e.bookmark.id);
+        }
         if !e.secrets.is_empty() {
             secrets.insert(e.bookmark.id, e.secrets);
         }
@@ -406,7 +413,9 @@ pub fn from_ssh_config(hosts: &[ssh_config::SshConfigHost]) -> Incoming {
         })
         .collect();
     // ProxyJump a,b: the connection goes through b, and b through a (when b names no jump of
-    // its own). Hops must be hosts of the same config.
+    // its own). Hops must be hosts of the same config. Pass 1 assigns each host's own final hop
+    // so explicit ProxyJump directives always win over inferred intermediate hops in pass 2.
+    let mut valid_jumps: Vec<(&str, &[String])> = Vec::new();
     for h in hosts.iter().filter(|h| !h.proxy_jump.is_empty()) {
         if let Some(missing) = h
             .proxy_jump
@@ -419,16 +428,39 @@ pub fn from_ssh_config(hosts: &[ssh_config::SshConfigHost]) -> Incoming {
             ));
             continue;
         }
-        let mut links = vec![(h.alias.as_str(), h.proxy_jump.last().unwrap().as_str())];
-        for pair in h.proxy_jump.windows(2) {
-            links.push((pair[1].as_str(), pair[0].as_str()));
+        valid_jumps.push((h.alias.as_str(), h.proxy_jump.as_slice()));
+    }
+    let idx_by_id: HashMap<Uuid, usize> = bookmarks
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.id, i))
+        .collect();
+    for &(alias, hops) in &valid_jumps {
+        let last = hops.last().unwrap().as_str();
+        if alias != last
+            && let Some(&idx) = idx_by_id.get(&id_of(alias))
+            && bookmarks[idx].jump.is_none()
+        {
+            bookmarks[idx].jump = Some(id_of(last));
         }
-        for (from, to) in links {
-            if let Some(b) = bookmarks.iter_mut().find(|b| b.id == id_of(from))
-                && b.jump.is_none()
-                && from != to
-            {
-                b.jump = Some(id_of(to));
+    }
+    for &(alias, hops) in &valid_jumps {
+        for pair in hops.windows(2) {
+            let (to, from) = (pair[0].as_str(), pair[1].as_str());
+            if from == to {
+                continue;
+            }
+            if let Some(&idx) = idx_by_id.get(&id_of(from)) {
+                match bookmarks[idx].jump {
+                    None => bookmarks[idx].jump = Some(id_of(to)),
+                    Some(existing) if existing != id_of(to) => {
+                        warnings.push(tf(
+                            "{}: intermediate jump host {} already jumps through a different host; check its jump host after importing.",
+                            &[alias, from],
+                        ));
+                    }
+                    Some(_) => {}
+                }
             }
         }
     }
@@ -447,27 +479,66 @@ impl ImportPlan {
     /// are added, identical ones skipped, and conflicts skipped until the user decides.
     pub fn new(incoming: Incoming, store: &BookmarkStore) -> Self {
         let group_map = map_groups(&incoming.groups, store);
-        let mut temp = store.clone();
         let names: HashMap<Uuid, String> = {
+            let mut info: HashMap<Uuid, (Option<Uuid>, &str)> = store
+                .groups
+                .iter()
+                .map(|g| (g.id, (g.parent, g.name.as_str())))
+                .collect();
             for g in &incoming.groups {
-                if !temp.groups.iter().any(|x| x.id == group_map[&g.id]) {
-                    temp.groups.push(Group {
-                        id: group_map[&g.id],
-                        name: g.name.clone(),
-                        parent: g.parent.and_then(|p| group_map.get(&p).copied()),
-                        label: g.label.clone(),
-                    });
-                }
+                info.entry(group_map[&g.id]).or_insert_with(|| {
+                    (
+                        g.parent.and_then(|p| group_map.get(&p).copied()),
+                        g.name.as_str(),
+                    )
+                });
             }
+            let mut memo: HashMap<Uuid, String> = HashMap::new();
+            fn build_path(
+                id: Uuid,
+                info: &HashMap<Uuid, (Option<Uuid>, &str)>,
+                memo: &mut HashMap<Uuid, String>,
+                visiting: &mut HashSet<Uuid>,
+            ) -> String {
+                if let Some(p) = memo.get(&id) {
+                    return p.clone();
+                }
+                if !visiting.insert(id) {
+                    return String::new();
+                }
+                let path = match info.get(&id) {
+                    None => String::new(),
+                    Some(&(parent, name)) => match parent {
+                        Some(pid) => {
+                            let prefix = build_path(pid, info, memo, visiting);
+                            if prefix.is_empty() {
+                                name.to_string()
+                            } else {
+                                format!("{prefix} / {name}")
+                            }
+                        }
+                        None => name.to_string(),
+                    },
+                };
+                visiting.remove(&id);
+                memo.insert(id, path.clone());
+                path
+            }
+            let mut visiting = HashSet::new();
             incoming
                 .groups
                 .iter()
-                .map(|g| (g.id, temp.group_path(Some(group_map[&g.id]))))
+                .map(|g| {
+                    (
+                        g.id,
+                        build_path(group_map[&g.id], &info, &mut memo, &mut visiting),
+                    )
+                })
                 .collect()
         };
 
         let mut items = Vec::new();
-        let mut endpoint_taken = HashSet::new();
+        let mut claimed = HashSet::new();
         for mut b in incoming.bookmarks {
             let group_path = b
                 .group
@@ -477,12 +548,13 @@ impl ImportPlan {
             let secrets = incoming.secrets.get(&b.id).cloned().unwrap_or_default();
             let existing = store
                 .bookmark(b.id)
+                .filter(|e| !claimed.contains(&e.id))
                 .map(|e| (e, MatchedBy::Id))
                 .or_else(|| {
                     store
                         .bookmarks
                         .iter()
-                        .find(|e| e.same_endpoint(&b) && !endpoint_taken.contains(&e.id))
+                        .find(|e| e.same_endpoint(&b) && !claimed.contains(&e.id))
                         .map(|e| (e, MatchedBy::Endpoint))
                 });
             let existing_address = existing
@@ -493,7 +565,7 @@ impl ImportPlan {
             });
             let status = match existing {
                 Some((e, by)) => {
-                    endpoint_taken.insert(e.id);
+                    claimed.insert(e.id);
                     let same = Bookmark {
                         id: e.id,
                         ..b.clone()
@@ -601,12 +673,22 @@ impl ImportPlan {
     /// copy from the file, saved in the Keychain like a pasted key.
     pub fn adopt_key_files(&mut self, local: impl Fn(&str) -> Option<String>) {
         for item in &mut self.items {
+            if matches!(
+                (&item.status, item.resolution),
+                (ItemStatus::Identical { .. }, _) | (_, Resolution::Skip)
+            ) {
+                continue;
+            }
             let super::Auth::Key { path } = &item.incoming.auth else {
                 continue;
             };
             let Some(key) = &item.secrets.private_key else {
                 continue;
             };
+            if key.trim().is_empty() {
+                item.secrets.private_key = None;
+                continue;
+            }
             if local(path).is_some_and(|here| here.trim() == key.trim()) {
                 item.secrets.private_key = None;
             } else {
@@ -615,11 +697,17 @@ impl ImportPlan {
         }
     }
 
-    /// Bookmarks to be imported that carry a startup command.
+    /// Bookmarks to be imported that carry a startup command (ignoring blank/comment-only lines).
     pub fn startup_command_count(&self) -> usize {
         self.items
             .iter()
-            .filter(|i| !i.incoming.startup_command.trim().is_empty())
+            .filter(|i| {
+                i.incoming
+                    .startup_command
+                    .lines()
+                    .map(str::trim)
+                    .any(|l| !l.is_empty() && !l.starts_with('#'))
+            })
             .filter(|i| {
                 !matches!(
                     (&i.status, i.resolution),
@@ -692,6 +780,8 @@ impl ImportPlan {
                 ItemStatus::New => {}
             }
             let mut b = item.incoming.clone();
+            b.start_dir.retain(|c| !c.is_control());
+            b.local_start_dir.retain(|c| !c.is_control());
             if !self.import_startup_commands {
                 b.startup_command = match &item.status {
                     // An overwritten bookmark keeps the command it already had.
@@ -719,6 +809,7 @@ impl ImportPlan {
                         .is_some_and(|e| !e.same_endpoint(&b))
                     {
                         out.clear_secrets.push(*existing);
+                        out.secrets.retain(|(id, _)| *id != *existing);
                     }
                     b.id = *existing;
                     store.upsert_bookmark(b);
@@ -738,6 +829,7 @@ impl ImportPlan {
             placed.insert(item.incoming.id, target_id);
             written.push(target_id);
             if !item.secrets.is_empty() {
+                out.secrets.retain(|(id, _)| *id != target_id);
                 out.secrets.push((target_id, item.secrets.clone()));
             }
         }
@@ -780,38 +872,66 @@ pub struct ImportOutcome {
 /// with the same name under the same (mapped) parent, otherwise the incoming id (or a fresh id
 /// when that id is taken by a different group).
 fn map_groups(groups: &[Group], store: &BookmarkStore) -> HashMap<Uuid, Uuid> {
-    let mut map: HashMap<Uuid, Uuid> = HashMap::new();
-    let incoming_ids: HashSet<Uuid> = groups.iter().map(|g| g.id).collect();
-    // Resolve parents before children regardless of file order.
-    let mut pending: Vec<&Group> = groups.iter().collect();
-    let mut guard = 0;
-    while !pending.is_empty() && guard <= groups.len() {
-        guard += 1;
-        pending.retain(|g| {
-            let parent_ready = g
-                .parent
-                .is_none_or(|p| map.contains_key(&p) || !incoming_ids.contains(&p));
-            if !parent_ready {
-                return true;
-            }
-            let parent = g.parent.and_then(|p| map.get(&p).copied());
-            let local = if store.group(g.id).is_some() {
-                g.id
-            } else if let Some(same) = store
-                .groups
-                .iter()
-                .find(|x| x.parent == parent && x.name == g.name)
-            {
-                same.id
-            } else {
-                g.id
-            };
-            map.insert(g.id, local);
-            false
-        });
+    let incoming_by_id: HashMap<Uuid, &Group> = groups.iter().map(|g| (g.id, g)).collect();
+    let store_ids: HashSet<Uuid> = store.groups.iter().map(|g| g.id).collect();
+    let mut store_by_parent_name: HashMap<(Option<Uuid>, &str), Uuid> =
+        HashMap::with_capacity(store.groups.len());
+    for g in &store.groups {
+        store_by_parent_name
+            .entry((g.parent, g.name.as_str()))
+            .or_insert(g.id);
     }
-    for g in pending {
-        map.insert(g.id, g.id); // cycle in the file: sanitize() will detach it
+    let mut map: HashMap<Uuid, Uuid> = HashMap::with_capacity(groups.len());
+    let mut visiting: HashSet<Uuid> = HashSet::new();
+
+    fn resolve(
+        id: Uuid,
+        incoming_by_id: &HashMap<Uuid, &Group>,
+        store_ids: &HashSet<Uuid>,
+        store_by_parent_name: &HashMap<(Option<Uuid>, &str), Uuid>,
+        map: &mut HashMap<Uuid, Uuid>,
+        visiting: &mut HashSet<Uuid>,
+    ) -> Option<Uuid> {
+        if let Some(&mapped) = map.get(&id) {
+            return Some(mapped);
+        }
+        let g = *incoming_by_id.get(&id)?;
+        if !visiting.insert(id) {
+            // Cycle in the incoming file: keep incoming id and let sanitize() detach it.
+            map.insert(id, id);
+            return Some(id);
+        }
+        let parent = g.parent.and_then(|p| {
+            resolve(
+                p,
+                incoming_by_id,
+                store_ids,
+                store_by_parent_name,
+                map,
+                visiting,
+            )
+        });
+        visiting.remove(&id);
+        let local = if store_ids.contains(&g.id) {
+            g.id
+        } else if let Some(&same_id) = store_by_parent_name.get(&(parent, g.name.as_str())) {
+            same_id
+        } else {
+            g.id
+        };
+        map.insert(id, local);
+        Some(local)
+    }
+
+    for g in groups {
+        let _ = resolve(
+            g.id,
+            &incoming_by_id,
+            &store_ids,
+            &store_by_parent_name,
+            &mut map,
+            &mut visiting,
+        );
     }
     map
 }

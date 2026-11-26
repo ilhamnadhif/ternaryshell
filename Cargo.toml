@@ -18,10 +18,8 @@ dirs = "7.0.0"
 # The renderer is chosen per system below: Metal (wgpu) on macOS, OpenGL elsewhere (it starts
 # faster and keeps the binary small), with Direct3D 12 as the fallback on Windows.
 eframe = { version = "0.36.2", default-features = false, features = ["accesskit", "default_fonts"] }
-egui_extras = { version = "0.36.2", default-features = false }
 getrandom = "0.4.3"
 hmac = "0.13.0"
-keyring = { version = "4.2.0", default-features = false, features = ["apple-native-keyring-store", "v1"] }
 log = "0.4.34"
 memmap2 = "0.9.11"
 parking_lot = "0.12.5"
@@ -29,18 +27,21 @@ rfd = "0.17.2"
 # RSA logins are signed with ring (constant time); see src/ssh/rsa_sign.rs. Both are already
 # used by russh, at these versions.
 ring = "0.17.14"
-rsa = "=0.10.0-rc.18"
-russh = { version = "0.64.1", default-features = false, features = ["flate2", "ring", "rsa"] }
+rsa = "0.10.0"
+russh = { version = "0.65.4", default-features = false, features = ["flate2", "ring", "rsa"] }
 russh-sftp = "3.0.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha1 = "0.11.0"
-thiserror = "2.0.21"
 tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util", "fs"] }
 tokio-util = "0.7.20"
 skrifa = "0.44.0"
 sha2 = "0.11.1"
 uuid = { version = "1.28.0", features = ["v4", "serde", "v5"] }
+zeroize = "1.9.1"
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+keyring = { version = "4.2.0", default-features = false, features = ["v1"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.190"
@@ -56,7 +57,7 @@ objc2 = "0.6.5"
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSGeometry", "NSArray"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSEvent", "NSApplication", "NSResponder", "NSWindow", "NSView", "NSGraphicsContext", "NSButton", "NSControl"] }
 # The Keychain (src/secrets.rs): writes go through an item's reference, which macOS allows a new
-# build without asking. Already in the dependency tree via keyring.
+# build without asking.
 security-framework = "3.7.0"
 
 # OpenGL, on X11 or Wayland, whichever the session runs (both are loaded at run time, so the

@@ -20,13 +20,23 @@ use ternaryshell::ssh::session::{ConnectSpec, Connection};
 use ternaryshell::ssh::types::{ConnState, Prompt};
 
 fn runtime() -> tokio::runtime::Runtime {
-    // SAFETY: set before any other thread reads the environment.
-    unsafe { std::env::set_var("TERNARYSHELL_SECRETS", "memory") };
+    #[cfg(debug_assertions)]
+    ternaryshell::secrets::use_memory_backend();
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
         .build()
         .unwrap()
+}
+
+/// Restores a Unix file/directory mode on drop so `TempDir` cleanup always succeeds on panic.
+struct ModeGuard(std::path::PathBuf, u32);
+
+impl Drop for ModeGuard {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(self.1));
+    }
 }
 
 fn connect(rt: &tokio::runtime::Runtime, server: &TestServer) -> (Connection, remote::Sftp) {
@@ -43,7 +53,7 @@ fn connect(rt: &tokio::runtime::Runtime, server: &TestServer) -> (Connection, re
         keepalive_secs: 30,
         jumps: Vec::new(),
         known_hosts: server.dir.path().join("kh"),
-        save_secrets: true,
+        save_secrets: false,
     };
     let conn = Connection::start(rt.handle(), egui::Context::default(), spec);
     wait_for(15, "host key prompt", || {
@@ -246,19 +256,12 @@ fn file_operations_and_transfers() {
     }
 
     // Cancelling removes the partial file.
+    // Prepare the remote & local targets BEFORE starting the two slot-filling uploads so `busy`
+    // cannot finish while `keep.txt` is being written.
     let huge = local.join("huge.bin");
     random_file(&huge, 200 * 1024 * 1024);
-    let up = transfers
-        .upload(rt.handle(), sftp.clone(), huge, &base, || {})
-        .unwrap();
-    // A second transfer takes the other slot, so the next one has to wait in the queue.
     let other_dir = remote_join(&base, "other");
     rt.block_on(remote::mkdir(&sftp, &other_dir)).unwrap();
-    let busy = transfers
-        .upload(rt.handle(), sftp.clone(), src.clone(), &other_dir, || {})
-        .unwrap();
-    // A queued upload that replaces an existing file, cancelled before it starts, must leave
-    // the existing remote file untouched.
     let keep_remote = remote_join(&base, "keep.txt");
     {
         use tokio::io::AsyncWriteExt;
@@ -267,6 +270,16 @@ fn file_operations_and_transfers() {
         rt.block_on(f.close()).unwrap();
     }
     std::fs::write(local.join("keep.txt"), "replacement").unwrap();
+
+    let up = transfers
+        .upload(rt.handle(), sftp.clone(), huge, &base, || {})
+        .unwrap();
+    // A second transfer takes the other slot, so the next one has to wait in the queue.
+    let busy = transfers
+        .upload(rt.handle(), sftp.clone(), src.clone(), &other_dir, || {})
+        .unwrap();
+    // A queued upload that replaces an existing file, cancelled before it starts, must leave
+    // the existing remote file untouched.
     let queued = transfers
         .upload(
             rt.handle(),
@@ -289,22 +302,40 @@ fn file_operations_and_transfers() {
 
     // A failed download leaves an existing local file intact (written to a temp file first).
     std::fs::write(back.join("victim.txt"), "local data").unwrap();
+    let remote_victim = remote_join(&base, "victim.txt");
     {
         use tokio::io::AsyncWriteExt;
-        let mut f = rt
-            .block_on(sftp.create(remote_join(&base, "victim.txt")))
-            .unwrap();
+        let mut f = rt.block_on(sftp.create(remote_victim.clone())).unwrap();
         rt.block_on(f.write_all(b"remote")).unwrap();
         rt.block_on(f.close()).unwrap();
     }
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let victim_path = std::path::PathBuf::from(&remote_victim);
+        std::fs::set_permissions(&victim_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let _restore = ModeGuard(victim_path, 0o644);
+        let failed_down = transfers
+            .download(
+                rt.handle(),
+                sftp.clone(),
+                remote_victim.clone(),
+                &back,
+                || {},
+            )
+            .unwrap();
+        assert!(
+            matches!(wait_transfer(&failed_down, 30), TransferState::Failed(_)),
+            "unreadable remote file must fail download"
+        );
+        assert_eq!(
+            std::fs::read_to_string(back.join("victim.txt")).unwrap(),
+            "local data",
+            "failed download must leave existing local file untouched"
+        );
+    }
+    // Once readable, download atomically replaces the existing file with no temp leftovers.
     let down = transfers
-        .download(
-            rt.handle(),
-            sftp.clone(),
-            remote_join(&base, "victim.txt"),
-            &back,
-            || {},
-        )
+        .download(rt.handle(), sftp.clone(), remote_victim, &back, || {})
         .unwrap();
     assert_eq!(wait_transfer(&down, 30), TransferState::Done);
     assert_eq!(
@@ -402,6 +433,7 @@ fn upload_replaces_files_safely() {
     // A folder we can't create files in, but the file is writable: written in place.
     std::fs::write(local.join("real.conf"), "in place").unwrap();
     std::fs::set_permissions(&remote_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let dir_guard = ModeGuard(remote_dir.clone(), 0o755);
     let up = transfers
         .upload(
             rt.handle(),
@@ -412,7 +444,7 @@ fn upload_replaces_files_safely() {
         )
         .unwrap();
     let state = wait_transfer(&up, 30);
-    std::fs::set_permissions(&remote_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    drop(dir_guard);
     assert_eq!(state, TransferState::Done);
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "in place");
 
@@ -427,15 +459,12 @@ fn upload_replaces_files_safely() {
         std::fs::Permissions::from_mode(0o000),
     )
     .unwrap();
+    let secret_guard = ModeGuard(tree.join("secret.txt"), 0o644);
     let up = transfers
         .upload(rt.handle(), sftp.clone(), tree.clone(), &remote_str, || {})
         .unwrap();
     let state = wait_transfer(&up, 30);
-    std::fs::set_permissions(
-        tree.join("secret.txt"),
-        std::fs::Permissions::from_mode(0o644),
-    )
-    .unwrap();
+    drop(secret_guard);
     assert_eq!(state, TransferState::Done);
     assert_eq!(
         std::fs::read_to_string(remote_dir.join("tree/a.txt")).unwrap(),
@@ -500,29 +529,63 @@ fn one_gigabyte_round_trip() {
         .unwrap();
     assert_eq!(wait_transfer(&down, 1800), TransferState::Done);
     let down_s = t0.elapsed().as_secs_f64();
-    let sha = |p: &Path| {
-        let out = std::process::Command::new("shasum")
-            .args(["-a", "256"])
-            .arg(p)
-            .output()
-            .unwrap();
-        String::from_utf8(out.stdout)
-            .unwrap()
-            .split_whitespace()
-            .next()
-            .unwrap()
-            .to_string()
-    };
-    let (a, b, c) = (
-        sha(&src),
-        sha(&remote_dir.join("gig.bin")),
-        sha(&back.join("gig.bin")),
-    );
     eprintln!(
-        "1 GiB: upload {:.0} MB/s, download {:.0} MB/s; sha256 {a}",
+        "1 GiB: upload {:.0} MB/s, download {:.0} MB/s",
         1024.0 / up_s,
         1024.0 / down_s
     );
-    assert_eq!(a, b, "uploaded copy differs");
-    assert_eq!(a, c, "downloaded copy differs");
+    assert!(
+        same_contents(&src, &remote_dir.join("gig.bin")),
+        "uploaded copy differs"
+    );
+    assert!(
+        same_contents(&src, &back.join("gig.bin")),
+        "downloaded copy differs"
+    );
+}
+
+#[test]
+fn transfer_controls_and_path_traversal_guard() {
+    let rt = runtime();
+    let server = TestServer::start();
+    let (_conn, sftp) = connect(&rt, &server);
+    let base = server.dir.path().join("remote");
+    let local = server.dir.path().join("local");
+    std::fs::create_dir(&base).unwrap();
+    std::fs::create_dir(&local).unwrap();
+    let base_str = base.to_str().unwrap().to_string();
+
+    let mut transfers = Transfers::default();
+    assert!(!transfers.any_running());
+
+    // Unsafe remote filenames must be rejected before starting a download.
+    for bad in ["/tmp/..", "/tmp/.", "/"] {
+        let Err(err) = transfers.download(rt.handle(), sftp.clone(), bad.into(), &local, || {})
+        else {
+            panic!("expected invalid remote file name error for {bad}");
+        };
+        assert!(err.starts_with("unsafe file name:"), "{bad} -> {err}");
+    }
+    assert!(!transfers.any_running());
+
+    // Queue a large upload, check any_running(), duplicate destination rejection, cancel_all(),
+    // then clear_finished().
+    let big = local.join("cancel_me.bin");
+    random_file(&big, 120 * 1024 * 1024);
+    let t = transfers
+        .upload(rt.handle(), sftp.clone(), big.clone(), &base_str, || {})
+        .unwrap();
+    assert!(transfers.any_running());
+    assert!(
+        transfers
+            .upload(rt.handle(), sftp.clone(), big, &base_str, || {})
+            .is_err(),
+        "duplicate destination upload while busy must be rejected"
+    );
+    transfers.cancel_all();
+    assert_eq!(wait_transfer(&t, 30), TransferState::Cancelled);
+    assert!(!transfers.any_running());
+    assert!(!transfers.items.is_empty());
+    transfers.clear_finished();
+    assert!(transfers.items.is_empty());
 }

@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use eframe::egui::{self, FontData, FontDefinitions, FontFamily};
@@ -271,20 +272,24 @@ fn locate(file: &str) -> Option<PathBuf> {
         static INDEX: OnceLock<HashMap<String, PathBuf>> = OnceLock::new();
         let index = INDEX.get_or_init(|| {
             let mut index = HashMap::new();
+            let mut visited = std::collections::HashSet::new();
             let mut stack: Vec<(PathBuf, u32)> = font_dirs().into_iter().map(|d| (d, 0)).collect();
             while let Some((dir, depth)) = stack.pop() {
+                if let Ok(canon) = std::fs::canonicalize(&dir)
+                    && !visited.insert(canon)
+                {
+                    continue;
+                }
                 let Ok(entries) = std::fs::read_dir(&dir) else {
                     continue;
                 };
                 for entry in entries.flatten() {
                     let p = entry.path();
-                    match entry.file_type() {
-                        Ok(t) if t.is_dir() && depth < 4 => stack.push((p, depth + 1)),
-                        Ok(_) => {
-                            let name = entry.file_name().to_string_lossy().into_owned();
-                            index.entry(name).or_insert(p);
-                        }
-                        Err(_) => {}
+                    if p.is_dir() && depth < 4 {
+                        stack.push((p, depth + 1));
+                    } else if p.is_file() {
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        index.entry(name).or_insert(p);
                     }
                 }
             }
@@ -294,16 +299,11 @@ fn locate(file: &str) -> Option<PathBuf> {
     }
 }
 
-/// Fonts of the system (read-only while the app runs, so they can be memory-mapped).
-fn is_system_font(path: &Path) -> bool {
-    if cfg!(target_os = "macos") {
-        return path.starts_with("/System/Library/");
-    }
-    #[cfg(windows)]
-    if let Some(windir) = std::env::var_os("WINDIR") {
-        return path.starts_with(PathBuf::from(windir).join("Fonts"));
-    }
-    path.starts_with("/usr/share/fonts")
+/// Sealed read-only system fonts on macOS (immutable APFS system volume, safe to memory-map).
+#[cfg(target_os = "macos")]
+fn is_sealed_system_font(path: &Path) -> bool {
+    path.canonicalize()
+        .is_ok_and(|c| c.starts_with("/System/Library/"))
 }
 
 /// The UI & monospace fonts, bundled: Inter in three weights, JetBrains Mono, and Phosphor icons.
@@ -323,35 +323,87 @@ pub const ICONS: &str = "ui-icons";
 
 /// Largest font file loaded.
 const MAX_FONT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_CACHED_OWNED_FONTS: usize = 16;
 
-/// Loads a font file once for the life of the process. System fonts are memory-mapped (they
-/// don't change while the app runs); a font the user picked is read into memory, since
-/// replacing a mapped file under the app would crash it.
-fn mapped(path: &Path) -> Option<&'static [u8]> {
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, &'static [u8]>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache = cache.lock();
-    if let Some(bytes) = cache.get(path) {
-        return Some(bytes);
+static FONT_GEN: AtomicU64 = AtomicU64::new(1);
+/// Bitmask of actually loaded terminal faces (bit 0 = regular, 1 = bold, 2 = italic, 3 = bold+italic).
+/// `0` means `apply()` has not run yet.
+static LOADED_FACES: AtomicU8 = AtomicU8::new(0);
+
+/// Increments whenever `apply()` installs new fonts, so cached galleys can invalidate.
+pub fn generation() -> u64 {
+    FONT_GEN.load(Ordering::Relaxed)
+}
+
+/// Loads and validates a font face at `index`. Sealed macOS `/System/Library/` fonts are
+/// memory-mapped (so large CJK collections page in lazily); all other fonts (Linux, Windows,
+/// user-picked files) are read into bounded owned memory and cached as `Arc<FontData>` without
+/// leaking invalid or evicted files.
+fn load_font_data(path: &Path, index: u32) -> Option<Arc<FontData>> {
+    #[cfg(target_os = "macos")]
+    if is_sealed_system_font(path) {
+        static MMAP_CACHE: OnceLock<Mutex<HashMap<PathBuf, &'static [u8]>>> = OnceLock::new();
+        let cache = MMAP_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        let bytes = {
+            let mut guard = cache.lock();
+            if let Some(&b) = guard.get(path) {
+                b
+            } else {
+                let file = std::fs::File::open(path).ok()?;
+                let meta = file.metadata().ok()?;
+                if !meta.is_file() || meta.len() > MAX_FONT_BYTES {
+                    return None;
+                }
+                // SAFETY: `is_sealed_system_font` verified the canonical path sits on macOS's
+                // sealed read-only `/System/Library/` volume, and the mapping lives for the
+                // rest of the process only after validation succeeds.
+                let map = unsafe { memmap2::Mmap::map(&file) }.ok()?;
+                if !is_usable_font(&map, index) {
+                    return None;
+                }
+                let leaked: &'static [u8] = Box::leak(Box::new(map));
+                guard.insert(path.to_path_buf(), leaked);
+                leaked
+            }
+        };
+        if !is_usable_font(bytes, index) {
+            return None;
+        }
+        let mut data = FontData::from_static(bytes);
+        data.index = index;
+        return Some(Arc::new(data));
+    }
+
+    type OwnedFontCache = Mutex<HashMap<(PathBuf, u32), Arc<FontData>>>;
+    static OWNED_CACHE: OnceLock<OwnedFontCache> = OnceLock::new();
+    let cache = OWNED_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = (path.to_path_buf(), index);
+    if let Some(existing) = cache.lock().get(&key) {
+        return Some(Arc::clone(existing));
     }
     let file = std::fs::File::open(path).ok()?;
     let meta = file.metadata().ok()?;
     if !meta.is_file() || meta.len() > MAX_FONT_BYTES {
         return None;
     }
-    let bytes: &'static [u8] = if is_system_font(path) {
-        // SAFETY: system font files are read-only (the sealed system volume on macOS, files
-        // owned by the system elsewhere); the mapping lives for the rest of the process.
-        let map = unsafe { memmap2::Mmap::map(&file) }.ok()?;
-        Box::leak(Box::new(map))
-    } else {
-        let mut data = Vec::new();
-        std::io::Read::read_to_end(&mut std::io::Read::take(&file, MAX_FONT_BYTES), &mut data)
-            .ok()?;
-        Box::leak(data.into_boxed_slice())
-    };
-    cache.insert(path.to_path_buf(), bytes);
-    Some(bytes)
+    let mut data = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(&file, MAX_FONT_BYTES + 1),
+        &mut data,
+    )
+    .ok()?;
+    if data.len() as u64 > MAX_FONT_BYTES || !is_usable_font(&data, index) {
+        return None;
+    }
+    let mut font = FontData::from_owned(data);
+    font.index = index;
+    let arc = Arc::new(font);
+    let mut guard = cache.lock();
+    if guard.len() >= MAX_CACHED_OWNED_FONTS {
+        guard.clear();
+    }
+    guard.insert(key, Arc::clone(&arc));
+    Some(arc)
 }
 
 /// Whether `bytes` holds a usable font at `index` (egui panics on a font it can't parse, so
@@ -365,15 +417,10 @@ fn add_face(defs: &mut FontDefinitions, key: &str, file: &str, index: u32) -> bo
     let Some(path) = locate(file) else {
         return false;
     };
-    let Some(bytes) = mapped(&path) else {
+    let Some(data) = load_font_data(&path, index) else {
         return false;
     };
-    if !is_usable_font(bytes, index) {
-        return false;
-    }
-    let mut data = FontData::from_static(bytes);
-    data.index = index;
-    defs.font_data.insert(key.to_string(), Arc::new(data));
+    defs.font_data.insert(key.to_string(), data);
     true
 }
 
@@ -386,14 +433,21 @@ pub fn is_available(preset: &FontPreset) -> bool {
         .is_none_or(|file| locate(file).is_some_and(|p| p.is_file()))
 }
 
-/// Finds the preset matching a saved choice (by name), if any.
+/// Finds the preset matching a saved choice (by name), if it is not a custom file path.
 pub fn preset(choice: &FontChoice) -> Option<&'static FontPreset> {
+    if choice.path.is_some() {
+        return None;
+    }
     PRESETS.iter().find(|p| p.name == choice.name)
 }
 
 /// Builds the font set: the terminal font (four faces where available), the UI font, and
 /// fallbacks for symbols, CJK and emoji.
 pub fn definitions(choice: &FontChoice, load_cjk: bool) -> FontDefinitions {
+    definitions_with_faces(choice, load_cjk).0
+}
+
+fn definitions_with_faces(choice: &FontChoice, load_cjk: bool) -> (FontDefinitions, u8) {
     let mut defs = FontDefinitions::default();
     // egui's bundled fonts: Hack, Ubuntu-Light, NotoEmoji-Regular, emoji-icon-font.
     let emoji: Vec<String> = ["NotoEmoji-Regular", "emoji-icon-font"]
@@ -508,7 +562,13 @@ pub fn definitions(choice: &FontChoice, load_cjk: bool) -> FontDefinitions {
         FontFamily::Name(ICONS.into()),
         vec!["Phosphor".into(), "Inter".into()],
     );
-    defs
+    let mut face_mask = 1u8; // regular always resolves (chosen or Hack fallback)
+    for (i, f) in faces.iter().enumerate() {
+        if f.is_some() {
+            face_mask |= 1u8 << i;
+        }
+    }
+    (defs, face_mask)
 }
 
 /// Whether a terminal style has a real face (otherwise the renderer emulates it).
@@ -519,15 +579,22 @@ pub fn has_real_face(choice: &FontChoice, bold: bool, italic: bool) -> bool {
         (false, true) => 2,
         (true, true) => 3,
     };
+    let mask = LOADED_FACES.load(Ordering::Relaxed);
+    if mask != 0 {
+        return (mask & (1u8 << idx)) != 0;
+    }
     preset(choice)
         .is_some_and(|p| p.name == JETBRAINS.name || (p.path.is_some() && p.faces[idx].is_some()))
 }
 
-/// Installs the fonts. Returns false when a font file the user picked could not be used (the
-/// built-in Hack font is used instead).
+/// Installs the fonts. Returns false when a font file the user picked (or a non-builtin preset)
+/// could not be used (the built-in Hack font is used instead).
 pub fn apply(ctx: &egui::Context, choice: &FontChoice, load_cjk: bool) -> bool {
-    let defs = definitions(choice, load_cjk);
-    let ok = preset(choice).is_some() || defs.font_data.contains_key(TERM_REGULAR);
+    let (defs, face_mask) = definitions_with_faces(choice, load_cjk);
+    let is_builtin = preset(choice).is_some_and(|p| p.path.is_none());
+    let ok = is_builtin || defs.font_data.contains_key(TERM_REGULAR);
+    LOADED_FACES.store(face_mask, Ordering::Relaxed);
+    FONT_GEN.fetch_add(1, Ordering::Relaxed);
     ctx.set_fonts(defs);
     ok
 }

@@ -242,7 +242,7 @@ async fn replace_via_temp(
     }
     let written = async {
         file.write_all(data).await.map_err(|e| e.to_string())?;
-        file.sync_all().await.map_err(failed)?;
+        file.flush().await.map_err(|e| e.to_string())?;
         file.shutdown().await.map_err(|e| e.to_string())?;
         // The mode given at creation is reduced by the server's umask.
         if let Some(mode) = mode {
@@ -261,6 +261,7 @@ async fn replace_via_temp(
     }
     .await;
     if let Err(e) = written {
+        let _ = file.shutdown().await;
         let _ = sftp.remove_file(tmp).await;
         return Err(e);
     }
@@ -288,7 +289,7 @@ async fn create_new(sftp: &SftpSession, path: &str, data: &[u8]) -> Result<(), S
         .await
         .map_err(failed)?;
     file.write_all(data).await.map_err(|e| e.to_string())?;
-    file.sync_all().await.map_err(failed)?;
+    file.flush().await.map_err(|e| e.to_string())?;
     file.shutdown().await.map_err(|e| e.to_string())
 }
 
@@ -298,7 +299,7 @@ async fn write_in_place(sftp: &SftpSession, path: &str, data: &[u8]) -> Result<(
         .await
         .map_err(failed)?;
     file.write_all(data).await.map_err(|e| e.to_string())?;
-    file.sync_all().await.map_err(failed)?;
+    file.flush().await.map_err(|e| e.to_string())?;
     file.shutdown().await.map_err(|e| e.to_string())
 }
 

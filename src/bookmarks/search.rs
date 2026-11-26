@@ -23,23 +23,31 @@ pub fn fuzzy_score(pattern: &str, text: &str) -> Option<i32> {
         .collect();
     for &pc in &p[1..] {
         let mut next = vec![None; t.len()];
+        // Running max over k <= j - 9, where the gap penalty saturates at -8.
+        let mut far_max: Option<i32> = None;
         for j in 0..t.len() {
+            if j >= 9
+                && let Some(s) = best[j - 9]
+            {
+                far_max = Some(far_max.map_or(s, |m| m.max(s)));
+            }
             if t[j] != pc {
                 continue;
             }
             let here = 16 + boundary_bonus(&t, j);
-            next[j] = (0..j)
-                .filter_map(|k| {
-                    best[k].map(|s| {
-                        let link = if k + 1 == j {
-                            12
-                        } else {
-                            -((j - k - 1) as i32).min(8)
-                        };
-                        s + here + link
-                    })
-                })
-                .max();
+            let mut best_j = far_max.map(|s| s + here - 8);
+            for (k, &prev) in best.iter().enumerate().take(j).skip(j.saturating_sub(8)) {
+                if let Some(s) = prev {
+                    let link = if k + 1 == j {
+                        12
+                    } else {
+                        -((j - k - 1) as i32)
+                    };
+                    let score = s + here + link;
+                    best_j = Some(best_j.map_or(score, |m| m.max(score)));
+                }
+            }
+            next[j] = best_j;
         }
         best = next;
     }
@@ -84,20 +92,32 @@ fn term_score(term: &str, b: &Bookmark, group_path: &str, label: &str) -> Option
 /// The characters of `text` (by char index) that the terms of `query` match, for highlighting:
 /// each term is matched left to right, preferring the earliest run.
 pub fn match_positions(query: &str, text: &str) -> Vec<usize> {
-    let t: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
+    let t: Vec<(usize, char)> = text
+        .chars()
+        .enumerate()
+        .flat_map(|(idx, c)| c.to_lowercase().map(move |lc| (idx, lc)))
+        .collect();
     let mut out = Vec::new();
     for term in query.split_whitespace() {
         let p: Vec<char> = term.chars().flat_map(char::to_lowercase).collect();
+        if p.is_empty() || p.len() > t.len() {
+            continue;
+        }
         // A contiguous match first, then any subsequence.
-        let contiguous = (0..t.len()).find(|&s| t[s..].starts_with(&p));
+        let contiguous = (0..=t.len() - p.len()).find(|&s| {
+            t[s..s + p.len()]
+                .iter()
+                .zip(&p)
+                .all(|((_, tc), pc)| tc == pc)
+        });
         match contiguous {
-            Some(s) => out.extend(s..s + p.len()),
+            Some(s) => out.extend(t[s..s + p.len()].iter().map(|(orig, _)| *orig)),
             None => {
                 let mut found = Vec::new();
                 let mut j = 0;
-                for (i, c) in t.iter().enumerate() {
-                    if j < p.len() && *c == p[j] {
-                        found.push(i);
+                for &(orig, c) in &t {
+                    if j < p.len() && c == p[j] {
+                        found.push(orig);
                         j += 1;
                     }
                 }

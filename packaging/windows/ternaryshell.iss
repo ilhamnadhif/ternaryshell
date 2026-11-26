@@ -64,7 +64,7 @@ Name: "{autodesktop}\TernaryShell"; Filename: "{app}\ternaryshell.exe"; Tasks: d
 
 [Registry]
 ; ternaryshell.exe on PATH (per user, or for all users in an administrative install).
-Root: HKA; Subkey: "{code:EnvKey}"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}"; \
+Root: HKA; Subkey: "{code:EnvKey}"; ValueType: expandsz; ValueName: "Path"; ValueData: "{code:AppendedPath}"; \
   Check: NeedsAddPath(ExpandConstant('{app}')); Tasks: addtopath
 
 [Run]
@@ -86,16 +86,107 @@ begin
     Result := 'Environment';
 end;
 
+function EnvRootKey: Integer;
+begin
+  if IsAdminInstallMode then
+    Result := HKEY_LOCAL_MACHINE
+  else
+    Result := HKEY_CURRENT_USER;
+end;
+
+function NormalizePathEntry(Entry: String): String;
+begin
+  Result := Trim(Entry);
+  while (Length(Result) > 3) and (Result[Length(Result)] = '\') do
+    Delete(Result, Length(Result), 1);
+end;
+
 function NeedsAddPath(Dir: String): Boolean;
 var
-  Paths: String;
-  RootKey: Integer;
+  Paths, NormDir, Entry: String;
+  P: Integer;
 begin
-  if IsAdminInstallMode then RootKey := HKEY_LOCAL_MACHINE else RootKey := HKEY_CURRENT_USER;
-  if not RegQueryStringValue(RootKey, EnvKey(''), 'Path', Paths) then
+  NormDir := Uppercase(NormalizePathEntry(Dir));
+  if not RegQueryStringValue(EnvRootKey, EnvKey(''), 'Path', Paths) then
   begin
     Result := True;
     exit;
   end;
-  Result := Pos(';' + Uppercase(Dir) + ';', ';' + Uppercase(Paths) + ';') = 0;
+  while Paths <> '' do
+  begin
+    P := Pos(';', Paths);
+    if P > 0 then
+    begin
+      Entry := Copy(Paths, 1, P - 1);
+      Delete(Paths, 1, P);
+    end else
+    begin
+      Entry := Paths;
+      Paths := '';
+    end;
+    if Uppercase(NormalizePathEntry(Entry)) = NormDir then
+    begin
+      Result := False;
+      exit;
+    end;
+  end;
+  Result := True;
+end;
+
+function AppendedPath(Param: String): String;
+var
+  Paths, Dir: String;
+begin
+  Dir := ExpandConstant('{app}');
+  if not RegQueryStringValue(EnvRootKey, EnvKey(''), 'Path', Paths) or (Trim(Paths) = '') then
+  begin
+    Result := Dir;
+    exit;
+  end;
+  if Paths[Length(Paths)] = ';' then
+    Result := Paths + Dir
+  else
+    Result := Paths + ';' + Dir;
+end;
+
+procedure RemoveFromPath(Dir: String);
+var
+  Paths, NewPaths, Entry, NormDir: String;
+  P: Integer;
+  Changed: Boolean;
+begin
+  if not RegQueryStringValue(EnvRootKey, EnvKey(''), 'Path', Paths) then
+    exit;
+  NormDir := Uppercase(NormalizePathEntry(Dir));
+  NewPaths := '';
+  Changed := False;
+  while Paths <> '' do
+  begin
+    P := Pos(';', Paths);
+    if P > 0 then
+    begin
+      Entry := Copy(Paths, 1, P - 1);
+      Delete(Paths, 1, P);
+    end else
+    begin
+      Entry := Paths;
+      Paths := '';
+    end;
+    if Uppercase(NormalizePathEntry(Entry)) = NormDir then
+      Changed := True
+    else if Entry <> '' then
+    begin
+      if NewPaths <> '' then
+        NewPaths := NewPaths + ';';
+      NewPaths := NewPaths + Entry;
+    end;
+  end;
+  if Changed then
+    RegWriteExpandStringValue(EnvRootKey, EnvKey(''), 'Path', NewPaths);
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then
+    RemoveFromPath(ExpandConstant('{app}'));
 end;

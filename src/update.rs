@@ -135,7 +135,15 @@ fn curl_path() -> PathBuf {
     }
 }
 
-fn curl(args: &[&str]) -> Result<Vec<u8>, String> {
+fn allowed_url(url: &str) -> bool {
+    !url.chars().any(|c| c.is_control() || c.is_whitespace())
+        && (url.starts_with("https://") || (cfg!(debug_assertions) && url.starts_with("file://")))
+}
+
+fn curl(headers: &[&str], url: &str) -> Result<Vec<u8>, String> {
+    if !allowed_url(url) {
+        return Err("refused non-HTTPS update URL".into());
+    }
     let out = command(curl_path())
         .args([
             "-fsSL",
@@ -146,7 +154,9 @@ fn curl(args: &[&str]) -> Result<Vec<u8>, String> {
         ])
         .args(["--max-time", "30"])
         .args(["-H", &format!("User-Agent: TernaryShell/{CURRENT}")])
-        .args(args)
+        .args(headers)
+        .arg("--")
+        .arg(url)
         .stdin(Stdio::null())
         .output()
         .map_err(|e| e.to_string())?;
@@ -218,7 +228,7 @@ fn parse_release(json: &[u8], kind: &Install) -> Result<Release, String> {
 
 /// The latest release, if it is newer than this build.
 pub fn check() -> Result<Option<Release>, String> {
-    let json = curl(&["-H", "Accept: application/vnd.github+json", &feed_url()])?;
+    let json = curl(&["-H", "Accept: application/vnd.github+json"], &feed_url())?;
     let release = parse_release(&json, &Install::current())?;
     Ok(is_newer(&release.version, CURRENT).then_some(release))
 }
@@ -237,6 +247,50 @@ pub enum Install {
     /// Updated by downloading the new version by hand: a .deb or .rpm, the portable Windows
     /// .zip, a development build.
     Manual,
+}
+
+/// Whether Windows path `exe` sits inside directory `base`, stripping any `\\?\` verbatim
+/// prefix from `Path::canonicalize` and comparing ASCII case-insensitively on component boundaries.
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+fn is_under_windows_dir(exe: &str, base: &str) -> bool {
+    let norm = |s: &str| {
+        s.strip_prefix(r"\\?\")
+            .unwrap_or(s)
+            .replace('/', r"\")
+            .trim_end_matches('\\')
+            .to_ascii_lowercase()
+    };
+    let e = norm(exe);
+    let b = norm(base);
+    !b.is_empty()
+        && e.strip_prefix(&b)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('\\'))
+}
+
+#[cfg(unix)]
+fn random_hex() -> String {
+    let mut bytes = [0u8; 8];
+    let _ = getrandom::fill(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Safely probes whether `dir` allows creating new files without following pre-existing symlinks.
+#[cfg(unix)]
+fn probe_writable(dir: &Path) -> bool {
+    let p = dir.join(format!(
+        ".ternaryshell-write-test-{}-{}",
+        std::process::id(),
+        random_hex()
+    ));
+    let ok = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&p)
+        .is_ok();
+    if ok {
+        let _ = std::fs::remove_file(&p);
+    }
+    ok
 }
 
 impl Install {
@@ -267,10 +321,11 @@ impl Install {
         if !dir.join("unins000.exe").exists() {
             return Install::Manual;
         }
+        let exe_str = exe.to_string_lossy();
         let all_users = ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"]
             .iter()
             .filter_map(std::env::var_os)
-            .any(|p| exe.starts_with(PathBuf::from(p)));
+            .any(|p| is_under_windows_dir(&exe_str, &p.to_string_lossy()));
         Install::WindowsSetup {
             exe: exe.to_path_buf(),
             all_users,
@@ -282,26 +337,20 @@ impl Install {
         if let Some(image) = std::env::var_os("APPIMAGE").map(PathBuf::from)
             && image.is_file()
         {
-            return Install::AppImage(image);
+            return match image.parent() {
+                Some(dir) if probe_writable(dir) => Install::AppImage(image),
+                _ => Install::Manual,
+            };
         }
         // Installed by a package (or by root): the package manager updates it.
         if exe.starts_with("/usr/") || exe.starts_with("/opt/") {
             return Install::Manual;
         }
         match exe.parent() {
-            Some(dir) if writable(dir) => Install::LinuxArchive(exe.to_path_buf()),
+            Some(dir) if probe_writable(dir) => Install::LinuxArchive(exe.to_path_buf()),
             _ => Install::Manual,
         }
     }
-}
-
-/// Whether the user can create files in `dir` (and so replace one there).
-#[cfg(target_os = "linux")]
-fn writable(dir: &Path) -> bool {
-    let p = dir.join(format!(".ternaryshell-write-test-{}", std::process::id()));
-    let ok = std::fs::File::create(&p).is_ok();
-    let _ = std::fs::remove_file(&p);
-    ok
 }
 
 /// Whether this copy can install `release` by itself.
@@ -474,6 +523,9 @@ fn download_into(
 /// Downloads `asset` into `dir` and checks its size and SHA-256. A file without a published
 /// checksum is refused.
 fn fetch(asset: &Asset, dir: &Path, stage: &Arc<Mutex<Stage>>) -> Result<PathBuf, String> {
+    if !allowed_url(&asset.url) {
+        return Err("refused non-HTTPS download URL".into());
+    }
     let archive = dir.join(&asset.name);
     *stage.lock() = Stage::Downloading {
         done: 0,
@@ -491,6 +543,7 @@ fn fetch(asset: &Asset, dir: &Path, stage: &Arc<Mutex<Stage>>) -> Result<PathBuf
         .args(["-H", &format!("User-Agent: TernaryShell/{CURRENT}")])
         .arg("-o")
         .arg(&archive)
+        .arg("--")
         .arg(&asset.url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -624,7 +677,7 @@ fn prepare(release: &Release, download: &Path, dir: &Path) -> Result<Prepared, S
         .output()
         .map_err(|e| format!("the new version does not run: {e}"))?;
     let said = String::from_utf8_lossy(&out.stdout);
-    if !said.trim().ends_with(&release.version) {
+    if !out.status.success() || said.trim() != format!("TernaryShell {}", release.version) {
         return Err("the downloaded version does not match the release".into());
     }
     Ok(Prepared {
@@ -637,14 +690,10 @@ fn prepare(release: &Release, download: &Path, dir: &Path) -> Result<Prepared, S
 /// Whether the current user can replace `bundle` without an administrator password.
 #[cfg(target_os = "macos")]
 fn user_can_replace(bundle: &Path) -> bool {
-    let probe = |dir: &Path| {
-        let p = dir.join(format!(".ternaryshell-write-test-{}", std::process::id()));
-        let ok = std::fs::File::create(&p).is_ok();
-        let _ = std::fs::remove_file(&p);
-        ok
-    };
     // Renaming a folder needs write access to the folder itself, not only to its parent.
-    bundle.parent().is_some_and(probe) && probe(bundle) && probe(&bundle.join("Contents"))
+    bundle.parent().is_some_and(probe_writable)
+        && probe_writable(bundle)
+        && probe_writable(&bundle.join("Contents"))
 }
 
 /// Replaces the installed app (`$2`) with the downloaded one (`$1`), as the user or as root.
@@ -776,15 +825,29 @@ fn replace_and_relaunch(prepared: &Prepared, target: &Path) -> Result<(), String
     let dir = target.parent().ok_or("no folder to update in")?;
     let name = target.file_name().ok_or("no file to update")?;
     // A copy beside the target first, so the final step is one rename on the same disk.
+    // `create_new` with a random suffix prevents symlink-overwrite attacks in shared folders.
     let staged = dir.join(format!(
-        ".{}.update-{}",
+        ".{}.update-{}-{}",
         name.to_string_lossy(),
-        std::process::id()
+        std::process::id(),
+        random_hex()
     ));
-    std::fs::copy(&prepared.file, &staged).map_err(|e| format!("{}: {e}", dir.display()))?;
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755));
+    let staged_ok = (|| -> std::io::Result<()> {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut src = std::fs::File::open(&prepared.file)?;
+        let mut dst = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o755)
+            .open(&staged)?;
+        std::io::copy(&mut src, &mut dst)?;
+        dst.set_permissions(std::fs::Permissions::from_mode(0o755))?;
+        dst.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = staged_ok {
+        let _ = std::fs::remove_file(&staged);
+        return Err(format!("{}: {e}", dir.display()));
     }
     if let Err(e) = std::fs::rename(&staged, target) {
         let _ = std::fs::remove_file(&staged);
@@ -1374,5 +1437,36 @@ mod tests {
             .status()
             .unwrap();
         assert!(compiled.success());
+    }
+
+    #[test]
+    fn windows_dir_matching_and_url_scheme_validation() {
+        assert!(is_under_windows_dir(
+            r"\\?\C:\Program Files\TernaryShell\ternaryshell.exe",
+            r"C:\Program Files"
+        ));
+        assert!(is_under_windows_dir(
+            r"c:/program files/ternaryshell/ternaryshell.exe",
+            r"C:\Program Files\"
+        ));
+        assert!(!is_under_windows_dir(
+            r"C:\Program Files (x86)\TernaryShell\ternaryshell.exe",
+            r"C:\Program Files"
+        ));
+        assert!(!is_under_windows_dir(
+            r"C:\Users\alice\AppData\Local\TernaryShell\ternaryshell.exe",
+            ""
+        ));
+
+        assert!(allowed_url(
+            "https://github.com/ilhamnadhif/ternaryshell/releases"
+        ));
+        assert!(!allowed_url(
+            "http://github.com/ilhamnadhif/ternaryshell/releases"
+        ));
+        assert_eq!(allowed_url("file:///etc/passwd"), cfg!(debug_assertions));
+        assert!(!allowed_url("ftp://example.com/file"));
+        assert!(!allowed_url("javascript:alert(1)"));
+        assert!(!allowed_url("https://example.com/a\nb"));
     }
 }

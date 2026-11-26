@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
@@ -23,8 +23,9 @@ use russh::{ChannelMsg, ChannelWriteHalf, Disconnect, MethodKind, Pty, Sig, ciph
 use russh_sftp::client::SftpSession;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
+use zeroize::Zeroizing;
 
 use super::keys::{self, KeyLoadError};
 use super::known_hosts::{self, Check};
@@ -149,12 +150,33 @@ pub struct Connection {
 impl Connection {
     /// Starts connecting in the background on runtime `rt`.
     pub fn start(rt: &tokio::runtime::Handle, ctx: Context, spec: ConnectSpec) -> Self {
+        Self::start_with_credentials(rt, ctx, spec, None, true)
+    }
+
+    /// Starts connecting with optional ephemeral credentials (e.g. Connection Editor "Test
+    /// Connection") and explicit control over whether saved Keychain secrets may be read.
+    pub fn start_with_credentials(
+        rt: &tokio::runtime::Handle,
+        ctx: Context,
+        spec: ConnectSpec,
+        ephemeral_secrets: Option<secrets::SecretSet>,
+        use_keychain: bool,
+    ) -> Self {
         let shared = Arc::new(Mutex::new(ConnShared::default()));
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let received = Arc::new(AtomicU64::new(0));
         let (task_shared, task_received) = (shared.clone(), received.clone());
         rt.spawn(async move {
-            run_connection(spec, task_shared, ctx, cmd_rx, task_received).await;
+            run_connection(
+                spec,
+                ephemeral_secrets,
+                use_keychain,
+                task_shared,
+                ctx,
+                cmd_rx,
+                task_received,
+            )
+            .await;
         });
         Self {
             shared,
@@ -216,7 +238,7 @@ impl Connection {
 }
 
 /// How a root SFTP session gets past sudo.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum RootLogin {
     /// Passwordless sudo when the server allows it, otherwise the password this connection logged
     /// in with (sudo asks for the user's own password, the one SSH checked at login). Without a
@@ -224,6 +246,15 @@ pub enum RootLogin {
     Auto,
     /// A sudo password the user typed.
     Password(String),
+}
+
+impl std::fmt::Debug for RootLogin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RootLogin::Auto => f.write_str("RootLogin::Auto"),
+            RootLogin::Password(_) => f.write_str("RootLogin::Password(<redacted>)"),
+        }
+    }
 }
 
 /// Why a root SFTP session could not be opened.
@@ -371,6 +402,9 @@ pub struct SshHandler {
     host: String,
     port: u16,
     known_hosts: PathBuf,
+    /// True only on the target server connection; jump hops must never trigger local dials for
+    /// target `-R` remote port forwards.
+    allow_remote_forwards: bool,
     shared: Arc<Mutex<ConnShared>>,
     ctx: Context,
     flags: Flags,
@@ -383,17 +417,19 @@ impl client::Handler for SshHandler {
         &mut self,
         server_public_key: &PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
-        let key = server_public_key.public_key();
+        let key = server_public_key.public_key().to_owned();
         // The user's own OpenSSH known_hosts is consulted read-only: a match is trusted, and a
         // different key there is reported as a changed key (never as merely "unknown").
+        let own = self.known_hosts.clone();
         let user_file = paths::home_dir().join(".ssh/known_hosts");
-        let check = known_hosts::check(
-            &self.known_hosts,
-            Some(&user_file),
-            &self.host,
-            self.port,
-            &key,
-        )
+        let host = self.host.clone();
+        let port = self.port;
+        let key_for_check = key.clone();
+        let check = tokio::task::spawn_blocking(move || {
+            known_hosts::check(&own, Some(&user_file), &host, port, &key_for_check)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("known_hosts task failed: {e}"))?
         .map_err(|e| {
             anyhow::anyhow!(tf(
                 "Could not read {} ({})",
@@ -437,12 +473,18 @@ impl client::Handler for SshHandler {
             }
             return Ok(false);
         }
-        known_hosts::learn(&self.known_hosts, &self.host, self.port, &key).map_err(|e| {
-            anyhow::anyhow!(tf(
-                "Could not save the host key in {} ({})",
-                &[&self.known_hosts.display().to_string(), &e.to_string()],
-            ))
-        })?;
+        let own = self.known_hosts.clone();
+        let host = self.host.clone();
+        let port = self.port;
+        tokio::task::spawn_blocking(move || known_hosts::learn(&own, &host, port, &key))
+            .await
+            .map_err(|e| anyhow::anyhow!("known_hosts task failed: {e}"))?
+            .map_err(|e| {
+                anyhow::anyhow!(tf(
+                    "Could not save the host key in {} ({})",
+                    &[&self.known_hosts.display().to_string(), &e.to_string()],
+                ))
+            })?;
         Ok(true)
     }
 
@@ -457,8 +499,13 @@ impl client::Handler for SshHandler {
         reply: client::ChannelOpenHandle,
         _session: &mut client::Session,
     ) -> Result<(), Self::Error> {
+        if !self.allow_remote_forwards {
+            tokio::spawn(reply.reject(russh::ChannelOpenFailure::AdministrativelyProhibited));
+            return Ok(());
+        }
         super::forward::serve_forwarded(
             &self.flags.remote_forwards,
+            &self.flags.forwarded_limiter,
             connected_port,
             channel,
             reply,
@@ -511,21 +558,30 @@ async fn ask<T>(
     flags: &Flags,
     make: impl FnOnce(oneshot::Sender<T>) -> Prompt,
 ) -> Option<T> {
+    struct PromptGuard<'a> {
+        shared: &'a Arc<Mutex<ConnShared>>,
+        ctx: &'a Context,
+        flags: &'a Flags,
+    }
+    impl Drop for PromptGuard<'_> {
+        fn drop(&mut self) {
+            self.flags.prompting.store(false, Ordering::Relaxed);
+            self.shared.lock().prompt = None;
+            self.ctx.request_repaint();
+        }
+    }
     if flags.cancel.is_cancelled() {
         return None;
     }
     let (tx, rx) = oneshot::channel();
-    shared.lock().prompt = Some(make(tx));
     flags.prompting.store(true, Ordering::Relaxed);
+    shared.lock().prompt = Some(make(tx));
+    let _guard = PromptGuard { shared, ctx, flags };
     ctx.request_repaint();
-    let answer = tokio::select! {
+    tokio::select! {
         a = rx => a.ok(),
         _ = flags.cancel.cancelled() => None,
-    };
-    flags.prompting.store(false, Ordering::Relaxed);
-    shared.lock().prompt = None;
-    ctx.request_repaint();
-    answer
+    }
 }
 
 // ----- connecting -----------------------------------------------------------------------------
@@ -718,6 +774,8 @@ struct Flags {
     received: Arc<AtomicU64>,
     /// Remote port forwards, for the connections the server sends back.
     remote_forwards: super::forward::RemoteForwards,
+    /// Concurrency cap on incoming remote-forwarded channels.
+    forwarded_limiter: Arc<Semaphore>,
 }
 
 /// A server's connection, logged in.
@@ -727,13 +785,15 @@ struct Established {
     jumps: Vec<SshHandle>,
     /// The password the server accepted at login, kept for sudo (root SFTP). Only the server's
     /// own: a jump host's password is never offered to another machine.
-    login_password: Option<String>,
+    login_password: Option<Zeroizing<String>>,
 }
 
 /// Connects and logs in, through the jump hosts if there are any: the first hop over TCP, each
 /// next one through a `direct-tcpip` channel of the one before (as `ssh -J`).
 async fn establish(
     spec: &ConnectSpec,
+    ephemeral_secrets: Option<&secrets::SecretSet>,
+    use_keychain: bool,
     shared: &Arc<Mutex<ConnShared>>,
     ctx: &Context,
     flags: &Flags,
@@ -753,6 +813,8 @@ async fn establish(
                 ..spec.clone()
             }
         };
+        let hop_secrets = if last { ephemeral_secrets } else { None };
+        let hop_keychain = if last { use_keychain } else { true };
         let b = &hop_spec.bookmark;
         shared.lock().via = (!last).then(|| b.display_name());
         let host =
@@ -762,23 +824,47 @@ async fn establish(
             (Ok(host), None) => match tcp_connect(&host, b.port).await {
                 Ok(tcp) => {
                     let stream = CancellableStream::new(tcp, &flags.cancel, flags.received.clone());
-                    connect_hop(stream, &hop_spec, &host, shared, ctx, flags).await
+                    connect_hop(
+                        stream,
+                        &hop_spec,
+                        hop_secrets,
+                        hop_keychain,
+                        last,
+                        &host,
+                        shared,
+                        ctx,
+                        flags,
+                    )
+                    .await
                 }
                 Err(e) => Err(e),
             },
             (Ok(host), Some(prev)) => {
-                match prev
-                    .channel_open_direct_tcpip(host.clone(), b.port as u32, "127.0.0.1", 0)
-                    .await
+                match tokio::time::timeout(
+                    TCP_TIMEOUT,
+                    prev.channel_open_direct_tcpip(host.clone(), b.port as u32, "127.0.0.1", 0),
+                )
+                .await
                 {
-                    Ok(channel) => {
-                        connect_hop(channel.into_stream(), &hop_spec, &host, shared, ctx, flags)
-                            .await
+                    Ok(Ok(channel)) => {
+                        connect_hop(
+                            channel.into_stream(),
+                            &hop_spec,
+                            hop_secrets,
+                            hop_keychain,
+                            last,
+                            &host,
+                            shared,
+                            ctx,
+                            flags,
+                        )
+                        .await
                     }
-                    Err(e) => Err(ConnError::Unreachable(tf(
+                    Ok(Err(e)) => Err(ConnError::Unreachable(tf(
                         "{}:{} from the jump host ({})",
                         &[&host, &b.port.to_string(), &e.to_string()],
                     ))),
+                    Err(_) => Err(ConnError::Timeout),
                 }
             }
         };
@@ -805,14 +891,18 @@ async fn establish(
 
 /// The SSH handshake and login with one server, over `stream`. Returns the connection and the
 /// password it logged in with, if it did with one.
+#[allow(clippy::too_many_arguments)]
 async fn connect_hop<S>(
     stream: S,
     spec: &ConnectSpec,
+    ephemeral_secrets: Option<&secrets::SecretSet>,
+    use_keychain: bool,
+    allow_remote_forwards: bool,
     host: &str,
     shared: &Arc<Mutex<ConnShared>>,
     ctx: &Context,
     flags: &Flags,
-) -> Result<(SshHandle, Option<String>), ConnError>
+) -> Result<(SshHandle, Option<Zeroizing<String>>), ConnError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -823,14 +913,21 @@ where
         host: host.clone(),
         port: b.port,
         known_hosts: spec.known_hosts.clone(),
+        allow_remote_forwards,
         shared: shared.clone(),
         ctx: ctx.clone(),
         flags: flags.clone(),
     };
     let mut config = client_config(b.legacy_algorithms, spec.keepalive_secs);
+    let own = spec.known_hosts.clone();
     let user_file = paths::home_dir().join(".ssh/known_hosts");
-    let known_types =
-        known_hosts::known_algorithms(&spec.known_hosts, Some(&user_file), &host, b.port);
+    let host_for_algs = host.clone();
+    let port = b.port;
+    let known_types = tokio::task::spawn_blocking(move || {
+        known_hosts::known_algorithms(&own, Some(&user_file), &host_for_algs, port)
+    })
+    .await
+    .unwrap_or_default();
     prefer_known_key_types(&mut config, &known_types);
     let mut handle = tokio::select! {
         r = client::connect_stream(Arc::new(config), stream, handler) => {
@@ -840,7 +937,7 @@ where
     };
     set_state(shared, ctx, ConnState::Authenticating);
     let auth = tokio::select! {
-        r = authenticate(&mut handle, spec, shared, ctx, flags) => r,
+        r = authenticate(&mut handle, spec, ephemeral_secrets, use_keychain, shared, ctx, flags) => r,
         _ = handshake_watchdog(flags.prompting.clone(), AUTH_TIMEOUT) => Err(ConnError::Timeout),
     };
     match auth {
@@ -861,13 +958,28 @@ fn set_state(shared: &Arc<Mutex<ConnShared>>, ctx: &Context, state: ConnState) {
     if state.is_connected() {
         s.connected_at = Some(Instant::now());
     }
+    if state.is_closed() {
+        s.prompt = None;
+    }
     s.state = state;
     drop(s);
     ctx.request_repaint();
 }
 
 fn local_user() -> String {
-    std::env::var("USER").unwrap_or_else(|_| "root".into())
+    let vars: &[&str] = if cfg!(windows) {
+        &["USERNAME", "USER"]
+    } else {
+        &["USER", "USERNAME"]
+    };
+    for name in vars {
+        if let Ok(v) = std::env::var(name)
+            && !v.trim().is_empty()
+        {
+            return v;
+        }
+    }
+    "root".into()
 }
 
 async fn keychain_get(id: uuid::Uuid, kind: SecretKind) -> Option<String> {
@@ -902,10 +1014,12 @@ fn method_list(m: &[MethodKind]) -> String {
 async fn authenticate(
     handle: &mut SshHandle,
     spec: &ConnectSpec,
+    ephemeral_secrets: Option<&secrets::SecretSet>,
+    use_keychain: bool,
     shared: &Arc<Mutex<ConnShared>>,
     ctx: &Context,
     flags: &Flags,
-) -> Result<Option<String>, ConnError> {
+) -> Result<Option<Zeroizing<String>>, ConnError> {
     let b = &spec.bookmark;
     let user = if b.username.trim().is_empty() {
         local_user()
@@ -918,21 +1032,26 @@ async fn authenticate(
         Auth::Password | Auth::Agent { .. } => None,
         Auth::Key { path } => {
             let path = paths::expand_tilde(path);
-            Some((
-                keys::read_key_file(&path).map_err(|e| ConnError::KeyFile(e.to_string()))?,
-                path.display().to_string(),
-            ))
+            let display = path.display().to_string();
+            let text = tokio::task::spawn_blocking(move || keys::read_key_file(&path))
+                .await
+                .map_err(|e| ConnError::KeyFile(e.to_string()))?
+                .map_err(|e| ConnError::KeyFile(e.to_string()))?;
+            Some((text, display))
         }
         Auth::KeychainKey => {
-            let text = keychain_get(b.id, SecretKind::PrivateKey)
-                .await
-                .ok_or_else(|| {
-                    // Typically a connection imported without its credentials.
-                    ConnError::KeyFile(tf(
-                        "{} has no saved copy of the pasted key. Paste it again in Edit Connection, or choose a key file.",
-                        &[crate::platform::this_computer()],
-                    ))
-                })?;
+            let text = match ephemeral_secrets.and_then(|s| s.private_key.clone()) {
+                Some(t) if !t.is_empty() => Some(t),
+                _ if use_keychain => keychain_get(b.id, SecretKind::PrivateKey).await,
+                _ => None,
+            }
+            .ok_or_else(|| {
+                // Typically a connection imported without its credentials.
+                ConnError::KeyFile(tf(
+                    "{} has no saved copy of the pasted key. Paste it again in Edit Connection, or choose a key file.",
+                    &[crate::platform::this_computer()],
+                ))
+            })?;
             Some((text, crate::platform::SECRET_STORE.to_string()))
         }
     };
@@ -957,13 +1076,17 @@ async fn authenticate(
     }
     if let Some((text, label)) = key_text {
         let mut passphrase = if keys::is_encrypted(&text) {
-            keychain_get(b.id, SecretKind::Passphrase).await
+            match ephemeral_secrets.and_then(|s| s.passphrase.clone()) {
+                Some(p) if !p.is_empty() => Some(p),
+                _ if use_keychain => keychain_get(b.id, SecretKind::Passphrase).await,
+                _ => None,
+            }
         } else {
             None
         };
         // A saved passphrase that doesn't open the key is replaced by the one that does.
         let mut save = false;
-        let had_saved = passphrase.is_some();
+        let had_saved = passphrase.is_some() && ephemeral_secrets.is_none();
         let mut attempts = 0;
         let key: PrivateKey = loop {
             match keys::decode_key(&text, passphrase.as_deref()) {
@@ -977,7 +1100,7 @@ async fn authenticate(
                         kind: SecretPromptKind::Passphrase,
                         message,
                         echo: false,
-                        can_save: spec.save_secrets,
+                        can_save: spec.save_secrets && use_keychain,
                         retry,
                         reply,
                     })
@@ -985,7 +1108,7 @@ async fn authenticate(
                     .flatten()
                     .ok_or(ConnError::Cancelled)?;
                     passphrase = Some(answer.value);
-                    save = answer.save || (had_saved && spec.save_secrets);
+                    save = answer.save || (had_saved && spec.save_secrets && use_keychain);
                     attempts += 1;
                 }
                 Err(e) => return Err(ConnError::KeyFile(e.to_string())),
@@ -997,6 +1120,19 @@ async fn authenticate(
                 keychain_set(b.id, SecretKind::Passphrase, p).await;
             }
             return Ok(None);
+        }
+        // Key was accepted as a first factor (e.g. `publickey,keyboard-interactive`): save
+        // passphrase now if requested, since the key itself succeeded.
+        if matches!(
+            result,
+            AuthResult::Failure {
+                partial_success: true,
+                ..
+            }
+        ) && save
+            && let Some(p) = passphrase.take()
+        {
+            keychain_set(b.id, SecretKind::Passphrase, p).await;
         }
         let remaining = methods(&result);
         if !remaining
@@ -1011,16 +1147,39 @@ async fn authenticate(
         fallback_methods = Some(remaining);
     }
 
+    // Multi-factor or keyboard-interactive-only after publickey/agent (e.g. `publickey,keyboard-interactive`):
+    // go straight to keyboard-interactive without prompting for a password that the server will reject.
+    if let Some(rem) = &fallback_methods
+        && rem.contains(&MethodKind::KeyboardInteractive)
+        && !rem.contains(&MethodKind::Password)
+    {
+        for _ in 0..MAX_ATTEMPTS {
+            let (ok, _) = keyboard_interactive(handle, &user, None, shared, ctx, flags).await?;
+            if ok {
+                return Ok(None);
+            }
+        }
+        return Err(ConnError::AuthFailed(tf(
+            "authentication failed for {}",
+            &[&user],
+        )));
+    }
+
     // Password (and keyboard-interactive, which many PAM setups use for passwords).
     let mut stored = if fallback_methods.is_none() {
-        keychain_get(b.id, SecretKind::Password).await
+        match ephemeral_secrets.and_then(|s| s.password.clone()) {
+            Some(p) if !p.is_empty() => Some(p),
+            _ if use_keychain => keychain_get(b.id, SecretKind::Password).await,
+            _ => None,
+        }
     } else {
         None
     };
     let mut attempts = 0;
     let mut retry = false;
     // A saved password the server rejects is replaced by the one typed after it that works.
-    let replace_saved = stored.is_some() && spec.save_secrets;
+    let replace_saved =
+        stored.is_some() && spec.save_secrets && use_keychain && ephemeral_secrets.is_none();
     loop {
         let (password, save) = match stored.take() {
             Some(p) => (p, false),
@@ -1028,7 +1187,7 @@ async fn authenticate(
                 let message = format!("{user}@{}", b.host);
                 // A password asked for after a rejected key is not saved: key bookmarks never
                 // read a saved password.
-                let can_save = spec.save_secrets && fallback_methods.is_none();
+                let can_save = spec.save_secrets && use_keychain && fallback_methods.is_none();
                 let answer = ask(shared, ctx, flags, |reply| Prompt::Secret {
                     kind: SecretPromptKind::Password,
                     message,
@@ -1047,19 +1206,32 @@ async fn authenticate(
             .authenticate_password(&user, &password)
             .await
             .map_err(other)?;
+        let partial_success = matches!(
+            result,
+            AuthResult::Failure {
+                partial_success: true,
+                ..
+            }
+        );
         let mut ok = result.success();
         // Whether the server took this password (keyboard-interactive may log in without it).
-        let mut password_used = ok;
+        let mut password_used = ok || partial_success;
         let remaining = methods(&result);
         if !ok && remaining.contains(&MethodKind::KeyboardInteractive) {
-            (ok, password_used) =
-                keyboard_interactive(handle, &user, &password, shared, ctx, flags).await?;
+            // If `authenticate_password` already partially succeeded (e.g.
+            // `AuthenticationMethods password,keyboard-interactive`), do NOT auto-fill the login
+            // password into the second factor's prompt (e.g. "One-time password:").
+            let autofill = (!partial_success).then_some(password.as_str());
+            let (ki_ok, ki_used) =
+                keyboard_interactive(handle, &user, autofill, shared, ctx, flags).await?;
+            ok = ki_ok;
+            password_used |= ki_used;
         }
         if ok {
-            if save {
+            if save && password_used {
                 keychain_set(b.id, SecretKind::Password, password.clone()).await;
             }
-            return Ok(password_used.then_some(password));
+            return Ok(password_used.then(|| Zeroizing::new(password)));
         }
         // Servers list the methods that may still succeed; an empty list says nothing, so
         // only give up when password-style methods are clearly not offered.
@@ -1229,53 +1401,99 @@ where
     let other = |e: russh::Error| ConnError::Other(e.to_string());
     let mut rsa_hash = None;
     let mut remaining = Vec::new();
+    let mut tried_any = false;
+    let mut skipped_sha1_only = false;
     // Servers allow about six attempts in all (MaxAuthTries); keep some for a password.
     for key in keys.into_iter().take(5) {
-        let hash = if key.algorithm().is_rsa() {
+        let hashes: Vec<Option<HashAlg>> = if key.algorithm().is_rsa() {
             if rsa_hash.is_none() {
                 rsa_hash = Some(handle.best_supported_rsa_hash().await.map_err(other)?);
             }
             match rsa_hash.flatten() {
-                Some(Some(h)) => Some(h),
+                Some(Some(h)) => vec![Some(h)],
                 // SHA-1 only: like OpenSSH, only with legacy algorithms.
-                Some(None) if legacy => None,
-                Some(None) => continue,
-                None => Some(HashAlg::Sha512),
+                Some(None) if legacy => vec![None],
+                Some(None) => {
+                    skipped_sha1_only = true;
+                    continue;
+                }
+                None if legacy => vec![Some(HashAlg::Sha512), Some(HashAlg::Sha256), None],
+                None => vec![Some(HashAlg::Sha512), Some(HashAlg::Sha256)],
             }
         } else {
-            None
+            vec![None]
         };
-        // Time waiting for the user to approve in the agent doesn't count against the login.
-        flags.prompting.store(true, Ordering::Relaxed);
-        let result = tokio::time::timeout(
-            AGENT_SIGN_TIMEOUT,
-            handle.authenticate_publickey_with(user, key, hash, &mut agent),
-        )
-        .await;
-        flags.prompting.store(false, Ordering::Relaxed);
-        let result = result
-            .map_err(|_| ConnError::AuthFailed(t("the SSH agent did not sign in time").into()))?
-            .map_err(|e| {
-                ConnError::AuthFailed(tf("the SSH agent could not sign ({})", &[&e.to_string()]))
-            })?;
-        if result.success() {
-            return Ok(None);
+        let mut stop_publickey = false;
+        for hash in hashes {
+            tried_any = true;
+            // Time waiting for the user to approve in the agent doesn't count against the login.
+            flags.prompting.store(true, Ordering::Relaxed);
+            let result = tokio::time::timeout(
+                AGENT_SIGN_TIMEOUT,
+                handle.authenticate_publickey_with(user, key.clone(), hash, &mut agent),
+            )
+            .await;
+            flags.prompting.store(false, Ordering::Relaxed);
+            let result = result
+                .map_err(|_| ConnError::AuthFailed(t("the SSH agent did not sign in time").into()))?
+                .map_err(|e| {
+                    ConnError::AuthFailed(tf(
+                        "the SSH agent could not sign ({})",
+                        &[&e.to_string()],
+                    ))
+                })?;
+            if result.success() {
+                return Ok(None);
+            }
+            remaining = methods(&result);
+            if !remaining.is_empty() && !remaining.contains(&MethodKind::PublicKey) {
+                stop_publickey = true;
+                break;
+            }
         }
-        remaining = methods(&result);
-        if !remaining.is_empty() && !remaining.contains(&MethodKind::PublicKey) {
+        if stop_publickey {
             break;
         }
+    }
+    if !tried_any && skipped_sha1_only {
+        return Err(ConnError::AuthFailed(
+            t("the server only accepts RSA keys with SHA-1 signatures. Enable legacy algorithms for this connection to allow it.")
+                .into(),
+        ));
     }
     Ok(Some(remaining))
 }
 
-/// Keyboard-interactive login: password-like hidden prompts get the password, anything else
-/// (e.g. a one-time code) is asked of the user. Returns whether it logged in, and whether the
-/// password was one of the answers.
+/// Whether a hidden keyboard-interactive prompt looks like a plain login password (not an OTP,
+/// token, verification code, or PIN).
+fn looks_like_login_password(prompt: &str) -> bool {
+    let lower = prompt.to_lowercase();
+    if !lower.contains("password") {
+        return false;
+    }
+    ![
+        "one-time",
+        "onetime",
+        "otp",
+        "token",
+        "verification",
+        "passcode",
+        "code",
+        "2fa",
+        "mfa",
+        "pin",
+    ]
+    .iter()
+    .any(|kw| lower.contains(kw))
+}
+
+/// Keyboard-interactive login: when `password` is `Some`, plain password-like hidden prompts get
+/// it automatically; anything else (e.g. a one-time code) is asked of the user. Returns whether
+/// it logged in, and whether `password` was one of the answers.
 async fn keyboard_interactive(
     handle: &mut SshHandle,
     user: &str,
-    password: &str,
+    password: Option<&str>,
     shared: &Arc<Mutex<ConnShared>>,
     ctx: &Context,
     flags: &Flags,
@@ -1297,8 +1515,12 @@ async fn keyboard_interactive(
             } => {
                 let mut answers = Vec::new();
                 for p in prompts {
-                    if !p.echo && p.prompt.to_lowercase().contains("password") && !password_used {
-                        answers.push(password.to_string());
+                    if let Some(pw) = password
+                        && !p.echo
+                        && !password_used
+                        && looks_like_login_password(&p.prompt)
+                    {
+                        answers.push(pw.to_string());
                         password_used = true;
                         continue;
                     }
@@ -1338,6 +1560,8 @@ async fn keyboard_interactive(
 
 async fn run_connection(
     spec: ConnectSpec,
+    ephemeral_secrets: Option<secrets::SecretSet>,
+    use_keychain: bool,
     shared: Arc<Mutex<ConnShared>>,
     ctx: Context,
     mut cmd_rx: mpsc::UnboundedReceiver<ConnCmd>,
@@ -1352,6 +1576,7 @@ async fn run_connection(
         cancel: CancellationToken::new(),
         received,
         remote_forwards: Default::default(),
+        forwarded_limiter: super::forward::forwarded_limiter(),
     };
     // However this task ends, the socket and any prompt still waiting go with it.
     let _cancel_on_exit = flags.cancel.clone().drop_guard();
@@ -1368,7 +1593,7 @@ async fn run_connection(
         }
     };
     let result = tokio::select! {
-        r = establish(&spec, &shared, &ctx, &flags) => Some(r),
+        r = establish(&spec, ephemeral_secrets.as_ref(), use_keychain, &shared, &ctx, &flags) => Some(r),
         _ = early_disconnect => None,
     };
     let queued: Vec<ConnCmd> = std::mem::take(&mut *pending.lock());
@@ -1388,11 +1613,7 @@ async fn run_connection(
             fail_all(queued, cmd_rx, &message);
             return;
         }
-        Some(Ok(e)) => (
-            Arc::new(e.handle),
-            e.jumps,
-            e.login_password.map(Arc::<str>::from),
-        ),
+        Some(Ok(e)) => (Arc::new(e.handle), e.jumps, e.login_password.map(Arc::new)),
     };
     set_state(&shared, &ctx, ConnState::Connected);
     measure_latency(&handle, &shared, &ctx, spec.keepalive_secs, &flags.cancel);
@@ -1498,7 +1719,7 @@ fn handle_cmd(
     cmd: ConnCmd,
     handle: &Arc<SshHandle>,
     ctx: &Context,
-    login_password: &Option<Arc<str>>,
+    login_password: &Option<Arc<Zeroizing<String>>>,
 ) -> bool {
     match cmd {
         ConnCmd::OpenShell(pane) => {
@@ -1509,19 +1730,23 @@ fn handle_cmd(
         }
         ConnCmd::OpenSftp { reply } => {
             let handle = handle.clone();
+            let ctx = ctx.clone();
             tokio::spawn(async move {
                 let _ = reply.send(open_sftp(&handle).await);
+                ctx.request_repaint();
             });
             false
         }
         ConnCmd::OpenSftpRoot { login, reply } => {
             let handle = handle.clone();
+            let ctx = ctx.clone();
             let (password, from_login) = match login {
-                RootLogin::Password(p) => (Some(p), false),
-                RootLogin::Auto => (login_password.as_deref().map(str::to_string), true),
+                RootLogin::Password(p) => (Some(Zeroizing::new(p)), false),
+                RootLogin::Auto => (login_password.as_ref().map(|p| (**p).clone()), true),
             };
             tokio::spawn(async move {
                 let _ = reply.send(open_sftp_root(&handle, password, from_login).await);
+                ctx.request_repaint();
             });
             false
         }
@@ -1766,7 +1991,7 @@ async fn read_root_status<R: AsyncRead + Unpin>(stream: &mut R) -> Result<Option
 /// asking the user.
 async fn open_sftp_root(
     handle: &SshHandle,
-    password: Option<String>,
+    password: Option<Zeroizing<String>>,
     from_login: bool,
 ) -> Result<SftpSession, RootError> {
     let failed = |reason: &str| {
@@ -1810,7 +2035,7 @@ async fn open_sftp_root(
                         return Err(failed(t("sudo kept asking for the password")));
                     }
                     use tokio::io::AsyncWriteExt;
-                    let line = format!("{pw}\n");
+                    let line = Zeroizing::new(format!("{}\n", pw.as_str()));
                     stream
                         .write_all(line.as_bytes())
                         .await
@@ -1854,17 +2079,40 @@ async fn open_sftp_root(
 const SETUP_QUIET: std::time::Duration = std::time::Duration::from_millis(200);
 const SETUP_MAX: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Cap on queued terminal query replies (`PaneInput::Reply`) so a malicious remote server
+/// cannot exhaust memory by flooding DSR/OSC queries while stalling its SSH receive window.
+const MAX_QUEUED_REPLY_BYTES: usize = 64 * 1024;
+
 /// Shell-quotes a directory for `cd`, keeping a leading `~/` expandable.
-pub fn cd_command(dir: &str) -> String {
-    let quote = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
+/// Returns `None` if `dir` is empty or contains any control character (which could be interpreted
+/// by the remote PTY line discipline, e.g. `0x7F` DEL / `0x15` Ctrl-U / `\r` / `\n`).
+/// Escapes both `'` and `\` outside single quotes so the command is safe in POSIX shells as well
+/// as `fish` (where `\'` inside single quotes is an escape sequence).
+pub fn cd_command(dir: &str) -> Option<String> {
     let dir = dir.trim();
+    if dir.is_empty() || dir.chars().any(char::is_control) {
+        return None;
+    }
+    let quote = |s: &str| {
+        let mut out = String::with_capacity(s.len() + 2);
+        out.push('\'');
+        for c in s.chars() {
+            match c {
+                '\'' => out.push_str(r"'\''"),
+                '\\' => out.push_str(r"'\\'"),
+                other => out.push(other),
+            }
+        }
+        out.push('\'');
+        out
+    };
     if dir == "~" {
-        return "cd ~".into();
+        return Some("cd -- ~".into());
     }
-    match dir.strip_prefix("~/") {
-        Some(rest) => format!("cd ~/{}", quote(rest)),
-        None => format!("cd {}", quote(dir)),
-    }
+    Some(match dir.strip_prefix("~/") {
+        Some(rest) => format!("cd -- ~/{}", quote(rest)),
+        None => format!("cd -- {}", quote(dir)),
+    })
 }
 
 /// The locale to request on the server: the local `LANG` when it is UTF-8, else en_US.UTF-8.
@@ -1935,10 +2183,13 @@ async fn run_shell(handle: Arc<SshHandle>, pane: PaneStart, ctx: Context) {
     // the shell has drawn its prompt (its output paused for SETUP_QUIET, or SETUP_MAX at the
     // latest): sent earlier, the terminal echoes them above the login banner as well.
     let mut setup = String::new();
-    if !start_dir.trim().is_empty() {
-        setup.push_str(&format!("{}\r", cd_command(&start_dir)));
+    if let Some(cd) = cd_command(&start_dir) {
+        setup.push_str(&format!("{cd}\r"));
     }
-    for line in startup_command.lines().filter(|l| !l.trim().is_empty()) {
+    for line in startup_command.lines().filter(|l| {
+        let t = l.trim();
+        !t.is_empty() && !t.starts_with('#')
+    }) {
         setup.push_str(&format!("{line}\r"));
     }
     let (setup_tx, setup_rx) = oneshot::channel::<()>();
@@ -1952,6 +2203,8 @@ async fn run_shell(handle: Arc<SshHandle>, pane: PaneStart, ctx: Context) {
     // Writer: input, resizes and parser replies. Runs separately so a full remote window
     // never stops output from being read. Typed input waits behind the setup.
     let w = writer.clone();
+    let queued_reply_bytes = Arc::new(AtomicUsize::new(0));
+    let writer_reply_bytes = queued_reply_bytes.clone();
     let write_task = tokio::spawn(async move {
         let mut setup_rx = Some(setup_rx);
         let mut held: Vec<Vec<u8>> = Vec::new();
@@ -1982,7 +2235,11 @@ async fn run_shell(handle: Arc<SshHandle>, pane: PaneStart, ctx: Context) {
                     held.push(bytes);
                     Ok(())
                 }
-                PaneInput::Data(bytes) | PaneInput::Reply(bytes) => w.data_bytes(bytes).await,
+                PaneInput::Data(bytes) => w.data_bytes(bytes).await,
+                PaneInput::Reply(bytes) => {
+                    writer_reply_bytes.fetch_sub(bytes.len(), Ordering::Relaxed);
+                    w.data_bytes(bytes).await
+                }
                 PaneInput::Resize {
                     cols,
                     rows,
@@ -2000,6 +2257,21 @@ async fn run_shell(handle: Arc<SshHandle>, pane: PaneStart, ctx: Context) {
             }
         }
     });
+
+    let send_reply = |reply: Vec<u8>| {
+        if reply.is_empty() {
+            return;
+        }
+        let len = reply.len();
+        let prev = queued_reply_bytes.fetch_add(len, Ordering::Relaxed);
+        if prev.saturating_add(len) > MAX_QUEUED_REPLY_BYTES {
+            queued_reply_bytes.fetch_sub(len, Ordering::Relaxed);
+            return;
+        }
+        if input_tx.send(PaneInput::Reply(reply)).is_err() {
+            queued_reply_bytes.fetch_sub(len, Ordering::Relaxed);
+        }
+    };
 
     let mut exit_status = None;
     let mut exit_signal: Option<String> = None;
@@ -2024,9 +2296,7 @@ async fn run_shell(handle: Arc<SshHandle>, pane: PaneStart, ctx: Context) {
                         continue;
                     }
                     let (reply, repaint) = feeder.lock().feed(&data);
-                    if !reply.is_empty() {
-                        let _ = input_tx.send(PaneInput::Reply(reply));
-                    }
+                    send_reply(reply);
                     if setup_tx.is_some() {
                         setup_due = (tokio::time::Instant::now() + SETUP_QUIET).min(setup_latest);
                     }
@@ -2044,9 +2314,7 @@ async fn run_shell(handle: Arc<SshHandle>, pane: PaneStart, ctx: Context) {
             },
             _ = sleep => {
                 let reply = feeder.lock().flush_sync();
-                if !reply.is_empty() {
-                    let _ = input_tx.send(PaneInput::Reply(reply));
-                }
+                send_reply(reply);
                 ctx.request_repaint();
             }
             _ = tokio::time::sleep_until(setup_due), if setup_tx.is_some() => {
@@ -2158,10 +2426,19 @@ mod tests {
 
     #[test]
     fn cd_quoting() {
-        assert_eq!(cd_command("/var/www"), "cd '/var/www'");
-        assert_eq!(cd_command("~/my dir"), "cd ~/'my dir'");
-        assert_eq!(cd_command("~"), "cd ~");
-        assert_eq!(cd_command("/it's"), r"cd '/it'\''s'");
+        assert_eq!(cd_command("/var/www").as_deref(), Some("cd -- '/var/www'"));
+        assert_eq!(cd_command("~/my dir").as_deref(), Some("cd -- ~/'my dir'"));
+        assert_eq!(cd_command("~").as_deref(), Some("cd -- ~"));
+        assert_eq!(cd_command("/it's").as_deref(), Some(r"cd -- '/it'\''s'"));
+        assert_eq!(
+            cd_command(r"/a\'b").as_deref(),
+            Some(r"cd -- '/a'\\''\''b'")
+        );
+        // Control chars (DEL, Ctrl-U, CR, LF) are rejected outright.
+        assert_eq!(cd_command("/a\x7fid"), None);
+        assert_eq!(cd_command("/a\x15id"), None);
+        assert_eq!(cd_command("/a\nid"), None);
+        assert_eq!(cd_command("   "), None);
     }
 
     #[test]

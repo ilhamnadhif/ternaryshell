@@ -127,6 +127,9 @@ impl Layout {
 
     /// Sets the ratio of the split at `path`.
     pub fn set_ratio(&mut self, path: &[bool], value: f32) {
+        if !value.is_finite() {
+            return;
+        }
         let mut node = self;
         for &side in path {
             match node {
@@ -154,21 +157,30 @@ impl Layout {
 
 fn split_rect(rect: Rect, dir: SplitDir, ratio: f32) -> (Rect, Rect, Rect) {
     let half = DIVIDER / 2.0;
+    let ratio = if ratio.is_finite() {
+        ratio.clamp(0.1, 0.9)
+    } else {
+        0.5
+    };
     match dir {
         SplitDir::Horizontal => {
             let x = (rect.left() + rect.width() * ratio).round();
+            let x0 = (x - half).clamp(rect.left(), rect.right());
+            let x1 = (x + half).clamp(x0, rect.right());
             (
-                Rect::from_min_max(rect.min, pos2(x - half, rect.bottom())),
-                Rect::from_min_max(pos2(x - half, rect.top()), pos2(x + half, rect.bottom())),
-                Rect::from_min_max(pos2(x + half, rect.top()), rect.max),
+                Rect::from_min_max(rect.min, pos2(x0, rect.bottom())),
+                Rect::from_min_max(pos2(x0, rect.top()), pos2(x1, rect.bottom())),
+                Rect::from_min_max(pos2(x1, rect.top()), rect.max),
             )
         }
         SplitDir::Vertical => {
             let y = (rect.top() + rect.height() * ratio).round();
+            let y0 = (y - half).clamp(rect.top(), rect.bottom());
+            let y1 = (y + half).clamp(y0, rect.bottom());
             (
-                Rect::from_min_max(rect.min, pos2(rect.right(), y - half)),
-                Rect::from_min_max(pos2(rect.left(), y - half), pos2(rect.right(), y + half)),
-                Rect::from_min_max(pos2(rect.left(), y + half), rect.max),
+                Rect::from_min_max(rect.min, pos2(rect.right(), y0)),
+                Rect::from_min_max(pos2(rect.left(), y0), pos2(rect.right(), y1)),
+                Rect::from_min_max(pos2(rect.left(), y1), rect.max),
             )
         }
     }

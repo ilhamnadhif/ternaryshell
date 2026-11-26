@@ -61,12 +61,35 @@ pub fn known_hosts_file() -> PathBuf {
     data_dir().join("known_hosts")
 }
 
-/// Creates the directory with mode 0700 if it does not exist yet. (On Windows the data folders
-/// in the user profile are private to the user already.)
+/// Creates the directory with mode 0700 if it does not exist yet (and enforces 0700 on Unix).
+/// (On Windows the data folders in the user profile are private to the user already.)
 pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
-    if !dir.exists() {
-        fs::create_dir_all(dir)?;
-        #[cfg(unix)]
+    if dir.as_os_str().is_empty() {
+        return Ok(());
+    }
+    if let Some(parent) = dir.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    match builder.create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
+    }
+    let meta = fs::symlink_metadata(dir)?;
+    if !meta.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "path exists and is not a directory",
+        ));
+    }
+    #[cfg(unix)]
+    if (meta.permissions().mode() & 0o777) != 0o700 {
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
@@ -75,7 +98,9 @@ pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
 /// Writes a file atomically with mode 0600: write to a temp file, `fsync`, then `rename`.
 /// The previous file is never left half-written.
 pub fn write_private(path: &Path, data: &[u8]) -> io::Result<()> {
-    if let Some(dir) = path.parent() {
+    if let Some(dir) = path.parent()
+        && !dir.as_os_str().is_empty()
+    {
         ensure_private_dir(dir)?;
     }
     // Unique per write, so two writers (threads, or a second app instance) never share a
@@ -88,17 +113,17 @@ pub fn write_private(path: &Path, data: &[u8]) -> io::Result<()> {
         COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
     let tmp = path.with_file_name(tmp_name);
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut f = options.open(&tmp)?;
     let result = (|| {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
         #[cfg(unix)]
-        options.mode(0o600);
-        let mut f = options.open(&tmp)?;
+        f.set_permissions(fs::Permissions::from_mode(0o600))?;
         f.write_all(data)?;
         f.sync_all()?;
         drop(f);
-        #[cfg(unix)]
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
         // Replaces an existing file on Windows too.
         fs::rename(&tmp, path)
     })();

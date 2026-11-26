@@ -5,18 +5,23 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 SVG=assets/icon.svg
-render() { swift scripts/render-icon.swift "$SVG" "$2" "$1"; }
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+render() {
+  mkdir -p "$(dirname "$2")"
+  swift scripts/render-icon.swift "$SVG" "$2" "$1"
+}
 render 1024 assets/icon_1024.png
 render 256 assets/icon_256.png
-SET="$(mktemp -d)/AppIcon.iconset"
+SET="$TMP/AppIcon.iconset"
 mkdir -p "$SET"
 for s in 16 32 128 256 512; do
   render "$s" "$SET/icon_${s}x${s}.png"
   render $((s * 2)) "$SET/icon_${s}x${s}@2x.png"
 done
 iconutil -c icns "$SET" -o assets/AppIcon.icns
-rm -rf "$(dirname "$SET")"
 for s in 16 24 32 48 64 128 256 512; do
   render "$s" "packaging/linux/icons/hicolor/${s}x${s}/apps/ternaryshell.png"
 done
+mkdir -p packaging/windows
 python3 scripts/make-windows-icon.py "$SVG" packaging/windows/ternaryshell.ico

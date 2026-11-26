@@ -777,12 +777,18 @@ impl TernaryShellApp {
                         ui.label(RichText::new(t("No quick commands")).color(p.text_faint));
                     });
                     ui.add_space(6.0);
-                }
-                for (i, qc) in list {
-                    if quick_row(ui, i, qc).clicked() {
-                        chosen = Some(qc.id);
-                        ui.close();
-                    }
+                } else {
+                    egui::ScrollArea::vertical()
+                        .id_salt("quick-commands-scroll")
+                        .max_height(320.0)
+                        .show(ui, |ui| {
+                            for (i, qc) in list {
+                                if quick_row(ui, i, qc).clicked() {
+                                    chosen = Some(qc.id);
+                                    ui.close();
+                                }
+                            }
+                        });
                 }
                 kit::menu_sep(ui);
                 // The legend, and Edit… on the right.
@@ -1171,7 +1177,7 @@ impl TernaryShellApp {
             if connected && !forwards.is_empty() {
                 let failing = forwards
                     .iter()
-                    .filter(|f| f.error.is_some() || !f.listening)
+                    .filter(|f| !f.starting && (f.error.is_some() || !f.listening))
                     .count();
                 let count = if forwards.len() == 1 {
                     t("1 forward").to_string()
@@ -1194,7 +1200,8 @@ impl TernaryShellApp {
                 );
                 #[cfg(debug_assertions)]
                 crate::devtest::record("forwards-segment", r.rect);
-                self.forwards_popover(&r, &forwards, failing, &host);
+                let tab_id = self.tabs.get(self.active).map_or(0, |t| t.id);
+                self.forwards_popover(&r, tab_id, &forwards, failing, &host);
             }
             if let Some(pr) = &progress {
                 let files = pr.files_total.max(1);
@@ -1239,6 +1246,7 @@ impl TernaryShellApp {
     fn forwards_popover(
         &mut self,
         anchor: &egui::Response,
+        tab_id: u64,
         forwards: &[crate::ssh::types::ForwardStatus],
         failing: usize,
         host: &str,
@@ -1246,6 +1254,7 @@ impl TernaryShellApp {
         let mut edit = false;
         let mut retry = None;
         egui::Popup::menu(anchor)
+            .id(egui::Id::new(("forwards-popover", tab_id)))
             .width(360.0)
             .align(egui::RectAlign::TOP_END)
             .gap(6.0)
@@ -1285,13 +1294,16 @@ impl TernaryShellApp {
                     p.text_faint,
                 );
                 for (i, f) in forwards.iter().enumerate() {
-                    let (color, detail, err) = match (&f.error, f.listening) {
-                        (None, true) => (p.ok, listening_on(&f.forward), false),
-                        (Some(e), _) => (p.err, e.clone(), true),
-                        (None, false) => (p.err, t("Not listening").to_string(), true),
+                    let (color, detail, err) = match (f.starting, &f.error, f.listening) {
+                        (true, _, _) => (p.text_faint, t("Starting…").to_string(), false),
+                        (false, None, true) => (p.ok, listening_on(&f.forward), false),
+                        (false, Some(e), _) => (p.err, e.clone(), true),
+                        (false, None, false) => (p.err, t("Not listening").to_string(), true),
                     };
                     if forward_row(ui, &f.forward, color, &detail, err) {
-                        if err {
+                        if f.starting {
+                            // Still starting; ignore click.
+                        } else if err {
                             retry = Some(i);
                         } else {
                             ui.ctx().copy_text(forward_target(&f.forward));

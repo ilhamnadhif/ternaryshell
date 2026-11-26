@@ -201,7 +201,7 @@ impl Summary {
             return None;
         }
         let left = self.bytes_total.saturating_sub(self.bytes_done) as f64;
-        Some(Duration::from_secs_f64(left / self.speed))
+        Duration::try_from_secs_f64(left / self.speed).ok()
     }
 }
 
@@ -246,35 +246,40 @@ impl Transfers {
                 Direction::Download => s.downloads += 1,
             }
             let state = t.state();
+            let active = matches!(state, TransferState::Queued | TransferState::Running);
             // A transfer not walked yet counts as one file until its size is known.
-            let planned = t.planned.load(Ordering::Relaxed);
+            let planned = t.planned.load(Ordering::Acquire);
             let files = if planned {
                 t.files_total.load(Ordering::Relaxed)
             } else {
                 1
             };
-            if !planned && !t.is_finished() {
+            if !planned && active {
                 s.unplanned += 1;
             }
-            s.files_total += files;
+            s.files_total = s.files_total.saturating_add(files);
             match state {
                 TransferState::Done => {
                     s.done += 1;
-                    s.files_done += files;
+                    s.files_done = s.files_done.saturating_add(files);
                 }
                 TransferState::Failed(_) => s.failed += 1,
                 TransferState::Cancelled => s.cancelled += 1,
                 TransferState::Queued | TransferState::Running => {
                     s.active += 1;
-                    s.files_done += t.files_done.load(Ordering::Relaxed);
+                    s.files_done = s
+                        .files_done
+                        .saturating_add(t.files_done.load(Ordering::Relaxed));
                 }
             }
             if !matches!(state, TransferState::Cancelled) {
-                s.bytes_total += t.total.load(Ordering::Relaxed);
-                s.bytes_done += t.done.load(Ordering::Relaxed);
-            }
-            if let Some(f) = *t.finished.lock() {
-                last_finish = Some(last_finish.map_or(f, |l: Instant| l.max(f)));
+                s.bytes_total = s
+                    .bytes_total
+                    .saturating_add(t.total.load(Ordering::Relaxed));
+                s.bytes_done = s.bytes_done.saturating_add(t.done.load(Ordering::Relaxed));
+                if let Some(f) = *t.finished.lock() {
+                    last_finish = Some(last_finish.map_or(f, |l: Instant| l.max(f)));
+                }
             }
         }
         if s.uploads + s.downloads == 0 {
@@ -367,14 +372,22 @@ impl Transfers {
         let task = t.clone();
         rt.spawn(async move {
             let _permit = limiter.acquire_owned().await;
-            if task.cancelled() {
-                // Cancelled while queued: leave every destination untouched.
-                task.finish(Err(CANCELLED.into()));
-                on_done();
-                return;
+            {
+                let mut state = task.state.lock();
+                if task.cancelled() || *state == TransferState::Cancelled {
+                    // Cancelled while queued: leave every destination untouched and preserve
+                    // any `finished` timestamp already recorded by `cancel()`.
+                    if *state != TransferState::Cancelled {
+                        *state = TransferState::Cancelled;
+                        *task.finished.lock() = Some(Instant::now());
+                    }
+                    drop(state);
+                    on_done();
+                    return;
+                }
+                *task.started.lock() = Some(Instant::now());
+                *state = TransferState::Running;
             }
-            *task.started.lock() = Some(Instant::now());
-            *task.state.lock() = TransferState::Running;
             let result = match task.direction {
                 Direction::Upload => run_upload(&task, &sftp).await,
                 Direction::Download => run_download(&task, &sftp).await,
@@ -399,6 +412,9 @@ impl Transfers {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
+        if !remote::is_safe_entry_name(&name) {
+            return Err(format!("unsafe file name: {name}"));
+        }
         let dest = remote_join(remote_dir, &name);
         if self.busy(Direction::Upload, &local, &dest) {
             return Err(dest);
@@ -408,7 +424,7 @@ impl Transfers {
     }
 
     /// Downloads a remote file or folder into `local_dir`. Refused while another transfer is
-    /// writing to the same destination.
+    /// writing to the same destination, or when the remote name is unsafe for a local path.
     pub fn download(
         &mut self,
         rt: &tokio::runtime::Handle,
@@ -418,6 +434,9 @@ impl Transfers {
         on_done: impl Fn() + Send + Sync + 'static,
     ) -> Result<Arc<Transfer>, String> {
         let name = remote_name(&remote).to_string();
+        if !remote::is_safe_entry_name(&name) {
+            return Err(format!("unsafe file name: {name}"));
+        }
         let dest = local_dir.join(&name);
         if self.busy(Direction::Download, &dest, &remote) {
             return Err(dest.display().to_string());
@@ -448,6 +467,9 @@ fn plan_upload(t: &Transfer, local: &Path, dest: &str) -> Result<Plan, String> {
     }
     let mut stack = vec![(local.to_path_buf(), dest.to_string())];
     while let Some((dir, remote_dir)) = stack.pop() {
+        if t.cancelled() {
+            return Err(CANCELLED.into());
+        }
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
             Err(e) if dir != local => {
@@ -460,6 +482,9 @@ fn plan_upload(t: &Transfer, local: &Path, dest: &str) -> Result<Plan, String> {
         let mut entries: Vec<_> = entries.flatten().collect();
         entries.sort_by_key(|e| e.file_name());
         for entry in entries {
+            if t.cancelled() {
+                return Err(CANCELLED.into());
+            }
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
             let Ok(ft) = entry.file_type() else { continue };
@@ -483,11 +508,13 @@ async fn run_upload(t: &Arc<Transfer>, sftp: &Sftp) -> Result<(), String> {
     let plan = tokio::task::spawn_blocking(move || plan_upload(&task, &local, &dest))
         .await
         .map_err(|e| e.to_string())??;
-    t.total
-        .store(plan.files.iter().map(|f| f.2).sum(), Ordering::Relaxed);
+    t.total.store(
+        plan.files.iter().fold(0u64, |a, f| a.saturating_add(f.2)),
+        Ordering::Relaxed,
+    );
     t.files_total
         .store(plan.files.len() as u64, Ordering::Relaxed);
-    t.planned.store(true, Ordering::Relaxed);
+    t.planned.store(true, Ordering::Release);
     for dir in &plan.dirs {
         if t.cancelled() {
             return Err(CANCELLED.into());
@@ -555,9 +582,12 @@ async fn upload_file(
     };
     let result = send_file(t, &mut src, &mut dst, local, remote_path).await;
     let closed = dst.close().await.map_err(|e| format!("{remote_path}: {e}"));
-    let result = match result.and(closed) {
-        Ok(()) => check_size(sftp, &partial, remote_path, size).await,
-        Err(e) => Err(e),
+    let result = match (result, closed) {
+        (Ok(sent), Ok(())) => {
+            reconcile_total(t, size, sent);
+            check_size(sftp, &partial, remote_path, sent).await
+        }
+        (Err(e), _) | (_, Err(e)) => Err(e),
     };
     if let Err(e) = result {
         let _ = sftp.remove_file(partial).await;
@@ -608,8 +638,25 @@ async fn upload_in_place(
         .map_err(|e| format!("{remote_path}: {}", describe(&e)))?;
     let result = send_file(t, src, &mut dst, local, remote_path).await;
     let closed = dst.close().await.map_err(|e| format!("{remote_path}: {e}"));
-    result.and(closed)?;
-    check_size(sftp, dest, remote_path, size).await
+    let sent = match (result, closed) {
+        (Ok(sent), Ok(())) => sent,
+        (Err(e), _) | (_, Err(e)) => return Err(e),
+    };
+    reconcile_total(t, size, sent);
+    check_size(sftp, dest, remote_path, sent).await
+}
+
+fn reconcile_total(t: &Transfer, planned: u64, actual: u64) {
+    if actual > planned {
+        t.total.fetch_add(actual - planned, Ordering::Relaxed);
+    } else if planned > actual {
+        let diff = planned - actual;
+        let _ = t
+            .total
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                Some(cur.saturating_sub(diff))
+            });
+    }
 }
 
 async fn send_file(
@@ -618,8 +665,9 @@ async fn send_file(
     dst: &mut russh_sftp::client::fs::File,
     local: &Path,
     remote_path: &str,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let mut buf = vec![0u8; CHUNK];
+    let mut sent = 0u64;
     loop {
         if t.cancelled() {
             return Err(CANCELLED.to_string());
@@ -629,11 +677,12 @@ async fn send_file(
             .await
             .map_err(|e| format!("{}: {e}", local.display()))?;
         if n == 0 {
-            return Ok(());
+            return Ok(sent);
         }
         dst.write_all(&buf[..n])
             .await
             .map_err(|e| format!("{remote_path}: {e}"))?;
+        sent += n as u64;
         t.done.fetch_add(n as u64, Ordering::Relaxed);
     }
 }
@@ -678,7 +727,11 @@ async fn run_download(t: &Transfer, sftp: &Sftp) -> Result<(), String> {
             entries.sort_by_key(|e| e.file_name());
             for e in entries {
                 let name = e.file_name();
-                if name == "." || name == ".." || name.contains('/') {
+                if name == "." || name == ".." {
+                    continue;
+                }
+                if !remote::is_safe_entry_name(&name) {
+                    t.skip(format!("{name} (unsafe name)"));
                     continue;
                 }
                 let child = remote_join(&remote_dir, &name);
@@ -713,10 +766,12 @@ async fn run_download(t: &Transfer, sftp: &Sftp) -> Result<(), String> {
             root.permissions,
         ));
     }
-    t.total
-        .store(files.iter().map(|f| f.2).sum(), Ordering::Relaxed);
+    t.total.store(
+        files.iter().fold(0u64, |a, f| a.saturating_add(f.2)),
+        Ordering::Relaxed,
+    );
     t.files_total.store(files.len() as u64, Ordering::Relaxed);
-    t.planned.store(true, Ordering::Relaxed);
+    t.planned.store(true, Ordering::Release);
     for dir in &dirs {
         tokio::fs::create_dir_all(dir)
             .await

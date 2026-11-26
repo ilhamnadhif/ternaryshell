@@ -143,7 +143,7 @@ impl TernaryShellApp {
             let row = Rect::from_min_size(pos2(x0, y), vec2(w, ROW_H));
             y += ROW_H;
             let resp = ui.interact(row, egui::Id::new(("home-row", id)), Sense::click());
-            let hovered = resp.hovered();
+            let hovered = !self.modal_open() && ui.rect_contains_pointer(row);
             let painter = ui.painter();
             if hovered {
                 painter.rect_filled(row, CornerRadius::same(style::RADIUS), p.hover);
@@ -198,7 +198,7 @@ impl TernaryShellApp {
                 pos2(row.right() - 10.0, row.bottom()),
             );
             let mut files = false;
-            if hovered || ui.rect_contains_pointer(right) && resp.hovered() {
+            if hovered {
                 let g = ui.painter().layout_no_wrap(
                     t("Open Files").to_string(),
                     style::regular(style::SMALL),

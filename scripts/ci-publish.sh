@@ -13,7 +13,7 @@ cd "$(dirname "$0")/.."
 TAG="${GITHUB_REF_NAME:?the tag to publish}"
 VERSION="${TAG#v}"
 fail() { echo "Error: $*" >&2; exit 1; }
-grep -q "^version = \"$VERSION\"" Cargo.toml || fail "Cargo.toml is not at version $VERSION"
+grep -Fxq "version = \"$VERSION\"" Cargo.toml || fail "Cargo.toml is not at version $VERSION"
 
 FILES=("dist/TernaryShell-$VERSION-windows-x64-setup.exe" "dist/TernaryShell-$VERSION-windows-x64.zip")
 for arch in x86_64 aarch64; do
@@ -23,7 +23,25 @@ for arch in x86_64 aarch64; do
 done
 for f in "${FILES[@]}"; do [ -f "$f" ] || fail "missing $f"; done
 
-STATE="$(gh release view "$TAG" --json isDraft --jq 'if .isDraft then "draft" else "published" end' 2>/dev/null || echo none)"
+release_state() {
+    local out err rc=0
+    err="$(mktemp)"
+    out="$(gh release view "$TAG" --json isDraft --jq 'if .isDraft then "draft" else "published" end' 2>"$err")" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        rm -f "$err"
+        printf '%s\n' "$out"
+        return 0
+    fi
+    if grep -qiE 'release not found|not found' "$err"; then
+        rm -f "$err"
+        printf 'none\n'
+        return 0
+    fi
+    cat "$err" >&2
+    rm -f "$err"
+    fail "could not check release state for $TAG"
+}
+STATE="$(release_state)"
 case "$STATE" in
     draft)
         echo "==> Adding the Windows and Linux files to the draft"

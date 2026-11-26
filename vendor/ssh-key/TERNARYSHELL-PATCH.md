@@ -1,7 +1,7 @@
-# ssh-key 0.7.0-rc.11, patched
+# ssh-key 0.7.0-rc.12, patched
 
-A copy of [ssh-key](https://crates.io/crates/ssh-key) 0.7.0-rc.11 (the exact version russh
-0.64 requires), used through `[patch.crates-io]` in TernaryShell's `Cargo.toml`. Its tests are not
+A copy of [ssh-key](https://crates.io/crates/ssh-key) 0.7.0-rc.12 (the exact version russh
+0.65 requires), used through `[patch.crates-io]` in TernaryShell's `Cargo.toml`. Its tests are not
 included.
 
 The only change is in `src/private/ecdsa.rs`: ECDSA private scalars shorter than 32 bytes are

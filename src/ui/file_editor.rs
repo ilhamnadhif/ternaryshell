@@ -1,6 +1,7 @@
 //! A small editor for remote text files (configs, scripts): opens over SFTP, saves back with
 //! ⌘S, keeps the file's line endings, and warns when the file changed on the server meanwhile.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 
 use eframe::egui::text::{CCursor, CCursorRange, CharIndex};
@@ -31,9 +32,16 @@ enum Msg {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum DiscardNext {
+    Close,
+    Reload,
+    Download,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Confirm {
-    /// Close with unsaved changes?
-    Discard,
+    /// Lose unsaved changes to close, reload, or download?
+    Discard(DiscardNext),
     /// The file changed on the server: overwrite it?
     Overwrite,
     /// The file was deleted on the server: create it again?
@@ -53,11 +61,20 @@ pub enum EditorOutput {
 enum Status {
     Saving,
     Saved,
+    /// Local copy saved: stays visible even while the remote buffer is dirty, cleared on next edit.
+    Copied(String),
     Info(String),
     Error(String),
 }
 
+static NEXT_EDITOR_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_editor_id() -> u64 {
+    NEXT_EDITOR_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 pub struct FileEditor {
+    instance_id: u64,
     pub path: String,
     state: State,
     text: String,
@@ -81,13 +98,13 @@ pub struct FileEditor {
     host: String,
     /// Close once the save in progress succeeds (Save in the discard question).
     close_after_save: bool,
-    /// The laid out text and the hash of the text it was laid out from: typing lays the text
+    /// The laid out text and the cache key it was laid out from: typing lays the text
     /// out once per change, not once per frame.
     galley_cache: Option<(u64, Arc<egui::Galley>)>,
-    /// The changed-line marks of the gutter, for the text with this hash.
+    /// The changed-line marks of the gutter, keyed by `hash((text, saved_text))`.
     marks: Option<(u64, Vec<u8>)>,
-    /// The cursor's character index the line and column were computed for.
-    cursor_char: Option<usize>,
+    /// The cursor's character index and text hash the line and column were computed for.
+    cursor_char: Option<(usize, u64)>,
 }
 
 impl FileEditor {
@@ -104,6 +121,7 @@ impl FileEditor {
             ctx2.request_repaint();
         });
         Self {
+            instance_id: next_editor_id(),
             path,
             state: State::Loading,
             text: String::new(),
@@ -145,10 +163,15 @@ impl FileEditor {
             let _ = tx.send(Msg::Loaded(edit::load(&sftp, &p).await));
             ctx2.request_repaint();
         });
+        self.instance_id = next_editor_id();
         self.pending = Some(rx);
+        self.saving_text = None;
+        self.close_after_save = false;
         self.state = State::Loading;
         self.status = None;
         self.confirm = None;
+        self.galley_cache = None;
+        self.marks = None;
         self.cursor_char = None;
     }
 
@@ -160,10 +183,19 @@ impl FileEditor {
         matches!(self.state, State::Ready) && self.text != self.saved_text
     }
 
+    /// Whether the editor currently shows a blocking confirmation modal (Discard changes).
+    pub fn modal_open(&self) -> bool {
+        matches!(self.confirm, Some(Confirm::Discard(_)))
+    }
+
     /// Closes now if nothing would be lost; otherwise asks first. Returns true when closed.
     pub fn request_close(&mut self) -> bool {
+        if matches!(self.confirm, Some(Confirm::Discard(_))) {
+            self.confirm = None;
+            return false;
+        }
         if self.is_dirty() {
-            self.confirm = Some(Confirm::Discard);
+            self.confirm = Some(Confirm::Discard(DiscardNext::Close));
             false
         } else {
             true
@@ -172,7 +204,21 @@ impl FileEditor {
 
     fn poll(&mut self) {
         let Some(rx) = &self.pending else { return };
-        let Ok(msg) = rx.try_recv() else { return };
+        let msg = match rx.try_recv() {
+            Ok(msg) => msg,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.pending = None;
+                self.close_after_save = false;
+                if self.saving_text.take().is_some() {
+                    self.status = Some(Status::Error(t("Save interrupted.").into()));
+                } else if matches!(self.state, State::Loading) {
+                    self.state =
+                        State::Failed(LoadError::Failed(t("Could not open the file.").into()));
+                }
+                return;
+            }
+        };
         self.pending = None;
         match msg {
             Msg::Loaded(Ok(l)) => {
@@ -184,6 +230,9 @@ impl FileEditor {
                 self.mode = l.mode;
                 self.state = State::Ready;
                 self.focus = true;
+                self.marks = None;
+                self.galley_cache = None;
+                self.cursor_char = None;
             }
             Msg::Loaded(Err(e)) => self.state = State::Failed(e),
             Msg::Saved(result) => {
@@ -195,18 +244,25 @@ impl FileEditor {
                         if let Some(text) = written {
                             self.saved_text = text;
                         }
+                        self.marks = None;
+                        if self.is_dirty() {
+                            self.close_after_save = false;
+                        }
                         self.status = Some(Status::Saved);
                     }
                     Err(SaveError::Changed) => {
+                        self.close_after_save = false;
                         self.status = None;
                         self.confirm = Some(Confirm::Overwrite);
                     }
                     Err(SaveError::Deleted) => {
+                        self.close_after_save = false;
                         self.status = None;
                         self.confirm = Some(Confirm::Recreate);
                     }
                     // The text stays in the editor, so nothing typed is lost.
                     Err(SaveError::Failed(e)) => {
+                        self.close_after_save = false;
                         self.status = Some(Status::Error(tf("Could not save: {}", &[&e])))
                     }
                 }
@@ -225,6 +281,7 @@ impl FileEditor {
             return;
         }
         let Some(sftp) = sftp else {
+            self.close_after_save = false;
             self.status = Some(Status::Error(t("Not connected.").into()));
             return;
         };
@@ -305,7 +362,7 @@ impl FileEditor {
         };
         let data = edit::encode(&self.text, self.crlf, self.bom);
         self.status = Some(match std::fs::write(&dest, data) {
-            Ok(()) => Status::Info(tf("Saved a copy to {}.", &[&dest.display().to_string()])),
+            Ok(()) => Status::Copied(tf("Saved a copy to {}.", &[&dest.display().to_string()])),
             Err(e) => Status::Error(tf("Could not save: {}", &[&e.to_string()])),
         });
     }
@@ -319,19 +376,23 @@ impl FileEditor {
         rect: Rect,
         rt: &tokio::runtime::Handle,
         sftp: Option<Sftp>,
+        overlay_open: bool,
     ) -> EditorOutput {
         self.poll();
         let ctx = ui.ctx().clone();
         let mut out = EditorOutput::Open;
-        let text_id = Id::new(("file-editor-text", &self.path));
+        let text_id = Id::new(("file-editor-text", self.instance_id));
         let dirty = self.is_dirty();
+        let text_before_hash = egui::util::hash(&self.text);
         let mut save_clicked = false;
         let mut close_clicked = false;
         let mut copy_clicked = false;
         let mut reload_clicked = false;
+        let mut force_reload = false;
+        let mut download_clicked = false;
         let mut overwrite_clicked = false;
 
-        if self.confirm != Some(Confirm::Discard) {
+        if !overlay_open && !matches!(self.confirm, Some(Confirm::Discard(_))) {
             let (save_key, escape) = ctx.input_mut(|i| {
                 (
                     i.consume_key(Modifiers::COMMAND, Key::S),
@@ -374,16 +435,21 @@ impl FileEditor {
         if failed {
             let r = place(24.0, 24.0);
             let resp = ui
-                .interact(r, Id::new(("editor-x", &self.path)), Sense::click())
+                .interact(r, Id::new(("editor-x", self.instance_id)), Sense::click())
                 .on_hover_text(t("Close"));
             kit::paint_icon_button(ui, &resp, r, icons::X, t("Close"), false, false);
             if resp.clicked() {
                 close_clicked = true;
             }
         } else {
+            let saving = self.saving_text.is_some();
             let r = place(24.0, 24.0);
             let more = ui
-                .interact(r, Id::new(("editor-more", &self.path)), Sense::click())
+                .interact(
+                    r,
+                    Id::new(("editor-more", self.instance_id)),
+                    Sense::click(),
+                )
                 .on_hover_text(t("More"));
             kit::paint_icon_button(ui, &more, r, icons::DOTS_THREE, t("More"), false, false);
             egui::Popup::menu(&more).show(|ui| {
@@ -403,23 +469,32 @@ impl FileEditor {
                     copy_clicked = true;
                     ui.close();
                 }
-                if kit::menu_item(
-                    ui,
-                    Some(icons::ARROWS_CLOCKWISE),
-                    t("Reload from Server"),
-                    None,
-                )
-                .clicked()
+                if ui
+                    .add_enabled_ui(!saving, |ui| {
+                        kit::menu_item(
+                            ui,
+                            Some(icons::ARROWS_CLOCKWISE),
+                            t("Reload from Server"),
+                            None,
+                        )
+                    })
+                    .inner
+                    .clicked()
                 {
                     reload_clicked = true;
                     ui.close();
                 }
-                if kit::menu_item(ui, Some(icons::DOWNLOAD_SIMPLE), t("Download"), None).clicked() {
-                    out = EditorOutput::Download;
+                if ui
+                    .add_enabled_ui(!saving, |ui| {
+                        kit::menu_item(ui, Some(icons::DOWNLOAD_SIMPLE), t("Download"), None)
+                    })
+                    .inner
+                    .clicked()
+                {
+                    download_clicked = true;
                     ui.close();
                 }
             });
-            let saving = self.saving_text.is_some();
             let save_kind = if dirty {
                 kit::Kind::Primary
             } else {
@@ -487,7 +562,7 @@ impl FileEditor {
             let band = Rect::from_min_size(pos2(rect.left(), top), vec2(rect.width(), h));
             let choice = self.banner(ui, band, c, &p);
             match choice {
-                Some(Banner::Reload) => reload_clicked = true,
+                Some(Banner::Reload) => force_reload = true,
                 Some(Banner::Copy) => copy_clicked = true,
                 Some(Banner::Overwrite) => overwrite_clicked = true,
                 Some(Banner::Close) => close_clicked = true,
@@ -585,11 +660,29 @@ impl FileEditor {
             State::Ready => self.text_area(&mut b, body, text_id, &p, dark),
         }
 
+        if egui::util::hash(&self.text) != text_before_hash
+            && matches!(self.status, Some(Status::Copied(_)))
+        {
+            self.status = None;
+        }
         if copy_clicked {
             self.save_copy();
         }
-        if reload_clicked {
+        if force_reload {
             self.reload(rt, &ctx, sftp.clone());
+        } else if reload_clicked {
+            if self.is_dirty() {
+                self.confirm = Some(Confirm::Discard(DiscardNext::Reload));
+            } else {
+                self.reload(rt, &ctx, sftp.clone());
+            }
+        }
+        if download_clicked {
+            if self.is_dirty() {
+                self.confirm = Some(Confirm::Discard(DiscardNext::Download));
+            } else {
+                out = EditorOutput::Download;
+            }
         }
         if overwrite_clicked {
             self.confirm = None;
@@ -605,72 +698,85 @@ impl FileEditor {
                 self.status = Some(Status::Info(t("No changes to save.").into()));
             }
         }
-        // "Saved" only while it is true.
+        // "Saved" only while it is true (a local copy message stays until the next edit).
         if self.is_dirty() && matches!(self.status, Some(Status::Saved | Status::Info(_))) {
             self.status = None;
         }
 
-        if self.confirm == Some(Confirm::Discard) {
+        if let Some(Confirm::Discard(next)) = self.confirm {
             let choice = std::cell::Cell::new(None::<u8>);
             let host = if self.host.is_empty() {
                 t("the server").to_string()
             } else {
                 self.host.clone()
             };
-            style::modal(&ctx, Id::new(("file-editor-discard", &self.path))).show(&ctx, |ui| {
-                ui.set_width(380.0);
-                ui.spacing_mut().item_spacing.y = 0.0;
-                dialog_head(
-                    ui,
-                    &tf("Discard changes to {}?", &[self.name()]),
-                    &tf("Your edits haven't been saved to {}.", &[&host]),
-                );
-                ui.add_space(14.0);
-                let keys = super::keys::Shortcut::Save.label();
-                kit::dialog_footer(
-                    ui,
-                    |ui| {
-                        if discard_button(ui).clicked() {
-                            choice.set(Some(1));
-                        }
-                    },
-                    |ui| {
-                        if kit::button_kbd(
-                            ui,
-                            kit::Kind::Primary,
-                            None,
-                            t("Save"),
-                            Some(&keys),
-                            false,
-                            false,
-                        )
-                        .clicked()
-                        {
-                            choice.set(Some(2));
-                        }
-                        if kit::secondary(ui, None, t("Keep Editing")).clicked() {
-                            choice.set(Some(0));
-                        }
-                    },
-                );
-            });
-            let (esc, save_key) = ctx.input_mut(|i| {
-                (
-                    i.key_pressed(Key::Escape),
-                    i.consume_key(Modifiers::COMMAND, Key::S),
-                )
-            });
-            if esc {
-                choice.set(Some(0));
-            }
-            if save_key {
-                choice.set(Some(2));
+            style::modal(&ctx, Id::new(("file-editor-discard", self.instance_id))).show(
+                &ctx,
+                |ui| {
+                    ui.set_width(380.0);
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    dialog_head(
+                        ui,
+                        &tf("Discard changes to {}?", &[self.name()]),
+                        &tf("Your edits haven't been saved to {}.", &[&host]),
+                    );
+                    ui.add_space(14.0);
+                    let keys = super::keys::Shortcut::Save.label();
+                    kit::dialog_footer(
+                        ui,
+                        |ui| {
+                            if discard_button(ui).clicked() {
+                                choice.set(Some(1));
+                            }
+                        },
+                        |ui| {
+                            if next == DiscardNext::Close
+                                && kit::button_kbd(
+                                    ui,
+                                    kit::Kind::Primary,
+                                    None,
+                                    t("Save"),
+                                    Some(&keys),
+                                    false,
+                                    false,
+                                )
+                                .clicked()
+                            {
+                                choice.set(Some(2));
+                            }
+                            if kit::secondary(ui, None, t("Keep Editing")).clicked() {
+                                choice.set(Some(0));
+                            }
+                        },
+                    );
+                },
+            );
+            if !overlay_open {
+                let (esc, save_key) = ctx.input_mut(|i| {
+                    (
+                        i.key_pressed(Key::Escape),
+                        next == DiscardNext::Close && i.consume_key(Modifiers::COMMAND, Key::S),
+                    )
+                });
+                if esc {
+                    choice.set(Some(0));
+                }
+                if save_key {
+                    choice.set(Some(2));
+                }
             }
             match choice.get() {
                 Some(1) => {
-                    return EditorOutput::Close {
-                        saved: self.saved_once,
-                    };
+                    self.confirm = None;
+                    match next {
+                        DiscardNext::Close => {
+                            return EditorOutput::Close {
+                                saved: self.saved_once,
+                            };
+                        }
+                        DiscardNext::Reload => self.reload(rt, &ctx, sftp),
+                        DiscardNext::Download => return EditorOutput::Download,
+                    }
                 }
                 Some(2) => {
                     self.confirm = None;
@@ -941,7 +1047,9 @@ impl FileEditor {
                 segment(&mut x, None, None, t("Saving…"), xs.clone(), p.text_muted)
             }
             Some(Status::Error(m)) => segment(&mut x, None, Some(p.err), m, xs.clone(), p.err),
-            Some(Status::Info(m)) => segment(&mut x, None, None, m, xs.clone(), p.text_muted),
+            Some(Status::Info(m) | Status::Copied(m)) => {
+                segment(&mut x, None, None, m, xs.clone(), p.text_muted)
+            }
             _ if dirty => segment(
                 &mut x,
                 None,
@@ -1048,9 +1156,9 @@ impl FileEditor {
     /// each line changed since the file was opened or saved, and the current line's wash.
     fn text_area(&mut self, ui: &mut Ui, body: Rect, text_id: Id, p: &style::Palette, dark: bool) {
         let font = FontId::new(13.0, egui::FontFamily::Monospace);
-        let hash = egui::util::hash(&self.text);
-        if self.marks.as_ref().is_none_or(|(h, _)| *h != hash) {
-            self.marks = Some((hash, line_marks(&self.text, &self.saved_text)));
+        let marks_hash = egui::util::hash((&self.text, &self.saved_text));
+        if self.marks.as_ref().is_none_or(|(h, _)| *h != marks_hash) {
+            self.marks = Some((marks_hash, line_marks(&self.text, &self.saved_text)));
         }
         let lines = self.text.split('\n').count().max(1);
         let current = self.cursor.0;
@@ -1059,8 +1167,10 @@ impl FileEditor {
         let marks_owned = self.marks.take();
         let marks: &[u8] = marks_owned.as_ref().map_or(&[], |(_, m)| m.as_slice());
         let mut cursor_at = None;
+        let ppp_bits = ui.ctx().pixels_per_point().to_bits();
+        let font_gen = super::fonts::generation();
         egui::ScrollArea::both()
-            .id_salt(("file-editor-scroll", &self.path))
+            .id_salt(("file-editor-scroll", self.instance_id))
             .auto_shrink([false, false])
             .show_viewport(ui, |ui, viewport| {
                 ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
@@ -1116,7 +1226,7 @@ impl FileEditor {
                     let fg = syntax.fg;
                     let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
                         let text = buf.as_str();
-                        let key = egui::util::hash((text, dark));
+                        let key = egui::util::hash((text, dark, ppp_bits, font_gen));
                         if let Some((k, g)) = &cache
                             && *k == key
                         {
@@ -1158,10 +1268,11 @@ impl FileEditor {
             });
         self.galley_cache = cache;
         self.marks = marks_owned;
+        let text_hash = egui::util::hash(&self.text);
         if let Some(at) = cursor_at
-            && self.cursor_char != Some(at)
+            && self.cursor_char != Some((at, text_hash))
         {
-            self.cursor_char = Some(at);
+            self.cursor_char = Some((at, text_hash));
             let before = self
                 .text
                 .char_indices()
@@ -1293,16 +1404,28 @@ fn line_marks(text: &str, saved: &str) -> Vec<u8> {
 /// The quiet red "Discard" of the discard question.
 fn discard_button(ui: &mut Ui) -> egui::Response {
     let p = style::pal(ui);
-    let g =
-        ui.painter()
-            .layout_no_wrap(t("Discard").to_string(), style::medium(style::BODY), p.err);
+    let label = t("Discard");
+    let g = ui
+        .painter()
+        .layout_no_wrap(label.to_string(), style::medium(style::BODY), p.err);
     let (rect, resp) =
         ui.allocate_exact_size(vec2(g.size().x + 24.0, style::CONTROL_H), Sense::click());
+    resp.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
     if resp.hovered() {
         ui.painter().rect_filled(
             rect,
             CornerRadius::same(style::RADIUS),
             p.tone_soft(Tone::Err),
+        );
+    }
+    if resp.has_focus() {
+        ui.painter().rect_stroke(
+            rect.expand(2.0),
+            CornerRadius::same(style::RADIUS + 2),
+            Stroke::new(2.0, p.accent_line),
+            egui::StrokeKind::Outside,
         );
     }
     ui.painter()

@@ -28,12 +28,19 @@ impl std::fmt::Display for KeyLoadError {
     }
 }
 
-/// Whether key text is passphrase-protected (OpenSSH, PEM `Proc-Type` and PKCS#8).
+/// Whether key text is passphrase-protected (OpenSSH, PEM `Proc-Type`, PKCS#8, and PuTTY `.ppk`).
 pub fn is_encrypted(text: &str) -> bool {
     if text.contains("-----BEGIN OPENSSH PRIVATE KEY-----") {
         return ssh_key::PrivateKey::from_openssh(text)
             .map(|k| k.is_encrypted())
             .unwrap_or(false);
+    }
+    if text.trim_start().starts_with("PuTTY-User-Key-File-") {
+        return text.lines().any(|l| {
+            l.trim_start()
+                .strip_prefix("Encryption:")
+                .is_some_and(|v| !v.trim().eq_ignore_ascii_case("none"))
+        });
     }
     text.contains("-----BEGIN ENCRYPTED PRIVATE KEY-----")
         || text.contains("Proc-Type: 4,ENCRYPTED")
@@ -88,10 +95,33 @@ pub fn check_key_text(text: &str) -> KeyCheck {
 }
 
 pub fn read_key_file(path: &Path) -> Result<String, KeyLoadError> {
-    std::fs::read_to_string(path).map_err(|e| KeyLoadError::Io(format!("{}: {e}", path.display())))
+    use std::io::Read;
+    let file = std::fs::File::open(path)
+        .map_err(|e| KeyLoadError::Io(format!("{}: {e}", path.display())))?;
+    let meta = file
+        .metadata()
+        .map_err(|e| KeyLoadError::Io(format!("{}: {e}", path.display())))?;
+    if !meta.is_file() {
+        return Err(KeyLoadError::Io(format!(
+            "{}: not a regular file",
+            path.display()
+        )));
+    }
+    let mut buf = Vec::new();
+    file.take(MAX_KEY_TEXT as u64 + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| KeyLoadError::Io(format!("{}: {e}", path.display())))?;
+    if buf.len() > MAX_KEY_TEXT {
+        return Err(KeyLoadError::Io(format!(
+            "{}: file is too large to be a private key",
+            path.display()
+        )));
+    }
+    String::from_utf8(buf)
+        .map_err(|_| KeyLoadError::Io(format!("{}: file is not valid UTF-8 text", path.display())))
 }
 
-/// Decodes private key text (OpenSSH, PEM PKCS#1/SEC1/PKCS#8; RSA, ECDSA, Ed25519).
+/// Decodes private key text (OpenSSH, PEM PKCS#1/SEC1/PKCS#8, PuTTY `.ppk`; RSA, ECDSA, Ed25519).
 pub fn decode_key(text: &str, passphrase: Option<&str>) -> Result<PrivateKey, KeyLoadError> {
     let encrypted = is_encrypted(text);
     let passphrase = passphrase.filter(|p| !p.is_empty());
@@ -106,9 +136,34 @@ pub fn decode_key(text: &str, passphrase: Option<&str>) -> Result<PrivateKey, Ke
             "encrypted legacy PEM EC key; convert it with `ssh-keygen -p -f <key>`".into(),
         ));
     }
+    // russh only decrypts legacy PEM keys with DEK-Info: AES-128-CBC; other ciphers (e.g.
+    // DES-EDE3-CBC, AES-256-CBC) fall through to raw PKCS#1 parsing and would otherwise be
+    // misreported as a wrong passphrase.
+    if encrypted && text.contains("Proc-Type: 4,ENCRYPTED") {
+        let supported_dek = text.lines().any(|l| {
+            let t = l.trim();
+            t.starts_with("DEK-Info:") && t.to_ascii_uppercase().contains("AES-128-CBC,")
+        });
+        if !supported_dek {
+            return Err(KeyLoadError::Unsupported(
+                "encrypted legacy PEM key uses an unsupported cipher; convert it with `ssh-keygen -p -f <key>`"
+                    .into(),
+            ));
+        }
+    }
     match keys::decode_secret_key(text, pass) {
         Ok(k) => Ok(k),
         Err(keys::Error::KeyIsEncrypted) => Err(KeyLoadError::NeedsPassphrase),
+        Err(keys::Error::SshKey(ssh_key::Error::Ppk(ref p))) => {
+            let dbg = format!("{p:?}");
+            if dbg == "Encrypted" {
+                Err(KeyLoadError::NeedsPassphrase)
+            } else if dbg == "IncorrectMac" {
+                Err(KeyLoadError::WrongPassphrase)
+            } else {
+                Err(KeyLoadError::Unsupported(p.to_string()))
+            }
+        }
         Err(keys::Error::SshKey(ssh_key::Error::Crypto)) | Err(keys::Error::Unpad(_)) => {
             Err(KeyLoadError::WrongPassphrase)
         }

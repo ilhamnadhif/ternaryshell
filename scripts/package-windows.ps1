@@ -24,18 +24,24 @@ $exe = (Resolve-Path 'target\release\ternaryshell.exe').Path
 # It starts and is the version being packaged (a GUI program: its output only reaches a
 # redirected stream).
 $out = Join-Path $env:TEMP "ternaryshell-version-$PID.txt"
-$p = Start-Process -FilePath $exe -ArgumentList '--version' -RedirectStandardOutput $out -NoNewWindow -Wait -PassThru
-$said = (Get-Content $out -Raw).Trim()
-Remove-Item $out
+try {
+    $p = Start-Process -FilePath $exe -ArgumentList '--version' -RedirectStandardOutput $out -NoNewWindow -Wait -PassThru
+    $said = ([string](Get-Content $out -Raw)).Trim()
+} finally {
+    Remove-Item -ErrorAction SilentlyContinue $out
+}
 if ($p.ExitCode -ne 0 -or $said -ne "TernaryShell $version") { throw "ternaryshell.exe --version said '$said' (exit $($p.ExitCode)), expected TernaryShell $version" }
 Write-Host ("==> $said, ternaryshell.exe {0:N1} MB" -f ((Get-Item $exe).Length / 1MB))
 
 $zip = Join-Path $dist "TernaryShell-$version-windows-x64.zip"
 $stage = Join-Path $env:TEMP "ternaryshell-zip-$PID"
-New-Item -ItemType Directory -Force -Path $stage | Out-Null
-Copy-Item $exe, README.md, LICENSE $stage
-Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -CompressionLevel Optimal -Force
-Remove-Item -Recurse $stage
+try {
+    New-Item -ItemType Directory -Force -Path $stage | Out-Null
+    Copy-Item $exe, README.md, LICENSE $stage
+    Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -CompressionLevel Optimal -Force
+} finally {
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $stage
+}
 Write-Host "==> $zip"
 
 $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1

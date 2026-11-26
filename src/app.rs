@@ -100,6 +100,8 @@ pub struct TernaryShellApp {
     updater: crate::ui::update_ui::Updater,
     /// When a panic in a frame was last caught (to show one notice, not one per frame).
     last_recovered_panic: Option<Instant>,
+    /// How many frames in a row panicked (backs off repainting if a panic repeats every frame).
+    consecutive_panics: u32,
     /// The tab that was active last frame (to notice tab switches).
     last_active_tab: Option<u64>,
     modal_was_open: bool,
@@ -290,6 +292,7 @@ impl TernaryShellApp {
             net_changes_seen: 0,
             updater: Default::default(),
             last_recovered_panic: None,
+            consecutive_panics: 0,
             last_active_tab: None,
             modal_was_open: false,
             swallow_repeats: false,
@@ -724,17 +727,19 @@ impl TernaryShellApp {
         )
     }
 
-    fn save_store(&mut self) {
+    fn save_store(&mut self) -> bool {
         if !self.store_writable {
             self.toasts.error(t(
                 "Connection changes are not saved: the connections file could not be read safely.",
             ));
-            return;
+            return false;
         }
         if let Err(e) = self.store.save(&paths::bookmarks_file()) {
             self.toasts.error(format!("{e:#}"));
+            return false;
         }
         self.store_mtime = file_mtime(&paths::bookmarks_file());
+        true
     }
 
     /// Another TernaryShell window may have changed the bookmarks: reload them when this window gets
@@ -765,11 +770,12 @@ impl TernaryShellApp {
         self.editor.is_some()
             || self.palette.is_some()
             || self.dialog.is_some()
-            || self.updater.dialog_open
+            || self.about.is_some()
+            || self.updater.modal_open()
             || self
                 .tabs
                 .get(self.active)
-                .is_some_and(|t| t.sftp.as_ref().is_some_and(SftpPanel::dialog_open))
+                .is_some_and(|t| t.sftp.as_ref().is_some_and(SftpPanel::modal_dialog_open))
     }
 
     /// Whether the keyboard is in the active tab's focused terminal pane.
@@ -830,6 +836,15 @@ impl TernaryShellApp {
     /// Shortcuts not covered by the native menu.
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
         if self.modal_open() {
+            if !cfg!(target_os = "macos") {
+                for shortcut in [keys::Shortcut::Quit, keys::Shortcut::Close] {
+                    if ctx.input_mut(|inp| shortcut.consume(inp))
+                        && let Some(action) = shortcut.action()
+                    {
+                        self.actions.push(action);
+                    }
+                }
+            }
             return;
         }
         let digits = [
@@ -893,12 +908,24 @@ impl TernaryShellApp {
     }
 
     fn handle_close_request(&mut self, ctx: &egui::Context) {
-        if ctx.input(|i| i.viewport().close_requested())
-            && !self.allow_close
-            && let Some(rows) = self.quit_rows()
-        {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.dialog = Some(self.quit_dialog(rows));
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close {
+            if matches!(
+                &self.dialog,
+                Some(Dialog::Confirm {
+                    action: ConfirmAction::Quit,
+                    ..
+                })
+            ) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                return;
+            }
+            if let Some(rows) = self.quit_rows() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                if self.dialog.is_some() {
+                    self.dialog_below = self.dialog.take();
+                }
+                self.dialog = Some(self.quit_dialog(rows));
+            }
         }
     }
 
@@ -1004,6 +1031,10 @@ impl TernaryShellApp {
     }
 
     fn open_tab(&mut self, ctx: &egui::Context, mut bookmark: Bookmark) {
+        if let Err(e) = self.store.jump_chain(&bookmark) {
+            self.toasts.error(e);
+            return;
+        }
         // Another tab's connection to this host already runs its forwards: a second one would
         // only find their ports taken (and say so in two error toasts).
         if !bookmark.forwards.is_empty()
@@ -1067,9 +1098,29 @@ impl TernaryShellApp {
             return;
         }
         let id = self.tabs[idx].bookmark.id;
-        if let Some(b) = self.store.bookmark(id).cloned() {
-            self.tabs[idx].bookmark = b;
+        let mut bookmark = self
+            .store
+            .bookmark(id)
+            .cloned()
+            .unwrap_or_else(|| self.tabs[idx].bookmark.clone());
+        if let Err(e) = self.store.jump_chain(&bookmark) {
+            self.toasts.error(e);
+            return;
         }
+        let other_live = self.tabs.iter().enumerate().any(|(i, t)| {
+            i != idx
+                && t.bookmark.id == id
+                && matches!(
+                    t.state(),
+                    ConnState::Connected | ConnState::Connecting | ConnState::Authenticating
+                )
+        });
+        if other_live {
+            bookmark.forwards.clear();
+        }
+        self.tabs[idx].bookmark = bookmark;
+        let tab_id = self.tabs[idx].id;
+        self.conn_steps.remove(&tab_id);
         let env = Env {
             rt: self.rt.handle(),
             ctx,
@@ -1092,14 +1143,16 @@ impl TernaryShellApp {
                 match action {
                     Action::Copy | Action::Paste | Action::Cut | Action::Quit => {}
                     Action::CloseTabOrPane => {
-                        if self.palette.is_some() {
-                            self.palette = None;
+                        if self.updater.modal_open() {
+                            self.updater.close_dialog();
+                        } else if self.about.is_some() {
+                            self.about = None;
                         } else if self.dialog.is_some() {
                             self.dialog = self.dialog_below.take();
+                        } else if self.palette.is_some() {
+                            self.palette = None;
                         } else if self.editor.is_some() {
                             self.editor = None;
-                        } else if self.updater.dialog_open {
-                            self.updater.close_dialog();
                         } else if let Some(tab) = self.tabs.get_mut(self.active) {
                             if let Some(panel) = tab.sftp.as_mut().filter(|p| p.dialog_open()) {
                                 panel.close_dialog();
@@ -1138,10 +1191,17 @@ impl TernaryShellApp {
                 }
             }
             Action::DuplicateBookmark(id) => {
-                if let Some(new_id) = self.store.duplicate_bookmark(id, t("(copy)")) {
-                    secrets::copy_all(id, new_id);
+                if !self.store_writable {
                     self.save_store();
-                    self.sidebar.reveal(&self.store, new_id);
+                    return;
+                }
+                if let Some(new_id) = self.store.duplicate_bookmark(id, t("(copy)")) {
+                    if self.save_store() {
+                        secrets::copy_all(id, new_id);
+                        self.sidebar.reveal(&self.store, new_id);
+                    } else {
+                        self.store.remove_bookmark(new_id);
+                    }
                 }
             }
             Action::DeleteBookmark(id) => {
@@ -1281,7 +1341,9 @@ impl TernaryShellApp {
             }
             Action::CloseTabOrPane => {
                 if let Some(tab) = self.tabs.get_mut(self.active) {
-                    if tab.panes.len() > 1 {
+                    if let Some(panel) = tab.sftp.as_mut().filter(|p| p.editor_open()) {
+                        panel.close_dialog();
+                    } else if tab.panes.len() > 1 {
                         let focused = tab.focused;
                         tab.close_pane(focused);
                     } else {
@@ -1321,8 +1383,9 @@ impl TernaryShellApp {
             Action::Reconnect => {
                 if let Some(tab) = self.tabs.get(self.active) {
                     let transfers = tab.running_transfers();
-                    if tab.is_active() || transfers > 0 {
-                        // Running programs would be cut off: ask first.
+                    let unsaved = tab.unsaved_file();
+                    if tab.is_active() || transfers > 0 || unsaved.is_some() {
+                        // Running programs, transfers or unsaved edits would be cut off: ask first.
                         self.dialog = Some(self.reconnect_dialog(tab));
                     } else {
                         self.reconnect_tab(ctx, self.active);
@@ -1438,12 +1501,18 @@ impl TernaryShellApp {
                 else {
                     return;
                 };
-                if let Some(p) = self.tabs.get(self.active).and_then(|t| t.focused_pane()) {
+                if let Some(tab) = self.tabs.get_mut(self.active)
+                    && tab.state().is_connected()
+                    && tab.conn.shared.lock().prompt.is_none()
+                    && let Some(p) = tab.focused_pane()
+                    && p.is_live()
+                {
                     let mut bytes = qc.command.replace('\n', "\r").into_bytes();
                     if qc.run {
                         bytes.push(b'\r');
                     }
                     p.send(bytes);
+                    tab.note_input();
                     self.focus_target = None;
                     ctx.request_repaint();
                 }
@@ -1610,10 +1679,19 @@ impl TernaryShellApp {
     }
 
     fn apply_import(&mut self, mut plan: ImportPlan) {
+        if !self.store_writable {
+            self.save_store();
+            return;
+        }
         plan.adopt_key_files(|path| {
             crate::ssh::keys::read_key_file(&paths::expand_tilde(path)).ok()
         });
+        let backup = self.store.clone();
         let outcome = plan.apply(&mut self.store);
+        if !self.save_store() {
+            self.store = backup;
+            return;
+        }
         let mut failed = 0;
         for id in &outcome.clear_secrets {
             secrets::delete_all(*id);
@@ -1623,7 +1701,6 @@ impl TernaryShellApp {
                 failed += 1;
             }
         }
-        self.save_store();
         self.toasts.info(tf(
             "Import finished: {} added, {} updated, {} skipped.",
             &[
@@ -1659,25 +1736,36 @@ impl TernaryShellApp {
             match editor.show(ctx, &self.store) {
                 EditorResult::Open => {}
                 EditorResult::Cancel => self.editor = None,
-                EditorResult::Test(bookmark) => {
+                EditorResult::Test {
+                    bookmark,
+                    secrets,
+                    use_keychain,
+                } => {
                     // "Test Connection": connect and log in, without saving anything.
-                    let jumps = self
-                        .store
-                        .jump_chain(&bookmark)
-                        .map(|c| c.into_iter().cloned().collect())
-                        .unwrap_or_default();
-                    let spec = crate::ssh::session::ConnectSpec {
-                        bookmark,
-                        jumps,
-                        keepalive_secs: self.settings.keepalive_secs,
-                        known_hosts: paths::known_hosts_file(),
-                        save_secrets: false,
-                    };
-                    editor.start_test(crate::ssh::session::Connection::start(
-                        self.rt.handle(),
-                        ctx.clone(),
-                        spec,
-                    ));
+                    match self.store.jump_chain(&bookmark) {
+                        Ok(chain) => {
+                            let mut bookmark = bookmark;
+                            bookmark.forwards.clear();
+                            let jumps = chain.into_iter().cloned().collect();
+                            let spec = crate::ssh::session::ConnectSpec {
+                                bookmark,
+                                jumps,
+                                keepalive_secs: self.settings.keepalive_secs,
+                                known_hosts: paths::known_hosts_file(),
+                                save_secrets: false,
+                            };
+                            editor.start_test(
+                                crate::ssh::session::Connection::start_with_credentials(
+                                    self.rt.handle(),
+                                    ctx.clone(),
+                                    spec,
+                                    Some(secrets),
+                                    use_keychain,
+                                ),
+                            );
+                        }
+                        Err(e) => editor.set_error(e),
+                    }
                 }
                 EditorResult::Save {
                     bookmark,
@@ -1685,6 +1773,13 @@ impl TernaryShellApp {
                     clear,
                     connect,
                 } => {
+                    if !self.store_writable {
+                        editor.set_error(
+                            t("Connection changes are not saved: the connections file could not be read safely.")
+                                .to_string(),
+                        );
+                        return;
+                    }
                     let id = bookmark.id;
                     // Nothing is changed if the Keychain refuses the new secrets: switching the
                     // login method anyway would leave a connection that can't log in.
@@ -1712,6 +1807,12 @@ impl TernaryShellApp {
         connect: bool,
     ) {
         let id = bookmark.id;
+        let backup = self.store.clone();
+        self.store.upsert_bookmark(bookmark.clone());
+        if !self.save_store() {
+            self.store = backup;
+            return;
+        }
         for kind in clear {
             let _ = secrets::set(id, kind, None);
         }
@@ -1726,8 +1827,6 @@ impl TernaryShellApp {
         if !matches!(bookmark.auth, Auth::KeychainKey) {
             let _ = secrets::set(id, SecretKind::PrivateKey, None);
         }
-        self.store.upsert_bookmark(bookmark.clone());
-        self.save_store();
         self.sidebar.reveal(&self.store, id);
         self.editor = None;
         if connect {
@@ -1823,9 +1922,17 @@ impl TernaryShellApp {
                     self.dialog_below = None;
                     match action {
                         ConfirmAction::DeleteBookmark(id) => {
-                            self.store.remove_bookmark(id);
-                            secrets::delete_all(id);
-                            self.save_store();
+                            if !self.store_writable {
+                                self.save_store();
+                            } else {
+                                let backup = self.store.clone();
+                                self.store.remove_bookmark(id);
+                                if self.save_store() {
+                                    secrets::delete_all(id);
+                                } else {
+                                    self.store = backup;
+                                }
+                            }
                         }
                         ConfirmAction::DeleteGroup(id) => {
                             self.store.remove_group(id);
@@ -1867,11 +1974,11 @@ impl TernaryShellApp {
                     self.dialog = None;
                     self.apply_import(*plan);
                 }
-                DialogResult::Run(action) => self.actions.push(action),
+                DialogResult::Run(action) => self.run_action(ctx, action),
                 DialogResult::RunAndClose(action) => {
                     self.dialog = None;
                     self.dialog_below = None;
-                    self.actions.push(action);
+                    self.run_action(ctx, action);
                 }
             }
         }
@@ -1882,12 +1989,12 @@ impl TernaryShellApp {
                 crate::ui::about::AboutResult::Close => self.about = None,
                 crate::ui::about::AboutResult::Run(action) => {
                     self.about = None;
-                    self.actions.push(action);
+                    self.run_action(ctx, action);
                 }
             }
         }
         if let Some(action) = self.toasts.show(ctx) {
-            self.actions.push(action);
+            self.run_action(ctx, action);
         }
     }
 
@@ -2267,6 +2374,7 @@ impl eframe::App for TernaryShellApp {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.frame_ui(ui, frame)));
         if result.is_err() {
             let now = Instant::now();
+            self.consecutive_panics = self.consecutive_panics.saturating_add(1);
             if self
                 .last_recovered_panic
                 .is_none_or(|t| now.duration_since(t) > Duration::from_secs(10))
@@ -2277,7 +2385,13 @@ impl eframe::App for TernaryShellApp {
                 ));
             }
             self.last_recovered_panic = Some(now);
-            ui.ctx().request_repaint();
+            if self.consecutive_panics < 3 {
+                ui.ctx().request_repaint();
+            } else {
+                ui.ctx().request_repaint_after(Duration::from_secs(1));
+            }
+        } else {
+            self.consecutive_panics = 0;
         }
         self.guard_accessibility_focus(ui.ctx());
         self.first_frame = false;

@@ -9,6 +9,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{KeyInit, XChaCha20Poly1305, XNonce};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 pub const KDF_ARGON2ID: &str = "argon2id";
 pub const CIPHER_XCHACHA: &str = "xchacha20poly1305";
@@ -39,11 +40,17 @@ fn random_bytes<const N: usize>() -> Result<[u8; N]> {
     Ok(buf)
 }
 
-fn derive_key(passphrase: &str, salt: &[u8], m: u32, t: u32, p: u32) -> Result<[u8; 32]> {
+fn derive_key(
+    passphrase: &str,
+    salt: &[u8],
+    m: u32,
+    t: u32,
+    p: u32,
+) -> Result<Zeroizing<[u8; 32]>> {
     let params = Params::new(m, t, p, Some(32)).map_err(|e| anyhow!("argon2 params: {e}"))?;
-    let mut key = [0u8; 32];
+    let mut key = Zeroizing::new([0u8; 32]);
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
-        .hash_password_into(passphrase.as_bytes(), salt, &mut key)
+        .hash_password_into(passphrase.as_bytes(), salt, &mut *key)
         .map_err(|e| anyhow!("argon2: {e}"))?;
     Ok(key)
 }
@@ -63,7 +70,7 @@ pub fn encrypt_with(
     let salt: [u8; 16] = random_bytes()?;
     let nonce: [u8; 24] = random_bytes()?;
     let key = derive_key(passphrase, &salt, m, t, p)?;
-    let cipher = XChaCha20Poly1305::new(&key.into());
+    let cipher = XChaCha20Poly1305::new((&*key).into());
     let ciphertext = cipher
         .encrypt(&XNonce::from(nonce), plaintext)
         .map_err(|_| anyhow!("encryption failed"))?;
@@ -117,7 +124,7 @@ pub fn decrypt(passphrase: &str, blob: &EncryptedBlob) -> Result<Vec<u8>> {
         .ok_or_else(damaged)?;
     let ciphertext = B64.decode(&blob.ciphertext).map_err(|_| damaged())?;
     let key = derive_key(passphrase, &salt, blob.m_cost, blob.t_cost, blob.p_cost)?;
-    XChaCha20Poly1305::new(&key.into())
+    XChaCha20Poly1305::new((&*key).into())
         .decrypt(&XNonce::from(nonce), ciphertext.as_slice())
         .map_err(|_| {
             anyhow!(

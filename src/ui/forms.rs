@@ -27,6 +27,9 @@ pub struct NavExtra<'a> {
 pub fn nav_item(ui: &mut Ui, icon: &str, label: &str, on: bool, extra: NavExtra) -> egui::Response {
     let p = style::pal(ui);
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), on, label)
+    });
     if !ui.is_rect_visible(rect) {
         return resp;
     }
@@ -35,6 +38,14 @@ pub fn nav_item(ui: &mut Ui, icon: &str, label: &str, on: bool, extra: NavExtra)
         painter.rect_filled(rect, CornerRadius::same(7), p.accent_soft);
     } else if resp.hovered() {
         painter.rect_filled(rect, CornerRadius::same(7), p.hover);
+    }
+    if resp.has_focus() {
+        painter.rect_stroke(
+            rect,
+            CornerRadius::same(7),
+            Stroke::new(1.5, p.accent_line),
+            StrokeKind::Inside,
+        );
     }
     let dim = |c: Color32| if extra.dim { c.gamma_multiply(0.42) } else { c };
     let text = if on || resp.hovered() {
@@ -380,11 +391,16 @@ pub fn highlight(
     let mut i = 0;
     while let Some(pos) = lower[i..].find(&q) {
         let s = i + pos;
+        let e = s + q.len();
+        if !text.is_char_boundary(s) || !text.is_char_boundary(e) {
+            job.append(&text[i..], 0.0, fmt(color, false));
+            return job;
+        }
         if s > i {
             job.append(&text[i..s], 0.0, fmt(color, false));
         }
-        job.append(&text[s..s + q.len()], 0.0, fmt(hit, true));
-        i = s + q.len();
+        job.append(&text[s..e], 0.0, fmt(hit, true));
+        i = e;
     }
     if i < text.len() {
         job.append(&text[i..], 0.0, fmt(color, false));

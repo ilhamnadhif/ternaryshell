@@ -203,75 +203,97 @@ impl Updater {
             self.started = true;
             toast = self.report_last_update();
         }
-        if let Some(rx) = &self.rx
-            && let Ok(msg) = rx.try_recv()
-        {
-            if !matches!(msg, Msg::Newer(_)) {
-                self.rx = None;
-            }
-            match msg {
-                Msg::Newer(release) => {
-                    if let State::Downloading(r) = &mut self.state {
-                        self.announced = Some(release.version.clone());
-                        *r = release;
+        if let Some(rx) = &self.rx {
+            match rx.try_recv() {
+                Ok(msg) => {
+                    if !matches!(msg, Msg::Newer(_)) {
+                        self.rx = None;
                     }
-                }
-                Msg::Checked(result) => {
-                    // Someone is looking at "Checking for updates…" (whichever check it was).
-                    let manual =
-                        self.dialog_open && matches!(self.state, State::Idle | State::Checking);
-                    let at_launch = std::mem::take(&mut self.launch_check);
-                    settings.last_update_check = Some(now_secs());
-                    match result {
-                        Ok(Some(release)) => {
-                            let skipped = settings.skipped_version.as_deref()
-                                == Some(release.version.as_str());
-                            // A version already offered (or downloaded) is only replaced by a
-                            // newer one.
-                            let held = match &self.state {
-                                State::Available(r)
-                                | State::Downloading(r)
-                                | State::Ready(r, _) => Some(r.version.as_str()),
-                                _ => None,
-                            };
-                            let newer = held.is_none_or(|v| update::is_newer(&release.version, v));
-                            if newer && (manual || !skipped) {
-                                if let State::Ready(_, prepared) = &self.state {
-                                    let dir = prepared.dir.clone();
-                                    std::thread::spawn(move || std::fs::remove_dir_all(dir));
-                                }
-                                if self.announced.as_deref() != Some(&release.version) && !manual {
-                                    if at_launch {
-                                        self.popup = true;
-                                    } else if !self.dialog_open {
-                                        toast = Some(tf(
-                                            "TernaryShell {} is available. Use the Update button to install it.",
-                                            &[&release.version],
-                                        ));
-                                    }
-                                }
+                    match msg {
+                        Msg::Newer(release) => {
+                            if let State::Downloading(r) = &mut self.state {
                                 self.announced = Some(release.version.clone());
-                                self.state = State::Available(release);
+                                *r = release;
                             }
                         }
-                        Ok(None) if manual => self.state = State::UpToDate,
-                        Err(e) if manual => self.state = State::Error(e),
-                        // Automatic checks fail silently.
-                        Ok(None) | Err(_) => {}
+                        Msg::Checked(result) => {
+                            // Someone is looking at "Checking for updates…" (whichever check it was).
+                            let manual = self.dialog_open
+                                && matches!(self.state, State::Idle | State::Checking);
+                            let at_launch = std::mem::take(&mut self.launch_check);
+                            settings.last_update_check = Some(now_secs());
+                            match result {
+                                Ok(Some(release)) => {
+                                    let skipped = settings.skipped_version.as_deref()
+                                        == Some(release.version.as_str());
+                                    // A version already offered (or downloaded) is only replaced by a
+                                    // newer one.
+                                    let held = match &self.state {
+                                        State::Available(r)
+                                        | State::Downloading(r)
+                                        | State::Ready(r, _) => Some(r.version.as_str()),
+                                        _ => None,
+                                    };
+                                    let newer =
+                                        held.is_none_or(|v| update::is_newer(&release.version, v));
+                                    if newer && (manual || !skipped) {
+                                        if let State::Ready(_, prepared) = &self.state {
+                                            let dir = prepared.dir.clone();
+                                            std::thread::spawn(move || {
+                                                std::fs::remove_dir_all(dir)
+                                            });
+                                        }
+                                        if self.announced.as_deref() != Some(&release.version)
+                                            && !manual
+                                        {
+                                            if at_launch {
+                                                self.popup = true;
+                                            } else if !self.dialog_open {
+                                                toast = Some(tf(
+                                                    "TernaryShell {} is available. Use the Update button to install it.",
+                                                    &[&release.version],
+                                                ));
+                                            }
+                                        }
+                                        self.announced = Some(release.version.clone());
+                                        self.state = State::Available(release);
+                                    }
+                                }
+                                Ok(None) if manual => self.state = State::UpToDate,
+                                Err(e) if manual => self.state = State::Error(e),
+                                // Automatic checks fail silently.
+                                Ok(None) | Err(_) => {}
+                            }
+                        }
+                        Msg::Downloaded(result) => {
+                            match (std::mem::replace(&mut self.state, State::Idle), result) {
+                                (State::Downloading(release), Ok(prepared)) => {
+                                    self.state = State::Ready(release, prepared);
+                                    self.dialog_open = true;
+                                }
+                                (_, Err(e)) => {
+                                    self.state = State::Error(tf(
+                                        "The update could not be installed: {}",
+                                        &[&e],
+                                    ));
+                                    self.dialog_open = true;
+                                }
+                                (other, Ok(_)) => self.state = other,
+                            }
+                        }
                     }
                 }
-                Msg::Downloaded(result) => {
-                    match (std::mem::replace(&mut self.state, State::Idle), result) {
-                        (State::Downloading(release), Ok(prepared)) => {
-                            self.state = State::Ready(release, prepared);
-                            self.dialog_open = true;
-                        }
-                        (_, Err(e)) => {
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.rx = None;
+                    match self.state {
+                        State::Checking => self.state = State::Idle,
+                        State::Downloading(_) => {
                             self.state =
-                                State::Error(tf("The update could not be installed: {}", &[&e]));
+                                State::Error(t("The update failed unexpectedly.").to_string());
                             self.dialog_open = true;
                         }
-                        (other, Ok(_)) => self.state = other,
+                        _ => {}
                     }
                 }
             }
@@ -317,7 +339,7 @@ impl Updater {
             State::Available(r) => (tf("Update {}", &[&r.version]), None),
             State::Downloading(_) => match stage {
                 Stage::Downloading { done, total } if total > 0 => {
-                    let f = done as f64 / total as f64;
+                    let f = (done as f64 / total as f64).clamp(0.0, 1.0);
                     (
                         tf("Updating {}%", &[&format!("{}", (f * 100.0).floor())]),
                         Some(f as f32),
@@ -473,6 +495,12 @@ impl Updater {
         }
     }
 
+    /// Whether the update UI currently holds a true modal dialog (blocking the window),
+    /// as opposed to a non-modal corner status card.
+    pub fn modal_open(&self) -> bool {
+        self.dialog_open && matches!(self.state, State::Available(_) | State::Error(_))
+    }
+
     /// The update dialog (a new version, an error) or the card in the bottom right corner
     /// (checking, up to date, downloading, verifying, ready). `sessions`: open sessions, which
     /// a restart closes.
@@ -603,7 +631,9 @@ impl Updater {
         {
             self.speed = Some((Instant::now(), done));
         }
-        let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+        let esc = ctx.memory(|m| m.top_modal_layer().is_none() && m.focused().is_none())
+            && !egui::Popup::is_any_open(ctx)
+            && ctx.input(|i| i.key_pressed(egui::Key::Escape));
         let area = egui::Area::new(Id::new("update-card"))
             .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-20.0, -44.0))
             .order(egui::Order::Foreground)
@@ -663,7 +693,11 @@ impl Updater {
                                     card_title_row(ui, false, &tf("Updating to {}", &[&release.version]), close);
                                     let (fraction, left) = match stage {
                                         Stage::Downloading { done, total } => (
-                                            if total > 0 { done as f32 / total as f32 } else { 0.0 },
+                                            if total > 0 {
+                                                (done as f32 / total as f32).clamp(0.0, 1.0)
+                                            } else {
+                                                0.0
+                                            },
                                             tf("Downloading… {} of {}", &[&human_size(done), &human_size(total)]),
                                         ),
                                         _ => (0.0, t("Starting…").to_string()),
@@ -1023,9 +1057,11 @@ fn inline(text: &str, p: &style::Palette) -> egui::text::LayoutJob {
     while let Some(open) = rest.find('[') {
         let after = &rest[open + 1..];
         match after.find("](").and_then(|close| {
-            after[close + 2..]
-                .find(')')
-                .map(|end| (close, close + 2 + end))
+            (!after[..close].contains('[')).then(|| {
+                after[close + 2..]
+                    .find(')')
+                    .map(|end| (close, close + 2 + end))
+            })?
         }) {
             Some((close, end)) => {
                 plain.push_str(&rest[..open]);

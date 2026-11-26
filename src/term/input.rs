@@ -131,14 +131,15 @@ fn letter(key: Key) -> Option<u8> {
 }
 
 /// Wraps pasted text for the remote: normalizes newlines to CR and adds bracketed-paste markers
-/// when the application asked for them. In bracketed mode ESC and ^C are removed (as alacritty
-/// does), so pasted text can neither end bracketed mode early nor interrupt the program.
+/// when the application asked for them. In bracketed mode C0/C1 control characters (other than
+/// CR and TAB) are removed, so pasted text cannot escape bracketed mode or send terminal control
+/// signals (^C, ^Z, ^\, CSI, etc.).
 pub fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
     let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
     if bracketed {
         let clean: String = normalized
             .chars()
-            .filter(|c| *c != '\x1b' && *c != '\x03')
+            .filter(|c| *c == '\r' || *c == '\t' || !c.is_control())
             .collect();
         let mut out = b"\x1b[200~".to_vec();
         out.extend_from_slice(clean.as_bytes());

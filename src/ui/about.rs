@@ -32,7 +32,7 @@ pub fn version_label() -> String {
     format!(
         "{} ({})",
         env!("CARGO_PKG_VERSION"),
-        if cfg!(target_os = "macos") && cfg!(not(debug_assertions)) {
+        if option_env!("TERNARYSHELL_UNIVERSAL").is_some() {
             "universal"
         } else {
             std::env::consts::ARCH

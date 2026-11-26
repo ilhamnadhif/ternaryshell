@@ -5,12 +5,14 @@
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use eframe::egui::Context;
 use parking_lot::Mutex;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use super::session::SshHandle;
@@ -18,8 +20,18 @@ use super::types::{ConnShared, ForwardStatus};
 use crate::bookmarks::{Forward, ForwardKind};
 use crate::i18n::tf;
 
-/// Remote forwards: a port on the server → where its connections go from this Mac.
-pub type RemoteForwards = Arc<Mutex<HashMap<u32, (String, u16)>>>;
+/// Time limits for SOCKS5 handshake / channel open / remote-forward local dial.
+const SOCKS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
+const FORWARD_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Cap on simultaneous incoming remote-forward connections per SSH session.
+const MAX_FORWARDED_CONNS: usize = 256;
+
+/// Unique ownership token for each remote forward listener attempt so a failing retry or
+/// duplicate port rule never removes an active listener's entry.
+static REMOTE_TOKEN: AtomicU64 = AtomicU64::new(1);
+
+/// Remote forwards: a port on the server → (attempt token, local host, local port).
+pub type RemoteForwards = Arc<Mutex<HashMap<u32, (u64, String, u16)>>>;
 
 /// Starts the connection's forwards; they stop when `cancel` fires (the connection ends).
 pub fn start(
@@ -35,6 +47,7 @@ pub fn start(
         .map(|f| ForwardStatus {
             forward: f.clone(),
             listening: false,
+            starting: true,
             error: None,
         })
         .collect();
@@ -56,7 +69,7 @@ pub fn start(
 }
 
 /// Starts forward `index` again after it failed (its port was taken, the server refused it),
-/// without reconnecting. A forward that is listening is left alone.
+/// without reconnecting. A forward that is listening or already starting is left alone.
 pub fn retry(
     handle: Arc<SshHandle>,
     forwards: &[Forward],
@@ -72,7 +85,10 @@ pub fn retry(
     {
         let mut s = shared.lock();
         match s.forwards.get_mut(index) {
-            Some(st) if !st.listening => st.error = None,
+            Some(st) if !st.listening && !st.starting => {
+                st.starting = true;
+                st.error = None;
+            }
             _ => return,
         }
     }
@@ -104,6 +120,7 @@ impl Status {
     fn set(&self, listening: bool, error: Option<String>) {
         if let Some(s) = self.shared.lock().forwards.get_mut(self.index) {
             s.listening = listening;
+            s.starting = false;
             s.error = error;
         }
         self.ctx.request_repaint();
@@ -190,7 +207,18 @@ async fn tunnel(
     port: u16,
     cancel: &CancellationToken,
 ) -> Result<(), String> {
-    let channel = open(handle, host, port, peer).await?;
+    let channel = tokio::select! {
+        _ = cancel.cancelled() => return Ok(()),
+        r = tokio::time::timeout(FORWARD_CONNECT_TIMEOUT, open(handle, host, port, peer)) => match r {
+            Ok(res) => res?,
+            Err(_) => {
+                return Err(tf(
+                    "the server could not connect to {}:{} (timed out)",
+                    &[host, &port.to_string()],
+                ));
+            }
+        }
+    };
     pump(tcp, channel.into_stream(), cancel).await;
     Ok(())
 }
@@ -214,11 +242,25 @@ async fn socks(
     peer: SocketAddr,
     cancel: &CancellationToken,
 ) -> Result<(), String> {
-    let Ok((host, port)) = socks_request(&mut tcp).await else {
-        // Not a SOCKS5 client, or one wanting something else: nothing to report.
+    let req = tokio::select! {
+        _ = cancel.cancelled() => return Ok(()),
+        r = tokio::time::timeout(SOCKS_HANDSHAKE_TIMEOUT, socks_request(&mut tcp)) => r,
+    };
+    let Ok(Ok((host, port))) = req else {
+        // Not a SOCKS5 client, timed out, or one wanting something else: nothing to report.
         return Ok(());
     };
-    match open(handle, &host, port, peer).await {
+    let opened = tokio::select! {
+        _ = cancel.cancelled() => return Ok(()),
+        r = tokio::time::timeout(FORWARD_CONNECT_TIMEOUT, open(handle, &host, port, peer)) => match r {
+            Ok(res) => res,
+            Err(_) => Err(tf(
+                "the server could not connect to {}:{} (timed out)",
+                &[&host, &port.to_string()],
+            )),
+        }
+    };
+    match opened {
         Ok(channel) => {
             if socks_reply(&mut tcp, 0).await.is_ok() {
                 pump(tcp, channel.into_stream(), cancel).await;
@@ -298,16 +340,36 @@ async fn listen_on_server(
     status: Status,
     remote: RemoteForwards,
 ) {
-    remote
-        .lock()
-        .insert(f.listen_port as u32, (f.host.clone(), f.port));
+    let token = REMOTE_TOKEN.fetch_add(1, Ordering::Relaxed);
+    {
+        let mut map = remote.lock();
+        if map.contains_key(&(f.listen_port as u32)) {
+            drop(map);
+            status.set(
+                false,
+                Some(tf(
+                    "the server would not listen on port {} (duplicate remote port)",
+                    &[&f.listen_port.to_string()],
+                )),
+            );
+            return;
+        }
+        map.insert(f.listen_port as u32, (token, f.host.clone(), f.port));
+    }
     match handle
         .tcpip_forward("localhost", f.listen_port as u32)
         .await
     {
         Ok(_) => status.set(true, None),
         Err(e) => {
-            remote.lock().remove(&(f.listen_port as u32));
+            let mut map = remote.lock();
+            if map
+                .get(&(f.listen_port as u32))
+                .is_some_and(|(t, _, _)| *t == token)
+            {
+                map.remove(&(f.listen_port as u32));
+            }
+            drop(map);
             status.set(
                 false,
                 Some(tf(
@@ -319,26 +381,47 @@ async fn listen_on_server(
     }
 }
 
+/// Concurrency cap for incoming `forwarded-tcpip` channels.
+pub fn forwarded_limiter() -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(MAX_FORWARDED_CONNS))
+}
+
 /// A connection the server received on a remote forward: connect to where it goes, then
 /// accept the channel (or refuse it).
 pub fn serve_forwarded(
     remote: &RemoteForwards,
+    limiter: &Arc<Semaphore>,
     port: u32,
     channel: russh::Channel<russh::client::Msg>,
     reply: russh::client::ChannelOpenHandle,
     cancel: CancellationToken,
 ) {
-    let Some((host, target_port)) = remote.lock().get(&port).cloned() else {
+    let Some((_, host, target_port)) = remote.lock().get(&port).cloned() else {
         tokio::spawn(reply.reject(russh::ChannelOpenFailure::AdministrativelyProhibited));
         return;
     };
+    let Ok(permit) = limiter.clone().try_acquire_owned() else {
+        tokio::spawn(reply.reject(russh::ChannelOpenFailure::ResourceShortage));
+        return;
+    };
     tokio::spawn(async move {
-        match TcpStream::connect((host.as_str(), target_port)).await {
-            Ok(tcp) => {
+        let _permit = permit;
+        let connected = tokio::select! {
+            _ = cancel.cancelled() => {
+                reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
+                return;
+            }
+            r = tokio::time::timeout(
+                FORWARD_CONNECT_TIMEOUT,
+                TcpStream::connect((host.as_str(), target_port)),
+            ) => r,
+        };
+        match connected {
+            Ok(Ok(tcp)) => {
                 reply.accept().await;
                 pump(tcp, channel.into_stream(), &cancel).await;
             }
-            Err(_) => reply.reject(russh::ChannelOpenFailure::ConnectFailed).await,
+            _ => reply.reject(russh::ChannelOpenFailure::ConnectFailed).await,
         }
     });
 }

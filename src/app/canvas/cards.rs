@@ -517,7 +517,7 @@ pub fn code_boxes(ui: &mut Ui, text: &mut String, id: egui::Id) -> egui::Respons
                 .id(id)
                 .frame(egui::Frame::NONE)
                 .text_color(Color32::TRANSPARENT)
-                .char_limit(CODE_LEN)
+                .char_limit(32)
                 .desired_width(total),
         )
     };
@@ -570,49 +570,92 @@ pub fn code_boxes(ui: &mut Ui, text: &mut String, id: egui::Id) -> egui::Respons
 
 // ----- when it fails ----------------------------------------------------------------------
 
+/// A diagnosis sentence split into plain text, an interactive link, and trailing plain text.
+/// Splitting the translated template before substituting arguments keeps bracketed IPv6 hosts
+/// such as `[::1]` from being mistaken for the link span.
+pub struct DiagnosisText {
+    before: String,
+    link: String,
+    after: String,
+}
+
+fn format_diagnosis(template: &'static str, args: &[&str]) -> DiagnosisText {
+    let translated = t(template);
+    let (raw_before, raw_link, raw_after) = match (translated.find('['), translated.find(']')) {
+        (Some(a), Some(b)) if a < b => (
+            &translated[..a],
+            &translated[a + 1..b],
+            &translated[b + 1..],
+        ),
+        _ => (translated, "", ""),
+    };
+    let mut arg_iter = args.iter().copied();
+    let mut fill = |part: &str| {
+        let mut out = String::with_capacity(part.len());
+        let mut rest = part;
+        while let Some(pos) = rest.find("{}") {
+            out.push_str(&rest[..pos]);
+            if let Some(arg) = arg_iter.next() {
+                out.push_str(arg);
+            }
+            rest = &rest[pos + 2..];
+        }
+        out.push_str(rest);
+        out
+    };
+    DiagnosisText {
+        before: fill(raw_before),
+        link: fill(raw_link),
+        after: fill(raw_after),
+    }
+}
+
 /// One sentence on what to look at, for a connection that failed this way, and the page of
 /// Edit Connection its [bracketed] part opens.
-pub fn diagnosis(e: &ConnError, b: &Bookmark) -> Option<(String, Section)> {
+pub fn diagnosis(e: &ConnError, b: &Bookmark) -> Option<(DiagnosisText, Section)> {
     let port = b.port.to_string();
     Some(match e {
         ConnError::Jump(_, inner) => return diagnosis(inner, b),
         ConnError::Timeout => (
-            tf(
+            format_diagnosis(
                 "The server didn't answer on port {}. Check that it is running and reachable from this network; it may need a VPN or a [jump host].",
                 &[&port],
             ),
             Section::Network,
         ),
         ConnError::HostNotFound(_) => (
-            tf(
+            format_diagnosis(
                 "{} could not be found. [Check the name], or use the server's IP address; some names only resolve over a VPN.",
                 &[&b.host],
             ),
             Section::Server,
         ),
         ConnError::Refused => (
-            tf(
+            format_diagnosis(
                 "Nothing accepts SSH connections on port {}. The server may use [another port], or a firewall rejects the connection.",
                 &[&port],
             ),
             Section::Server,
         ),
         ConnError::Unreachable(_) => (
-            tf(
+            format_diagnosis(
                 "The server's network can't be reached from {}. Check that you are online; a server on a private network needs a VPN or a [jump host].",
                 &[crate::platform::this_computer()],
             ),
             Section::Network,
         ),
         ConnError::AuthFailed(_) => (
-            tf(
+            format_diagnosis(
                 "The server didn't accept the login for {}. Check that your key or password is allowed for this user, or try [another way to log in].",
                 &[&b.username],
             ),
             Section::Login,
         ),
         ConnError::KeyFile(_) => (
-            t("Check [the key file]: it must exist, be readable by this user, and be the private key (not the .pub file).").into(),
+            format_diagnosis(
+                "Check [the key file]: it must exist, be readable by this user, and be the private key (not the .pub file).",
+                &[],
+            ),
             Section::Login,
         ),
         _ => return None,
@@ -633,9 +676,9 @@ pub fn lost_cause(e: Option<&ConnError>, name: &str) -> String {
     }
 }
 
-/// The diagnosis sentence: muted text with its [bracketed] part as a link. Returns whether the
+/// The diagnosis sentence: muted text with its link part in accent colour. Returns whether the
 /// link was clicked (only the link: a click elsewhere on the sentence does nothing).
-pub fn diagnosis_text(ui: &mut Ui, text: &str) -> bool {
+pub fn diagnosis_text(ui: &mut Ui, text: &DiagnosisText) -> bool {
     let p = style::pal(ui);
     let fmt = |color: Color32| egui::TextFormat {
         font_id: style::regular(12.5),
@@ -644,19 +687,15 @@ pub fn diagnosis_text(ui: &mut Ui, text: &str) -> bool {
         ..Default::default()
     };
     let mut job = egui::text::LayoutJob::default();
-    // The link's characters, as a range of char indices.
-    let link = match (text.find('['), text.find(']')) {
-        (Some(a), Some(b)) if a < b => {
-            job.append(&text[..a], 0.0, fmt(p.text_muted));
-            job.append(&text[a + 1..b], 0.0, fmt(p.accent_text));
-            job.append(&text[b + 1..], 0.0, fmt(p.text_muted));
-            let start = text[..a].chars().count();
-            Some(start..start + text[a + 1..b].chars().count())
-        }
-        _ => {
-            job.append(text, 0.0, fmt(p.text_muted));
-            None
-        }
+    let link = if !text.link.is_empty() {
+        job.append(&text.before, 0.0, fmt(p.text_muted));
+        job.append(&text.link, 0.0, fmt(p.accent_text));
+        job.append(&text.after, 0.0, fmt(p.text_muted));
+        let start = text.before.chars().count();
+        Some(start..start + text.link.chars().count())
+    } else {
+        job.append(&text.before, 0.0, fmt(p.text_muted));
+        None
     };
     let (pos, galley, resp) = egui::Label::new(job)
         .wrap()

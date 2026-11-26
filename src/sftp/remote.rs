@@ -57,6 +57,26 @@ fn entry_from(
     }
 }
 
+/// Whether a remote filename is safe to join onto a local destination directory without path
+/// traversal, rooted-path replacement, or Windows drive-prefix hijacking.
+pub fn is_safe_entry_name(name: &str) -> bool {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains(['/', '\\', '\0'])
+        || (name.len() >= 2
+            && name.as_bytes()[0].is_ascii_alphabetic()
+            && name.as_bytes()[1] == b':')
+    {
+        return false;
+    }
+    let mut comps = std::path::Path::new(name).components();
+    matches!(
+        (comps.next(), comps.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    )
+}
+
 /// Lists a remote directory. Symlinks are resolved (several at a time) so linked folders can
 /// be opened and show their target's details.
 pub async fn list(sftp: &Sftp, path: &str) -> Result<Vec<FileEntry>, String> {
@@ -66,7 +86,7 @@ pub async fn list(sftp: &Sftp, path: &str) -> Result<Vec<FileEntry>, String> {
     let limit = Arc::new(tokio::sync::Semaphore::new(16));
     for e in entries {
         let name = e.file_name();
-        if name == "." || name == ".." {
+        if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
             continue;
         }
         let attrs = e.metadata();
@@ -229,7 +249,7 @@ pub async fn remove(sftp: &SftpSession, path: &str) -> Result<(), String> {
         stack.push((dir.clone(), true));
         for e in sftp.read_dir(&dir).await.map_err(|e| describe(&e))? {
             let name = e.file_name();
-            if name == "." || name == ".." {
+            if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0']) {
                 continue;
             }
             let child = remote_join(&dir, &name);
@@ -243,4 +263,29 @@ pub async fn remove(sftp: &SftpSession, path: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_safe_entry_name;
+
+    #[test]
+    fn rejects_path_traversal_and_unsafe_entry_names() {
+        for safe in ["hello.txt", ".env", "a b.tar.gz", "..hidden", "file-1_2"] {
+            assert!(is_safe_entry_name(safe), "expected safe: {safe:?}");
+        }
+        for bad in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            "../evil",
+            "..\\evil",
+            "sub\\file",
+            "bad\0name",
+            "C:\\evil.cmd",
+        ] {
+            assert!(!is_safe_entry_name(bad), "expected unsafe: {bad:?}");
+        }
+    }
 }

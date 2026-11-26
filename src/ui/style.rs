@@ -71,6 +71,9 @@ pub struct Palette {
     pub ok: Color32,
     pub warn: Color32,
     pub err: Color32,
+    /// Opaque filled danger button background (WCAG AA with white text).
+    pub err_fill: Color32,
+    pub err_hover: Color32,
     pub info: Color32,
     /// Browsing as root (sudo) in SFTP.
     pub root: Color32,
@@ -141,6 +144,8 @@ const DARK: Palette = Palette {
     ok: rgb(0x4dc48c),
     warn: rgb(0xf0ad42),
     err: rgb(0xf06560),
+    err_fill: rgb(0xc93530),
+    err_hover: rgb(0xb32c27),
     info: rgb(0x6aa5ff),
     root: rgb(0xf0894a),
     folder: rgb(0xd6a354),
@@ -189,6 +194,8 @@ const LIGHT: Palette = Palette {
     ok: rgb(0x117040),
     warn: rgb(0x8f5300),
     err: rgb(0xbe2722),
+    err_fill: rgb(0xbe2722),
+    err_hover: rgb(0xa31f1b),
     info: rgb(0x1f5fbf),
     root: rgb(0xa84705),
     folder: rgb(0x9c6414),

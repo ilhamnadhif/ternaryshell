@@ -12,7 +12,7 @@ use std::time::Instant;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::{Config, Term};
+use alacritty_terminal::term::{ClipboardType, Config, Term};
 use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle, Processor, Rgb};
 use eframe::egui::Color32;
 use parking_lot::Mutex;
@@ -22,6 +22,8 @@ use crate::settings::CursorStyle as CursorPref;
 
 pub const MIN_COLS: usize = 2;
 pub const MIN_ROWS: usize = 1;
+const MAX_TITLE_CHARS: usize = 512;
+const MAX_CLIPBOARD_BYTES: usize = 256 * 1024;
 
 #[derive(Clone)]
 pub struct Listener(mpsc::Sender<Event>);
@@ -217,10 +219,21 @@ impl Feeder {
                     let ws = *self.shared.window.lock();
                     reply.extend_from_slice(format(ws).as_bytes());
                 }
-                Event::Title(t) => self.shared.notes.lock().title = Some(t),
+                Event::Title(t) => {
+                    let clean: String = t
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .take(MAX_TITLE_CHARS)
+                        .collect();
+                    self.shared.notes.lock().title = Some(clean);
+                }
                 Event::ResetTitle => self.shared.notes.lock().title = None,
                 Event::Bell => self.shared.notes.lock().bell_at = Some(Instant::now()),
-                Event::ClipboardStore(_, text) => self.shared.notes.lock().clipboard = Some(text),
+                Event::ClipboardStore(ClipboardType::Clipboard, text)
+                    if text.len() <= MAX_CLIPBOARD_BYTES =>
+                {
+                    self.shared.notes.lock().clipboard = Some(text);
+                }
                 _ => {}
             }
         }
@@ -250,7 +263,19 @@ pub fn resize(shared: &TermShared, size: GridSize, cell_w: f32, cell_h: f32) -> 
 
 /// Writes a local status line (e.g. "connection closed") into the terminal in dim text.
 pub fn write_status(feeder: &mut Feeder, text: &str) {
-    let line = format!("\r\n\x1b[0;2m{text}\x1b[0m\r\n");
+    let clean: String = text
+        .chars()
+        .filter_map(|c| {
+            if c == '\n' {
+                Some(' ')
+            } else if c.is_control() {
+                None
+            } else {
+                Some(c)
+            }
+        })
+        .collect();
+    let line = format!("\r\n\x1b[0;2m{clean}\x1b[0m\r\n");
     let _ = feeder.feed(line.as_bytes());
 }
 

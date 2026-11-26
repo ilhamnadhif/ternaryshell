@@ -80,6 +80,10 @@ pub struct PromptInput {
     pub text: String,
     pub save: bool,
     pub focus: bool,
+    /// Password visibility toggle (reset whenever the prompt changes).
+    pub shown: bool,
+    /// "I checked the new key with the server's admin" confirmation (reset per prompt).
+    pub hostkey_checked: bool,
     /// The prompt has been drawn at least once (keys from earlier frames can't answer it).
     pub armed: bool,
     /// When the current prompt first appeared.
@@ -153,7 +157,11 @@ pub fn cwd_from_title(title: &str) -> Option<String> {
     let after_at = &title[title.find('@')? + 1..];
     let (_, rest) = after_at.split_once(':')?;
     let path = rest.trim();
-    (path == "~" || path.starts_with("~/") || path.starts_with('/')).then(|| path.to_string())
+    let valid_start = path == "~" || path.starts_with("~/") || path.starts_with('/');
+    let safe_chars = !path
+        .chars()
+        .any(|c| c.is_control() || matches!(c, '\'' | '\\' | '!'));
+    (valid_start && safe_chars).then(|| path.to_string())
 }
 
 fn pane_start(
@@ -354,6 +362,8 @@ impl Tab {
         );
         disconnect_after(env.rt, old, pending);
         self.sftp = None;
+        self.prompt = PromptInput::default();
+        self.input_watch = None;
         self.forward_errors_seen.clear();
         let bookmark = self.bookmark.clone();
         for (i, pane) in self.panes.iter_mut().enumerate() {

@@ -38,16 +38,87 @@ fn lock_path() -> PathBuf {
     paths::data_dir().join("instance.lock")
 }
 
-/// The socket lives in the per-user temporary folder (private on macOS): socket paths are
-/// limited to about 100 bytes, which a long home folder path can exceed. The name is derived
-/// from the data folder, so separate data folders (tests) don't meet.
+/// The socket lives in a private (`0700`) per-user folder: socket paths are limited to about
+/// 100 bytes, which a long home folder path can exceed. The name is derived from the data
+/// folder, so separate data folders (tests) don't meet.
 #[cfg(unix)]
-fn socket_path() -> PathBuf {
+fn socket_dir() -> Option<PathBuf> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    // SAFETY: `geteuid` has no preconditions and always returns the process's effective UID.
+    let me = unsafe { libc::geteuid() };
+    let dir = if cfg!(target_os = "macos") {
+        // macOS per-user `$TMPDIR` is already `0700` owned by this user.
+        std::env::temp_dir()
+    } else if let Some(rt) = dirs::runtime_dir() {
+        rt.join("ternaryshell")
+    } else {
+        std::env::temp_dir().join(format!("ternaryshell-{me}"))
+    };
+    let mut b = std::fs::DirBuilder::new();
+    b.mode(0o700);
+    match b.create(&dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return None,
+    }
+    let meta = std::fs::symlink_metadata(&dir).ok()?;
+    if !meta.is_dir() || meta.uid() != me {
+        return None;
+    }
+    if (meta.permissions().mode() & 0o077) != 0 {
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).ok()?;
+    }
+    Some(dir)
+}
+
+#[cfg(unix)]
+fn socket_path() -> Option<PathBuf> {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for b in paths::data_dir().as_os_str().as_encoded_bytes() {
         hash = (hash ^ *b as u64).wrapping_mul(0x0100_0000_01b3);
     }
-    std::env::temp_dir().join(format!("ternaryshell-{hash:016x}.sock"))
+    Some(socket_dir()?.join(format!("ternaryshell-{hash:016x}.sock")))
+}
+
+/// Checks that the connected Unix socket peer belongs to this user's effective UID.
+#[cfg(unix)]
+fn peer_is_me(stream: &UnixStream) -> bool {
+    use std::os::fd::AsRawFd;
+    // SAFETY: `geteuid` is always safe to call.
+    let me = unsafe { libc::geteuid() };
+    let fd = stream.as_raw_fd();
+    #[cfg(target_os = "macos")]
+    {
+        let mut euid: libc::uid_t = 0;
+        let mut egid: libc::gid_t = 0;
+        // SAFETY: `fd` is a live Unix domain socket and `euid`/`egid` are valid pointers.
+        unsafe { libc::getpeereid(fd, &mut euid, &mut egid) == 0 && euid == me }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut cred = libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: `fd` is a live Unix socket and `cred`/`len` match `SO_PEERCRED`.
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut cred as *mut libc::ucred).cast(),
+                &mut len,
+            )
+        };
+        rc == 0 && cred.uid == me
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (fd, me);
+        true
+    }
 }
 
 /// Becomes the primary instance, or forwards `args` to the running one.
@@ -85,11 +156,20 @@ pub fn acquire(args: &[String]) -> Instance {
 
 #[cfg(unix)]
 fn listen() -> Option<Inbox> {
-    let path = socket_path();
+    use std::os::unix::fs::PermissionsExt;
+    let path = socket_path()?;
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path).ok()?;
-    // Only this user can connect (the socket's folder is private), so no token is needed.
-    Some(serve(move || listener.accept().map(|(s, _)| s), |_| true))
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    Some(serve(
+        move || loop {
+            let (stream, _) = listener.accept()?;
+            if peer_is_me(&stream) {
+                return Ok(stream);
+            }
+        },
+        |_| true,
+    ))
 }
 
 /// Where the running instance on Windows leaves its port and token (in the private data folder).
@@ -158,24 +238,30 @@ fn forward(args: &[String]) -> bool {
         return false;
     };
     // Only a socket created by this user is trusted with the arguments.
-    use std::os::unix::fs::MetadataExt;
-    let Ok(me) = std::fs::metadata(paths::data_dir()).map(|m| m.uid()) else {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    // SAFETY: `geteuid` is always safe to call.
+    let me = unsafe { libc::geteuid() };
+    let Some(path) = socket_path() else {
         return false;
     };
-    let path = socket_path();
     // The running instance may still be starting up and not listening yet.
     for _ in 0..15 {
-        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.uid() != me) {
-            return false;
-        }
-        if let Ok(mut stream) = UnixStream::connect(&path) {
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
-            let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
-            let mut ack = [0u8; 1];
-            let ok = stream.write_all(&message).is_ok()
-                && stream.shutdown(std::net::Shutdown::Write).is_ok()
-                && stream.read_exact(&mut ack).is_ok();
-            return ok;
+        if let Ok(meta) = std::fs::symlink_metadata(&path) {
+            if meta.uid() != me || !meta.file_type().is_socket() {
+                return false;
+            }
+            if let Ok(mut stream) = UnixStream::connect(&path) {
+                if !peer_is_me(&stream) {
+                    return false;
+                }
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+                let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
+                let mut ack = [0u8; 1];
+                let ok = stream.write_all(&message).is_ok()
+                    && stream.shutdown(std::net::Shutdown::Write).is_ok()
+                    && stream.read_exact(&mut ack).is_ok();
+                return ok;
+            }
         }
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -301,5 +387,64 @@ mod tests {
             targets(args.iter().map(|s| s.to_string())),
             ["web-1", "root@db:2222"]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ipc_serve_delivers_args_and_rejects_unaccepted_messages() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::time::Duration;
+
+        let dir = tempfile::Builder::new()
+            .prefix("ts-ipc-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let sock = dir.path().join("i.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let inbox = super::serve(
+            move || {
+                let (stream, _) = listener.accept()?;
+                assert!(super::peer_is_me(&stream));
+                Ok(stream)
+            },
+            |data| {
+                if data.starts_with(b"OK:") {
+                    data.drain(..3);
+                    true
+                } else {
+                    false
+                }
+            },
+        );
+        let ctx = eframe::egui::Context::default();
+        let rx = inbox.attach(&ctx);
+
+        // Rejected message gets no ack and is not delivered.
+        {
+            let mut bad = UnixStream::connect(&sock).unwrap();
+            bad.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            bad.write_all(b"NO:[\"evil\"]").unwrap();
+            bad.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut ack = [0u8; 1];
+            assert!(bad.read_exact(&mut ack).is_err());
+        }
+
+        // Valid message gets ack and arrives in the inbox.
+        {
+            let mut good = UnixStream::connect(&sock).unwrap();
+            good.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let mut payload = b"OK:".to_vec();
+            payload
+                .extend_from_slice(&serde_json::to_vec(&vec!["prod-1", "root@10.0.0.1"]).unwrap());
+            good.write_all(&payload).unwrap();
+            good.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut ack = [0u8; 1];
+            good.read_exact(&mut ack).unwrap();
+            assert_eq!(&ack, b"1");
+        }
+
+        let got = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(got, vec!["prod-1", "root@10.0.0.1"]);
     }
 }

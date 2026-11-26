@@ -35,9 +35,35 @@ ZIP="$DIST/$APP_NAME-$VERSION.zip"
 REPO="${TERNARYSHELL_REPO:-ilhamnadhif/ternaryshell}"
 export MACOSX_DEPLOYMENT_TARGET=12.0
 
+STAGE=""
+PKG_ROOT=""
+PKG_WORK=""
+cleanup() {
+    [ -z "$STAGE" ] || rm -rf "$STAGE"
+    [ -z "$PKG_ROOT" ] || rm -rf "$PKG_ROOT"
+    [ -z "$PKG_WORK" ] || rm -rf "$PKG_WORK"
+}
+trap cleanup EXIT
+
+read -r -a ARCH_LIST <<< "$ARCHS"
+if [ "${#ARCH_LIST[@]}" -gt 1 ]; then
+    export TERNARYSHELL_UNIVERSAL=1
+else
+    unset TERNARYSHELL_UNIVERSAL
+fi
+HOST_ARCHS=""
+for arch in "${ARCH_LIST[@]}"; do
+    case "$arch" in
+        aarch64) a="arm64" ;;
+        x86_64)  a="x86_64" ;;
+        *)       a="$arch" ;;
+    esac
+    HOST_ARCHS="${HOST_ARCHS:+$HOST_ARCHS,}$a"
+done
+
 echo "==> Building $APP_NAME $VERSION for: $ARCHS"
 BINS=()
-for arch in $ARCHS; do
+for arch in "${ARCH_LIST[@]}"; do
     target="$arch-apple-darwin"
     rustup target add "$target" >/dev/null 2>&1 || true
     cargo build --release --locked --target "$target"
@@ -95,6 +121,15 @@ codesign --verify --strict --verbose=1 "$APP"
 echo "==> Creating update archive"
 ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
 
+if [ -n "${TERNARYSHELL_NOTARY_PROFILE:-}" ]; then
+    echo "==> Notarizing $APP_NAME.app (this can take a few minutes)"
+    xcrun notarytool submit "$ZIP" --keychain-profile "$TERNARYSHELL_NOTARY_PROFILE" --wait
+    xcrun stapler staple "$APP"
+    xcrun stapler validate "$APP"
+    rm -f "$ZIP"
+    ditto -c -k --sequesterRsrc --keepParent "$APP" "$ZIP"
+fi
+
 echo "==> Creating DMG"
 STAGE="$(mktemp -d)"
 cp -R "$APP" "$STAGE/"
@@ -121,6 +156,7 @@ HELP
 fi
 hdiutil create -quiet -volname "$APP_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG"
 rm -rf "$STAGE"
+STAGE=""
 if [ -n "${TERNARYSHELL_SIGN_IDENTITY:-}" ]; then
     codesign --force --timestamp --sign "$TERNARYSHELL_SIGN_IDENTITY" "$DMG"
 fi
@@ -143,7 +179,7 @@ cat > "$PKG_WORK/distribution.xml" <<DIST
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
     <title>$APP_NAME $VERSION</title>
-    <options customize="never" require-scripts="false" hostArchitectures="arm64,x86_64"/>
+    <options customize="never" require-scripts="false" hostArchitectures="$HOST_ARCHS"/>
     <allowed-os-versions><os-version min="12.0"/></allowed-os-versions>
     <domains enable_localSystem="true"/>
     <choices-outline><line choice="default"><line choice="$BUNDLE_ID"/></line></choices-outline>
@@ -161,9 +197,11 @@ productbuild --quiet ${PRODUCT_SIGN[@]+"${PRODUCT_SIGN[@]}"} \
     --package-path "$PKG_WORK" \
     "$PKG"
 rm -rf "$PKG_ROOT" "$PKG_WORK"
+PKG_ROOT=""
+PKG_WORK=""
 
 if [ -n "${TERNARYSHELL_NOTARY_PROFILE:-}" ]; then
-    echo "==> Notarizing (this can take a few minutes)"
+    echo "==> Notarizing DMG and PKG (this can take a few minutes)"
     for artifact in "$DMG" "$PKG"; do
         xcrun notarytool submit "$artifact" --keychain-profile "$TERNARYSHELL_NOTARY_PROFILE" --wait
         xcrun stapler staple "$artifact"

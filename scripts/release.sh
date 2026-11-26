@@ -41,8 +41,22 @@ git merge-base --is-ancestor "origin/$BRANCH" HEAD ||
 
 # Where an earlier run stopped, if it did.
 release_state() {
-    gh release view "$TAG" --json isDraft --jq 'if .isDraft then "draft" else "published" end' 2>/dev/null ||
-        echo "none"
+    local out err rc=0
+    err="$(mktemp)"
+    out="$(gh release view "$TAG" --json isDraft --jq 'if .isDraft then "draft" else "published" end' 2>"$err")" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        rm -f "$err"
+        printf '%s\n' "$out"
+        return 0
+    fi
+    if grep -qiE 'release not found|not found' "$err"; then
+        rm -f "$err"
+        printf 'none\n'
+        return 0
+    fi
+    cat "$err" >&2
+    rm -f "$err"
+    fail "could not check release state for $TAG"
 }
 STATE="$(release_state)"
 [ "$STATE" != "published" ] || { echo "TernaryShell $TAG is already released."; exit 0; }

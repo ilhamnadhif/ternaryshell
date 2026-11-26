@@ -22,8 +22,8 @@ use ternaryshell::term::scheme::SCHEMES;
 use tokio::sync::mpsc;
 
 fn runtime() -> tokio::runtime::Runtime {
-    // SAFETY: tests in this file set the same value before any other thread reads it.
-    unsafe { std::env::set_var("TERNARYSHELL_SECRETS", "memory") };
+    #[cfg(debug_assertions)]
+    ternaryshell::secrets::use_memory_backend();
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -210,7 +210,7 @@ fn key_auth_shell_known_hosts_and_errors() {
         screen_text(&pane2).contains("second-pane").then_some(())
     });
 
-    // Exit ends the pane with status 0.
+    // Exit ends the pane with status 3.
     pane.input
         .send(PaneInput::Data(b"exit 3\r".to_vec()))
         .unwrap();
@@ -414,4 +414,55 @@ fn network_errors_are_classified() {
         ConnState::Closed(Some(e)) => assert!(!matches!(e, ConnError::Timeout), "{e:?}"),
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn keychain_key_legacy_algorithms_and_start_dir_injection_guard() {
+    let rt = runtime();
+    let server = TestServer::start();
+    let known = server.dir.path().join("kh");
+    let ctx = egui::Context::default();
+
+    // 1) Unencrypted pasted key stored in secrets (`Auth::KeychainKey`).
+    let mut s = spec(&server, Auth::KeychainKey, &known);
+    let plain_pem = std::fs::read_to_string(&server.key).unwrap();
+    ternaryshell::secrets::set(
+        s.bookmark.id,
+        ternaryshell::secrets::SecretKind::PrivateKey,
+        Some(&plain_pem),
+    )
+    .unwrap();
+    let conn = Connection::start(rt.handle(), ctx.clone(), s.clone());
+    assert_eq!(answer_prompt(&conn, true, None), "hostkey:Unknown");
+    wait_state(&conn, ConnState::is_connected);
+
+    // Control characters in start_dir must be rejected (no shell injection).
+    let pane = open_pane(&conn, "/tmp\necho INJECTED_MARKER", "echo safe-$((20+22))");
+    wait_for(10, "safe startup output", || {
+        screen_text(&pane).contains("safe-42").then_some(())
+    });
+    assert!(
+        !screen_text(&pane).contains("INJECTED_MARKER"),
+        "control characters in start_dir must never run shell commands"
+    );
+    conn.disconnect();
+    wait_state(&conn, ConnState::is_closed);
+
+    // 2) Encrypted pasted key in secrets with legacy_algorithms enabled.
+    let enc_pem = std::fs::read_to_string(&server.encrypted_key).unwrap();
+    s.bookmark.id = uuid::Uuid::new_v4();
+    s.bookmark.legacy_algorithms = true;
+    ternaryshell::secrets::set(
+        s.bookmark.id,
+        ternaryshell::secrets::SecretKind::PrivateKey,
+        Some(&enc_pem),
+    )
+    .unwrap();
+    let conn = Connection::start(rt.handle(), ctx, s);
+    assert_eq!(
+        answer_prompt(&conn, true, Some("open sesame")),
+        "secret:Passphrase:false"
+    );
+    wait_state(&conn, ConnState::is_connected);
+    conn.disconnect();
 }

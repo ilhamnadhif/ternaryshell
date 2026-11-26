@@ -173,28 +173,43 @@ pub fn check(
 ) -> io::Result<Check> {
     let spec = host_spec(host, port);
     let (algorithm, blob) = key_parts(key);
-    let mut texts = Vec::new();
-    match std::fs::read_to_string(own) {
-        Ok(t) => texts.push(t),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+    let own_text = match std::fs::read_to_string(own) {
+        Ok(t) => Some(t),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => return Err(e),
-    }
-    if let Some(user) = user
-        && let Ok(t) = std::fs::read_to_string(user)
-    {
-        texts.push(t);
+    };
+    let user_text = user.and_then(|u| std::fs::read_to_string(u).ok());
+    // `@revoked` entries apply unconditionally from both files.
+    for text in own_text.iter().chain(user_text.iter()) {
+        for line in text.lines().filter_map(parse_line) {
+            if line.marker == Some("@revoked") && hosts_match(line.hosts, &spec) && line.key == blob
+            {
+                return Ok(Check::Revoked);
+            }
+        }
     }
     let mut known = Vec::new();
     let mut found = false;
-    for text in &texts {
+    let mut own_has_host = false;
+    if let Some(text) = &own_text {
         for line in text.lines().filter_map(parse_line) {
-            if !hosts_match(line.hosts, &spec) {
+            if line.marker.is_some() || !hosts_match(line.hosts, &spec) {
                 continue;
             }
-            match line.marker {
-                Some("@revoked") if line.key == blob => return Ok(Check::Revoked),
-                Some(_) => continue, // @cert-authority and others: not a plain host key
-                None => {}
+            own_has_host = true;
+            if line.algorithm == algorithm && line.key == blob {
+                found = true;
+            } else {
+                known.push(display_key(line.algorithm, line.key));
+            }
+        }
+    }
+    // Once TernaryShell's own file records a host (e.g. after replacing a changed key),
+    // plain entries in the read-only user file no longer vouch for old keys of that host.
+    if !own_has_host && let Some(text) = &user_text {
+        for line in text.lines().filter_map(parse_line) {
+            if line.marker.is_some() || !hosts_match(line.hosts, &spec) {
+                continue;
             }
             if line.algorithm == algorithm && line.key == blob {
                 found = true;
@@ -229,6 +244,10 @@ pub fn known_algorithms(own: &Path, user: Option<&Path>, host: &str, port: u16) 
             {
                 out.push(line.algorithm.to_string());
             }
+        }
+        // Own entries supersede user entries for the same host.
+        if !out.is_empty() {
+            break;
         }
     }
     out
@@ -356,5 +375,31 @@ mod tests {
         assert!(wildcard_match(&long, "x"));
         let evil = format!("{}b", "*a".repeat(30));
         assert!(!wildcard_match(&evil, &"a".repeat(60)));
+    }
+
+    #[test]
+    fn own_entry_supersedes_user_entry_for_same_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_key = keygen(dir.path(), "old", "ed25519");
+        let new_key = keygen(dir.path(), "new", "ed25519");
+        let own = dir.path().join("own");
+        let user = dir.path().join("user");
+
+        // User's ~/.ssh/known_hosts has the old key; TernaryShell's own file learned the rotated key.
+        let (alg, old_blob) = key_parts(&old_key);
+        std::fs::write(&user, format!("rotated.example {alg} {old_blob}\n")).unwrap();
+        learn(&own, "rotated.example", 22, &new_key).unwrap();
+
+        assert_eq!(
+            check(&own, Some(&user), "rotated.example", 22, &new_key).unwrap(),
+            Check::Known
+        );
+        assert!(
+            matches!(
+                check(&own, Some(&user), "rotated.example", 22, &old_key).unwrap(),
+                Check::Changed { .. }
+            ),
+            "old key in user known_hosts must not bypass the newer key trusted in own known_hosts"
+        );
     }
 }

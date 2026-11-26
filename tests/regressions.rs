@@ -127,7 +127,7 @@ fn user_known_hosts_mismatch_and_reconnect() {
         PaneStatus::Running,
         "old connection must not end the new pane"
     );
-    tab.panes[0].send(b"echo after-reconnect\r".to_vec());
+    tab.panes[0].send(b"echo after-$((10+1))\r".to_vec());
     wait_for(10, "output after reconnect", || {
         let f = tab.panes[0].feeder.lock();
         let term = f.shared.term.lock();
@@ -138,6 +138,6 @@ fn user_known_hosts_mismatch_and_reconnect() {
             ),
             alacritty_terminal::index::Point::new(term.bottommost_line(), term.last_column()),
         );
-        text.contains("after-reconnect\n").then_some(())
+        text.contains("after-11").then_some(())
     });
 }

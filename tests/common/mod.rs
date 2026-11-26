@@ -74,16 +74,25 @@ impl TestServer {
         );
         let cfg_path = d.join("sshd_config");
         std::fs::write(&cfg_path, config).unwrap();
-        let child = Command::new("/usr/sbin/sshd")
+        let stderr_path = d.join("sshd.stderr");
+        let stderr_file = std::fs::File::create(&stderr_path).unwrap();
+        let mut child = Command::new("/usr/sbin/sshd")
             .args(["-D", "-e", "-f"])
             .arg(&cfg_path)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(stderr_file))
             .spawn()
             .expect("start sshd");
         let deadline = Instant::now() + Duration::from_secs(10);
         while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
-            assert!(Instant::now() < deadline, "sshd did not start");
+            if let Ok(Some(status)) = child.try_wait() {
+                let err = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+                panic!("sshd exited early ({status}): {err}");
+            }
+            if Instant::now() >= deadline {
+                let err = std::fs::read_to_string(&stderr_path).unwrap_or_default();
+                panic!("sshd did not start on port {port}: {err}");
+            }
             std::thread::sleep(Duration::from_millis(50));
         }
         Self {
@@ -110,7 +119,12 @@ impl Drop for TestServer {
 }
 
 pub fn user() -> String {
-    std::env::var("USER").unwrap()
+    std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| {
+            let out = Command::new("id").arg("-un").output().expect("id -un");
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        })
 }
 
 /// Polls `f` until it returns `Some`, or panics after `secs` seconds.

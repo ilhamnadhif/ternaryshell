@@ -95,7 +95,7 @@ mkdir -p "$RPM"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
   echo "$DESCRIPTION"
   echo "%install"
   echo "mkdir -p %{buildroot}"
-  echo "cp -a $TREE/. %{buildroot}/"
+  printf 'cp -a %q/. %%{buildroot}/\n' "$TREE"
   echo "%files"
   echo "/usr/bin/ternaryshell"
   echo "/usr/share/applications/ternaryshell.desktop"
@@ -112,11 +112,21 @@ cp -a "$TREE" "$APPDIR"
 ln -s usr/bin/ternaryshell "$APPDIR/AppRun"
 cp packaging/linux/ternaryshell.desktop "$APPDIR/ternaryshell.desktop"
 cp packaging/linux/icons/hicolor/256x256/apps/ternaryshell.png "$APPDIR/ternaryshell.png"
-TOOL="${APPIMAGETOOL:-$ROOT/target/appimagetool-$ARCH.AppImage}"
+APPIMAGETOOL_VERSION="1.9.1"
+case "$ARCH" in
+  x86_64)  APPIMAGETOOL_SHA="ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0" ;;
+  aarch64) APPIMAGETOOL_SHA="f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158" ;;
+esac
+TOOL="${APPIMAGETOOL:-$ROOT/target/appimagetool-$APPIMAGETOOL_VERSION-$ARCH.AppImage}"
 if [[ ! -x "$TOOL" ]]; then
-  curl --proto '=https' --tlsv1.2 -fsSL -o "$TOOL" \
-    "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$ARCH.AppImage"
-  chmod +x "$TOOL"
+  tmp_tool="$TOOL.tmp.$$"
+  trap 'rm -f "$tmp_tool"' EXIT
+  curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL -o "$tmp_tool" \
+    "https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSION/appimagetool-$ARCH.AppImage"
+  echo "$APPIMAGETOOL_SHA  $tmp_tool" | sha256sum -c - >/dev/null
+  chmod +x "$tmp_tool"
+  mv -f "$tmp_tool" "$TOOL"
+  trap - EXIT
 fi
 # Extract-and-run: CI machines have no FUSE.
 ARCH="$ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$TOOL" --no-appstream "$APPDIR" "$OUT/$NAME-$ARCH.AppImage" >/dev/null

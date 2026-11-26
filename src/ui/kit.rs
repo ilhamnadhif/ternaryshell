@@ -132,14 +132,7 @@ pub fn button_kbd(
                 },
                 Stroke::NONE,
             ),
-            Kind::Danger => (
-                if hovered {
-                    p.err.gamma_multiply(0.9)
-                } else {
-                    p.err
-                },
-                Stroke::NONE,
-            ),
+            Kind::Danger => (if hovered { p.err_hover } else { p.err_fill }, Stroke::NONE),
             Kind::DangerQuiet => (
                 if hovered {
                     p.tone_soft(Tone::Err).gamma_multiply(1.4)
@@ -249,16 +242,26 @@ pub fn button_kbd(
     resp
 }
 
-/// `top` over `base` (both may be translucent), for hover fills on opaque buttons.
+/// `top` over `base` (both may be translucent), using Porter-Duff source-over compositing.
 fn blend(base: Color32, top: Color32) -> Color32 {
-    let a = top.a() as f32 / 255.0;
+    let a_t = top.a() as f32 / 255.0;
+    let a_b = base.a() as f32 / 255.0;
+    let a_o = a_t + a_b * (1.0 - a_t);
+    if a_o <= 0.0 {
+        return Color32::TRANSPARENT;
+    }
+    let [br, bg, bb, _] = base.to_srgba_unmultiplied();
     let [tr, tg, tb, _] = top.to_srgba_unmultiplied();
-    let mix = |b: u8, t: u8| (b as f32 * (1.0 - a) + t as f32 * a).round() as u8;
+    let ch = |b: u8, t: u8| {
+        ((t as f32 * a_t + b as f32 * a_b * (1.0 - a_t)) / a_o)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
     Color32::from_rgba_unmultiplied(
-        mix(base.r(), tr),
-        mix(base.g(), tg),
-        mix(base.b(), tb),
-        base.a(),
+        ch(br, tr),
+        ch(bg, tg),
+        ch(bb, tb),
+        (a_o * 255.0).round().clamp(0.0, 255.0) as u8,
     )
 }
 
@@ -485,6 +488,7 @@ pub fn segmented_icons<T: PartialEq + Copy>(
         Stroke::new(1.0, p.line_soft),
         StrokeKind::Inside,
     );
+    let enabled = ui.is_enabled();
     let mut x = rect.left() + 3.0;
     let mut responses = Vec::with_capacity(options.len());
     for (i, ((option, _, label), galley)) in options.iter().zip(galleys).enumerate() {
@@ -493,11 +497,12 @@ pub fn segmented_icons<T: PartialEq + Copy>(
         let resp = ui.interact(seg, base.id.with(("segment", i)), egui::Sense::click());
         let selected = *value == *option;
         resp.widget_info(|| {
-            egui::WidgetInfo::selected(egui::WidgetType::RadioButton, true, selected, *label)
+            egui::WidgetInfo::selected(egui::WidgetType::RadioButton, enabled, selected, *label)
         });
-        if resp.clicked() {
+        if enabled && resp.clicked() {
             *value = *option;
         }
+        let hovered = enabled && resp.hovered();
         let painter = ui.painter();
         if selected {
             if !p.dark {
@@ -524,13 +529,26 @@ pub fn segmented_icons<T: PartialEq + Copy>(
                 },
                 StrokeKind::Inside,
             );
-        } else if resp.hovered() {
+        } else if hovered {
             painter.rect_filled(seg, CornerRadius::same(5), p.hover);
         }
-        let color = if selected || resp.hovered() {
+        if resp.has_focus() {
+            painter.rect_stroke(
+                seg,
+                CornerRadius::same(5),
+                Stroke::new(1.5, p.accent_line),
+                StrokeKind::Inside,
+            );
+        }
+        let color = if selected || hovered {
             p.text
         } else {
             p.text_muted
+        };
+        let color = if enabled {
+            color
+        } else {
+            color.gamma_multiply(0.45)
         };
         painter.galley(seg.center() - galley.size() / 2.0, galley, color);
         responses.push(resp);
@@ -610,8 +628,9 @@ pub fn method_card(
         width - 24.0,
     );
     let h = 10.0 + 18.0 + 4.0 + 16.0 + 4.0 + desc_g.size().y + 10.0;
+    let enabled = ui.is_enabled();
     let (rect, resp) = ui.allocate_exact_size(vec2(width, h), Sense::click());
-    resp.widget_info(|| WidgetInfo::selected(WidgetType::RadioButton, true, on, title));
+    resp.widget_info(|| WidgetInfo::selected(WidgetType::RadioButton, enabled, on, title));
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         let radius = CornerRadius::same(style::RADIUS_MD);
@@ -622,11 +641,18 @@ pub fn method_card(
                 Stroke::new(3.0, p.accent_halo),
                 StrokeKind::Outside,
             );
+        } else if resp.has_focus() {
+            painter.rect_stroke(
+                rect.expand(2.0),
+                CornerRadius::same(style::RADIUS_MD + 2),
+                Stroke::new(2.0, p.accent_line),
+                StrokeKind::Outside,
+            );
         }
         painter.rect(
             rect,
             radius,
-            if resp.hovered() && !on {
+            if enabled && resp.hovered() && !on {
                 blend(p.field, p.hover)
             } else {
                 p.field
@@ -670,6 +696,7 @@ pub fn radio_card(
     let h = if desc.is_some() { 50.0 } else { 42.0 };
     let width = ui.available_width();
     let (rect, resp) = ui.allocate_exact_size(vec2(width, h), Sense::click());
+    resp.widget_info(|| WidgetInfo::selected(WidgetType::RadioButton, ui.is_enabled(), on, title));
     let painter = ui.painter();
     let radius = CornerRadius::same(style::RADIUS_MD);
     if on {
@@ -677,6 +704,13 @@ pub fn radio_card(
             rect,
             radius,
             Stroke::new(3.0, p.accent_halo),
+            StrokeKind::Outside,
+        );
+    } else if resp.has_focus() {
+        painter.rect_stroke(
+            rect.expand(2.0),
+            CornerRadius::same(style::RADIUS_MD + 2),
+            Stroke::new(2.0, p.accent_line),
             StrokeKind::Outside,
         );
     }
@@ -1633,7 +1667,9 @@ pub fn dialog_header(
                 );
                 if close {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-                        if icon_button_ex(ui, icons::X, "", false, 22.0).clicked() {
+                        if icon_button_ex(ui, icons::X, crate::i18n::t("Close"), false, 22.0)
+                            .clicked()
+                        {
                             closed = true;
                         }
                     });

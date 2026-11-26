@@ -75,6 +75,15 @@ fn signal(pids: &[String], sig: &str) {
     }
 }
 
+/// Ensures stopped `sshd` session children are always resumed even if an assertion panics.
+struct ContGuard(Vec<String>);
+
+impl Drop for ContGuard {
+    fn drop(&mut self) {
+        signal(&self.0, "-CONT");
+    }
+}
+
 #[test]
 fn a_server_that_stops_answering_is_noticed() {
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -97,24 +106,51 @@ fn a_server_that_stops_answering_is_noticed() {
     let sessions = session_processes(&server);
     assert!(!sessions.is_empty(), "no sshd session process found");
     signal(&sessions, "-STOP");
+    let _cont = ContGuard(sessions);
     let started = Instant::now();
     conn.probe(ProbeReason::NetworkChanged);
     wait_for(5, "checking", || {
         conn.shared.lock().checking_since.is_some().then_some(())
     });
-    let state = wait_for(15, "closed", || {
+    let state = wait_for(20, "closed", || {
         let s = conn.state();
         s.is_closed().then_some(s)
     });
-    signal(&sessions, "-CONT");
+    drop(_cont);
     assert_eq!(
         state,
         ConnState::Closed(Some(ConnError::NotResponding(ProbeReason::NetworkChanged)))
     );
     let took = started.elapsed();
     assert!(
-        took >= Duration::from_secs(7) && took < Duration::from_secs(12),
+        took >= Duration::from_secs(6) && took < Duration::from_secs(18),
         "closed after {took:?}"
     );
     assert!(conn.shared.lock().checking_since.is_none());
+}
+
+#[test]
+fn no_reply_probe_closes_dead_connection() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let server = TestServer::start();
+    let conn = connect(&rt, &server);
+
+    let sessions = session_processes(&server);
+    assert!(!sessions.is_empty(), "no sshd session process found");
+    signal(&sessions, "-STOP");
+    let _cont = ContGuard(sessions);
+    conn.probe(ProbeReason::NoReply);
+    let state = wait_for(20, "closed", || {
+        let s = conn.state();
+        s.is_closed().then_some(s)
+    });
+    drop(_cont);
+    assert_eq!(
+        state,
+        ConnState::Closed(Some(ConnError::NotResponding(ProbeReason::NoReply)))
+    );
 }

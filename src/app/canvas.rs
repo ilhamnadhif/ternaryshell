@@ -51,6 +51,8 @@ pub struct StepTrack {
     failed: Option<usize>,
     /// When it failed.
     failed_at: Option<Instant>,
+    /// Whether the connection entered a closed state (cancelled or failed).
+    closed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,7 +134,7 @@ impl TernaryShellApp {
             let (_, jumps) = step_labels(&self.store, &tab.bookmark);
             let hops = jumps.len();
             let track = self.conn_steps.entry(tab.id).or_default();
-            let step = match (&state, &via) {
+            let mut step = match (&state, &via) {
                 (ConnState::Connecting | ConnState::Authenticating, Some(v)) => {
                     jumps.iter().position(|j| j == v).unwrap_or(0)
                 }
@@ -141,6 +143,7 @@ impl TernaryShellApp {
                 (ConnState::Authenticating, None) => hops + 2,
                 (ConnState::Connected, _) => hops + 3,
                 (ConnState::Closed(_), _) => {
+                    track.closed = true;
                     if !matches!(state, ConnState::Closed(None)) && track.failed.is_none() {
                         track.failed = track.marks.last().map(|m| m.0);
                         track.failed_at = Some(Instant::now());
@@ -148,12 +151,19 @@ impl TernaryShellApp {
                     continue;
                 }
             };
-            // A new attempt (reconnect) starts over.
-            let restarted = track
-                .marks
-                .last()
-                .is_some_and(|m| step < m.0 && m.0 >= hops + 3)
-                || (track.failed.is_some() && step <= hops);
+            // Answering a host-key prompt clears `prompt` slightly before the session transitions
+            // to `Authenticating`; hold at `hops + 1` instead of treating it as a reconnect.
+            if !track.closed
+                && track.failed.is_none()
+                && step == hops
+                && track.marks.last().is_some_and(|m| m.0 == hops + 1)
+            {
+                step = hops + 1;
+            }
+            // A new attempt (reconnect after close/failure or any step regression) starts over.
+            let restarted = track.closed
+                || track.failed.is_some()
+                || track.marks.last().is_some_and(|m| step < m.0);
             if restarted {
                 *track = StepTrack::default();
             }
@@ -250,13 +260,22 @@ impl TernaryShellApp {
             cursor_blink: self.settings.cursor_blink,
         };
         let active = self.active;
-        let files_ident = files_identity(&self.store, &self.tabs[active].bookmark, p.dark);
+        let saved_bm = self
+            .store
+            .bookmark(self.tabs[active].bookmark.id)
+            .unwrap_or(&self.tabs[active].bookmark);
+        let files_ident = files_identity(&self.store, saved_bm, p.dark);
+        // A remote file open in the editor fills the canvas.
+        let external_modal = self.editor.is_some()
+            || self.palette.is_some()
+            || self.dialog.is_some()
+            || self.about.is_some()
+            || self.updater.modal_open();
         let tab = &mut self.tabs[active];
         tab.clear_activity();
         let state = tab.state();
-        // A remote file open in the editor fills the canvas.
         if let Some(panel) = tab.sftp.as_mut().filter(|s| s.editor_open()) {
-            panel.show_editor(ui, body, &rt);
+            panel.show_editor(ui, body, &rt, external_modal);
             return;
         }
         let (has_prompt, checking, was_connected) = {
@@ -512,6 +531,7 @@ impl TernaryShellApp {
                     ctx.set_cursor_icon(egui::CursorIcon::ResizeVertical);
                 }
                 if resp.dragged()
+                    && body.height() > 0.0
                     && let Some(pos) = resp.interact_pointer_pos()
                 {
                     tab.sftp_split = (1.0 - (pos.y - body.top()) / body.height()).clamp(0.2, 0.85);
@@ -666,9 +686,22 @@ impl TernaryShellApp {
             .as_ref()
             .map(|_| track.and_then(|t| t.failed).unwrap_or(now_step));
         let _ = dark;
+        let (diag_bookmark, diag_id) = match &failure {
+            Some(ConnError::Jump(jname, _)) => self
+                .store
+                .jump_chain(&bookmark)
+                .ok()
+                .and_then(|c| c.into_iter().find(|j| j.display_name() == *jname).cloned())
+                .map(|j| {
+                    let id = j.id;
+                    (j, id)
+                })
+                .unwrap_or_else(|| (bookmark.clone(), bookmark.id)),
+            _ => (bookmark.clone(), bookmark.id),
+        };
         let diagnosis = failure
             .as_ref()
-            .and_then(|e| cards::diagnosis(e, &bookmark));
+            .and_then(|e| cards::diagnosis(e, &diag_bookmark));
         let name = bookmark.display_name();
         let address = super::chrome::address_with_port(&bookmark);
         let sub_rest = match jumps.last() {
@@ -707,12 +740,20 @@ impl TernaryShellApp {
                             None if i == now_step => StepState::Now,
                             None => StepState::Pending,
                         };
-                        let start = marks.iter().find(|m| m.0 == i).map(|m| m.1);
+                        let start = marks.iter().enumerate().rev().find(|(_, m)| m.0 == i);
                         let meta = match st {
-                            StepState::Done => start
-                                .zip(marks.iter().find(|m| m.0 > i).map(|m| m.1))
-                                .map(|(a, b)| ms(b - a)),
-                            StepState::Failed => start.zip(failed_at).map(|(a, b)| ms(b - a)),
+                            StepState::Done => start.and_then(|(idx, &(_, a))| {
+                                marks[idx + 1..]
+                                    .iter()
+                                    .find(|m| m.0 > i)
+                                    .and_then(|&(_, b)| b.checked_duration_since(a))
+                                    .map(ms)
+                            }),
+                            StepState::Failed => start
+                                .and_then(|(_, &(_, a))| {
+                                    failed_at.and_then(|b| b.checked_duration_since(a))
+                                })
+                                .map(ms),
                             _ => None,
                         };
                         // The port of the server, beside the step that failed to reach it.
@@ -765,10 +806,13 @@ impl TernaryShellApp {
             self.actions.push(Action::Reconnect);
         }
         if edit {
-            if section.is_some() {
+            let edit_id = if section.is_some() {
                 self.editor_section = section;
-            }
-            self.actions.push(Action::EditBookmark(bookmark.id));
+                diag_id
+            } else {
+                bookmark.id
+            };
+            self.actions.push(Action::EditBookmark(edit_id));
         }
         if copy && let Some(e) = &failure {
             ctx.copy_text(e.message());
@@ -1006,8 +1050,7 @@ impl TernaryShellApp {
                 ..
             } => {
                 let name = via.clone().unwrap_or_else(|| bookmark.display_name());
-                let checked_id = egui::Id::new(("hostkey-checked", tab_id, fingerprint.as_str()));
-                let mut checked: bool = ctx.data(|d| d.get_temp(checked_id)).unwrap_or(false);
+                let checked = &mut tab.prompt.hostkey_checked;
                 let saved: Vec<(String, String)> = known
                     .iter()
                     .map(|k| match k.split_once(char::is_whitespace) {
@@ -1049,16 +1092,12 @@ impl TernaryShellApp {
                                 "Expected after a server rebuild or an OS reinstall. If you didn't expect it, close the tab and ask the server's admin.",
                             ),
                         );
-                        if style::checkbox(
+                        style::checkbox(
                             ui,
-                            &mut checked,
+                            checked,
                             RichText::new(t("I checked the new key with the server's admin"))
                                 .font(style::regular(12.5)),
-                        )
-                        .changed()
-                        {
-                            ui.data_mut(|d| d.insert_temp(checked_id, checked));
-                        }
+                        );
                     });
                     cards::foot(
                         ui,
@@ -1069,11 +1108,11 @@ impl TernaryShellApp {
                                 close_tab = true;
                             }
                             let accept = ui
-                                .add_enabled_ui(checked, |ui| {
+                                .add_enabled_ui(*checked, |ui| {
                                     kit::secondary(ui, None, t("Accept New Key"))
                                 })
                                 .inner;
-                            if accept.clicked() && checked {
+                            if accept.clicked() && *checked {
                                 hostkey_answer = Some(true);
                             }
                         },
@@ -1088,7 +1127,12 @@ impl TernaryShellApp {
                 retry,
             } => {
                 let through = match &via {
-                    Some(v) => Some(v.clone()),
+                    Some(v) => jumps
+                        .iter()
+                        .position(|j| j == v)
+                        .and_then(|i| i.checked_sub(1))
+                        .and_then(|i| jumps.get(i))
+                        .cloned(),
                     None => jumps.last().cloned(),
                 };
                 let (title, sub_mono, sub_rest, go) = match kind {
@@ -1171,6 +1215,7 @@ impl TernaryShellApp {
                             secret_field(
                                 ui,
                                 &mut prompt.text,
+                                &mut prompt.shown,
                                 *echo,
                                 *retry,
                                 *kind == SecretPromptKind::Interactive,
@@ -1224,9 +1269,8 @@ impl TernaryShellApp {
                         let complete = code && prompt.text.len() == cards::CODE_LEN;
                         let submit = settled
                             && ((enter && (r.lost_focus() || r.has_focus() || nothing_focused))
-                                || (complete && r.changed()));
-                        if on_top && !submit && (!prompt.focus || nothing_focused || r.lost_focus())
-                        {
+                                || complete);
+                        if on_top && !submit && (!prompt.focus || nothing_focused) {
                             r.request_focus();
                             prompt.focus = true;
                         }
@@ -1395,9 +1439,11 @@ fn compare_line(ui: &mut Ui, command: &str, p: &style::Palette) {
 }
 
 /// The secret field of a prompt with a show/hide eye (passwords); returns its response.
+#[allow(clippy::too_many_arguments)]
 fn secret_field(
     ui: &mut Ui,
     text: &mut String,
+    shown: &mut bool,
     echo: bool,
     error: bool,
     mono: bool,
@@ -1405,12 +1451,10 @@ fn secret_field(
     hint: &str,
 ) -> (egui::Response, bool) {
     let id = egui::Id::new(id);
-    let shown_id = id.with("shown");
-    let mut shown: bool = ui.data(|d| d.get_temp(shown_id)).unwrap_or(false);
     let width = ui.available_width();
     let mut field = style::input(text)
         .id(id)
-        .password(!echo && !shown)
+        .password(!echo && !*shown)
         .desired_width(width)
         .margin(egui::Margin {
             left: 10,
@@ -1434,20 +1478,19 @@ fn secret_field(
         );
         let resp = ui
             .interact(eye, id.with("eye"), Sense::click())
-            .on_hover_text(if shown { t("Hide") } else { t("Show") });
+            .on_hover_text(if *shown { t("Hide") } else { t("Show") });
         kit::paint_icon_button(
             ui,
             &resp,
             eye,
-            if shown { icons::EYE_SLASH } else { icons::EYE },
+            if *shown { icons::EYE_SLASH } else { icons::EYE },
             "",
             false,
             false,
         );
         if resp.clicked() {
-            shown = !shown;
+            *shown = !*shown;
             toggled = true;
-            ui.data_mut(|d| d.insert_temp(shown_id, shown));
             r.request_focus();
         }
     }

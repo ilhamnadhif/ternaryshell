@@ -14,8 +14,8 @@ use super::scheme::Scheme;
 
 /// Computes optional foreground overrides for one visible terminal row.
 ///
-/// `bytes` holds one ASCII byte per column (non-ASCII cells passed as `b' '`), and `plain`
-/// indicates whether each column uses default foreground/background with no special flags.
+/// `bytes` holds one ASCII byte per column (non-ASCII printable cells passed as `0x80`), and
+/// `plain` indicates whether each column uses default foreground/background with no special flags.
 /// Returns `None` when the row has no highlightable tokens.
 pub fn highlight_row(
     bytes: &[u8],
@@ -34,8 +34,7 @@ pub fn highlight_row(
         return None;
     }
 
-    let mut out: Vec<Option<Color32>> = vec![None; len];
-    let mut any = false;
+    let mut out: Option<Vec<Option<Color32>>> = None;
 
     let red = scheme.ansi[1];
     let green = scheme.ansi[2];
@@ -49,13 +48,15 @@ pub fn highlight_row(
         if !plain[range.clone()].iter().all(|&p| p) {
             return;
         }
-        if out[range.clone()].iter().any(|c| c.is_some()) {
+        if let Some(buf) = out.as_ref()
+            && buf[range.clone()].iter().any(|c| c.is_some())
+        {
             return;
         }
-        for slot in &mut out[range] {
+        let buf = out.get_or_insert_with(|| vec![None; len]);
+        for slot in &mut buf[range] {
             *slot = Some(color);
         }
-        any = true;
     };
 
     // 1. Plain shell prompt at column 0 (`ubuntu@host:~/dir$` or `[root@host dir]#`).
@@ -98,7 +99,7 @@ pub fn highlight_row(
         i += 1;
     }
 
-    any.then_some(out)
+    out
 }
 
 struct PromptMatch {
@@ -208,13 +209,16 @@ fn match_url(bytes: &[u8], i: usize) -> Option<usize> {
 
 fn is_word_open_boundary(bytes: &[u8], i: usize) -> bool {
     i == 0
-        || !(bytes[i - 1].is_ascii_alphanumeric()
+        || !(bytes[i - 1] >= 0x80
+            || bytes[i - 1].is_ascii_alphanumeric()
             || matches!(bytes[i - 1], b'_' | b'-' | b'.' | b'/'))
 }
 
 fn is_word_close_boundary(bytes: &[u8], j: usize) -> bool {
     j == bytes.len()
-        || !(bytes[j].is_ascii_alphanumeric() || matches!(bytes[j], b'_' | b'-' | b'/' | b'.'))
+        || !(bytes[j] >= 0x80
+            || bytes[j].is_ascii_alphanumeric()
+            || matches!(bytes[j], b'_' | b'-' | b'/' | b'.'))
 }
 
 fn keyword_color(word: &[u8], red: Color32, amber: Color32, green: Color32) -> Option<Color32> {

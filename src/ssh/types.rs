@@ -134,10 +134,19 @@ pub enum Prompt {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SecretAnswer {
     pub value: String,
     pub save: bool,
+}
+
+impl std::fmt::Debug for SecretAnswer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretAnswer")
+            .field("value", &"<redacted>")
+            .field("save", &self.save)
+            .finish()
+    }
 }
 
 /// What the UI reads to draw a tab's connection status.
@@ -161,6 +170,8 @@ pub struct ConnShared {
 pub struct ForwardStatus {
     pub forward: crate::bookmarks::Forward,
     pub listening: bool,
+    /// True while an initial bind / server request or retry is still in flight.
+    pub starting: bool,
     /// Why it isn't listening, or why its last connection failed.
     pub error: Option<String>,
 }

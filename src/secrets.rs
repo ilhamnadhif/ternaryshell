@@ -44,7 +44,7 @@ impl SecretKind {
 }
 
 /// The secrets belonging to one bookmark (used for export/import and the editor).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretSet {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
@@ -52,6 +52,22 @@ pub struct SecretSet {
     pub passphrase: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub private_key: Option<String>,
+}
+
+impl std::fmt::Debug for SecretSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecretSet")
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field(
+                "passphrase",
+                &self.passphrase.as_ref().map(|_| "<redacted>"),
+            )
+            .field(
+                "private_key",
+                &self.private_key.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl SecretSet {
@@ -200,6 +216,101 @@ impl Store for Memory {
     }
 }
 
+/// Splits values exceeding Windows Credential Manager's 2,560-byte UTF-16LE limit (such as
+/// pasted 2048/3072/4096-bit RSA private keys) across numbered `<account>#<i>` entries while
+/// storing ordinary short values directly for backwards compatibility.
+const CHUNK_PREFIX: &str = "ternaryshell-chunks:v1:";
+/// Leave margin below Windows Credential Manager's 2,560-byte UTF-16LE limit (1,280 code units).
+const CHUNK_MAX_UTF16_UNITS: usize = 1150;
+
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+struct Chunked<S>(S);
+
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn chunk_key(account: &str, index: usize) -> String {
+    format!("{account}#{index}")
+}
+
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn split_utf16_chunks(value: &str, max_units: usize) -> Vec<&str> {
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut units = 0;
+    for (idx, ch) in value.char_indices() {
+        let len = ch.len_utf16();
+        if units + len > max_units && idx > start {
+            chunks.push(&value[start..idx]);
+            start = idx;
+            units = 0;
+        }
+        units += len;
+    }
+    if start < value.len() {
+        chunks.push(&value[start..]);
+    }
+    chunks
+}
+
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+fn parse_chunk_count(header: &str) -> Option<usize> {
+    header.strip_prefix(CHUNK_PREFIX)?.parse::<usize>().ok()
+}
+
+#[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+impl<S: Store> Store for Chunked<S> {
+    fn read(&self, account: &str) -> Result<Option<String>> {
+        let Some(raw) = self.0.read(account)? else {
+            return Ok(None);
+        };
+        let Some(count) = parse_chunk_count(&raw) else {
+            return Ok(Some(raw));
+        };
+        let mut out = String::new();
+        for i in 0..count {
+            let Some(part) = self.0.read(&chunk_key(account, i))? else {
+                bail!(store_error("stored secret is incomplete"));
+            };
+            out.push_str(&part);
+        }
+        Ok(Some(out))
+    }
+
+    fn write(&self, account: &str, value: Option<&str>) -> Result<()> {
+        let old_count = self
+            .0
+            .read(account)
+            .ok()
+            .flatten()
+            .and_then(|s| parse_chunk_count(&s))
+            .unwrap_or(0);
+        let Some(v) = value else {
+            self.0.write(account, None)?;
+            for i in 0..old_count {
+                let _ = self.0.write(&chunk_key(account, i), None);
+            }
+            return Ok(());
+        };
+        let utf16_units = v.encode_utf16().count();
+        if utf16_units <= CHUNK_MAX_UTF16_UNITS && !v.starts_with(CHUNK_PREFIX) {
+            self.0.write(account, Some(v))?;
+            for i in 0..old_count {
+                let _ = self.0.write(&chunk_key(account, i), None);
+            }
+            return Ok(());
+        }
+        let parts = split_utf16_chunks(v, CHUNK_MAX_UTF16_UNITS);
+        for (i, part) in parts.iter().enumerate() {
+            self.0.write(&chunk_key(account, i), Some(part))?;
+        }
+        let header = format!("{CHUNK_PREFIX}{}", parts.len());
+        self.0.write(account, Some(&header))?;
+        for i in parts.len()..old_count {
+            let _ = self.0.write(&chunk_key(account, i), None);
+        }
+        Ok(())
+    }
+}
+
 enum Backend {
     /// One item per secret.
     Items(Box<dyn Store>),
@@ -207,8 +318,16 @@ enum Backend {
     Vault(Mutex<Vault>),
 }
 
+static BACKEND: OnceLock<Backend> = OnceLock::new();
+
+/// Initializes the process-local in-memory secret store for tests without mutating process
+/// environment variables. Only available in debug builds.
+#[cfg(debug_assertions)]
+pub fn use_memory_backend() {
+    let _ = BACKEND.set(Backend::Items(Box::new(Memory::default())));
+}
+
 fn backend() -> &'static Backend {
-    static BACKEND: OnceLock<Backend> = OnceLock::new();
     BACKEND.get_or_init(|| {
         // The in-memory store is for tests only; release builds always use the system's.
         if cfg!(test)
@@ -218,9 +337,10 @@ fn backend() -> &'static Backend {
             Backend::Items(Box::new(Memory::default()))
         } else if cfg!(target_os = "macos") {
             Backend::Vault(Mutex::new(Vault::new(Box::new(System))))
+        } else if cfg!(target_os = "windows") {
+            // Credential Manager caps each item at 2,560 bytes UTF-16LE (too small for RSA keys).
+            Backend::Items(Box::new(Chunked(System)))
         } else {
-            // Neither Credential Manager nor the Secret Service asks for each item, and a
-            // Credential Manager item holds at most 2.5 KB: too little to share.
             Backend::Items(Box::new(System))
         }
     })
@@ -246,7 +366,7 @@ const VAULT: &str = "vault";
 const VAULT_VERSION: u32 = 1;
 
 /// What the vault's item holds (with `version`).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct Contents {
     #[serde(default)]
     secrets: BTreeMap<String, String>,
@@ -254,6 +374,15 @@ struct Contents {
     /// build couldn't delete it. It is never read again.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     retired: BTreeSet<String>,
+}
+
+impl std::fmt::Debug for Contents {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Contents")
+            .field("secrets_count", &self.secrets.len())
+            .field("retired", &self.retired)
+            .finish()
+    }
 }
 
 #[derive(Serialize)]
@@ -323,24 +452,35 @@ impl Vault {
     /// Applies `changes` (`None` removes a secret) in one write of the vault.
     fn write(&mut self, changes: &[(String, Option<&str>)]) -> Result<()> {
         let mut next = self.contents()?.clone();
+        let mut legacy_candidates = Vec::new();
         for (account, value) in changes {
             match value {
                 Some(v) => next.secrets.insert(account.clone(), v.to_string()),
                 None => next.secrets.remove(account),
             };
-            // A secret an earlier version kept in an item of its own must not come back: the
-            // item is deleted, or (when macOS doesn't let this build) retired.
+            // Mark potential legacy items retired before saving the vault so we never delete an
+            // old item unless the updated vault has been persisted first.
             if !self.no_own_item.contains(account) {
-                if self.store.write(account, None).is_ok() {
-                    self.no_own_item.insert(account.clone());
-                    next.retired.remove(account);
-                } else {
-                    next.retired.insert(account.clone());
-                }
+                next.retired.insert(account.clone());
+                legacy_candidates.push(account.clone());
             }
         }
         if self.contents.as_ref() != Some(&next) {
             self.save(next)?;
+        }
+        // Now that the vault is safely saved, try deleting legacy items and prune `retired`.
+        let mut pruned = false;
+        let mut cleaned = self.contents.clone().unwrap_or_default();
+        for account in legacy_candidates {
+            if self.store.write(&account, None).is_ok() {
+                self.no_own_item.insert(account.clone());
+                if cleaned.retired.remove(&account) {
+                    pruned = true;
+                }
+            }
+        }
+        if pruned {
+            let _ = self.save(cleaned);
         }
         Ok(())
     }
@@ -733,5 +873,115 @@ mod tests {
             r#"{"version":1,"secrets":{},"retired":["r/password"]}"#
         );
         assert_eq!(parse_vault(&text).unwrap().retired.len(), 1);
+    }
+
+    /// Simulates Windows Credential Manager's 2,560-byte UTF-16LE per-item cap.
+    struct CappedStore {
+        items: Arc<Mutex<HashMap<String, String>>>,
+        max_utf16_units: usize,
+    }
+
+    impl Store for CappedStore {
+        fn read(&self, account: &str) -> Result<Option<String>> {
+            Ok(self.items.lock().get(account).cloned())
+        }
+
+        fn write(&self, account: &str, value: Option<&str>) -> Result<()> {
+            let mut map = self.items.lock();
+            match value {
+                Some(v) => {
+                    let units: usize = v.encode_utf16().count();
+                    if units > self.max_utf16_units {
+                        bail!(
+                            "credential exceeds {}-unit UTF-16 limit ({units})",
+                            self.max_utf16_units
+                        );
+                    }
+                    map.insert(account.to_string(), v.to_string());
+                }
+                None => {
+                    map.remove(account);
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn chunked_store_round_trips_large_key_and_cleans_up_chunks() {
+        let backing: Arc<Mutex<HashMap<String, String>>> = Arc::default();
+        let store = Chunked(CappedStore {
+            items: backing.clone(),
+            max_utf16_units: 1280,
+        });
+        let acct = "key-id/private-key";
+        // Simulate a 4096-bit RSA PEM (~3,600 chars) plus surrogate-pair Unicode comment.
+        let large_key = format!(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n# 🔑\n-----END OPENSSH PRIVATE KEY-----\n",
+            "ABCD0123456789+/".repeat(230)
+        );
+        assert!(large_key.encode_utf16().count() > 3500);
+        store.write(acct, Some(&large_key)).unwrap();
+        assert_eq!(
+            store.read(acct).unwrap().as_deref(),
+            Some(large_key.as_str())
+        );
+        assert!(backing.lock().contains_key(&chunk_key(acct, 0)));
+        assert!(backing.lock().contains_key(&chunk_key(acct, 3)));
+
+        // Shrinking to 2 chunks removes stale higher-indexed chunks.
+        let medium = "M".repeat(1500);
+        store.write(acct, Some(&medium)).unwrap();
+        assert_eq!(store.read(acct).unwrap().as_deref(), Some(medium.as_str()));
+        assert!(!backing.lock().contains_key(&chunk_key(acct, 2)));
+        assert!(!backing.lock().contains_key(&chunk_key(acct, 3)));
+
+        // Shrinking to an inline short value removes all chunks.
+        store.write(acct, Some("short")).unwrap();
+        assert_eq!(store.read(acct).unwrap().as_deref(), Some("short"));
+        assert!(!backing.lock().contains_key(&chunk_key(acct, 0)));
+        assert!(!backing.lock().contains_key(&chunk_key(acct, 1)));
+
+        // Re-writing large then deleting removes header + all chunks.
+        store.write(acct, Some(&large_key)).unwrap();
+        store.write(acct, None).unwrap();
+        assert_eq!(store.read(acct).unwrap(), None);
+        assert!(backing.lock().is_empty());
+    }
+
+    #[test]
+    fn vault_write_preserves_legacy_item_when_vault_save_fails() {
+        struct FailVaultWrite {
+            items: Arc<Mutex<HashMap<String, String>>>,
+        }
+        impl Store for FailVaultWrite {
+            fn read(&self, account: &str) -> Result<Option<String>> {
+                Ok(self.items.lock().get(account).cloned())
+            }
+            fn write(&self, account: &str, value: Option<&str>) -> Result<()> {
+                if account == VAULT {
+                    bail!("simulated keychain write failure");
+                }
+                let mut map = self.items.lock();
+                match value {
+                    Some(v) => map.insert(account.to_string(), v.to_string()),
+                    None => map.remove(account),
+                };
+                Ok(())
+            }
+        }
+        let items: Arc<Mutex<HashMap<String, String>>> = Arc::default();
+        items
+            .lock()
+            .insert("legacy/password".into(), "must-survive".into());
+        let mut vault = Vault::new(Box::new(FailVaultWrite {
+            items: items.clone(),
+        }));
+        assert!(vault.write(&[("legacy/password".into(), None)]).is_err());
+        assert_eq!(
+            items.lock().get("legacy/password").map(String::as_str),
+            Some("must-survive"),
+            "legacy item must not be deleted when vault save fails"
+        );
     }
 }

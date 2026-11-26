@@ -409,11 +409,13 @@ fn family(bold: bool, italic: bool) -> FontFamily {
 
 /// Viewport cell under a screen position, clamped to the grid.
 fn cell_at(pos: Pos2, origin: Pos2, cell: Vec2, size: GridSize) -> (usize, usize, Side) {
+    let cw = cell.x.max(1.0);
+    let ch = cell.y.max(1.0);
     let x = (pos.x - origin.x).max(0.0);
     let y = (pos.y - origin.y).max(0.0);
-    let col = ((x / cell.x) as usize).min(size.cols - 1);
-    let row = ((y / cell.y) as usize).min(size.rows - 1);
-    let side = if x - col as f32 * cell.x > cell.x / 2.0 {
+    let col = ((x / cw) as usize).min(size.cols - 1);
+    let row = ((y / ch) as usize).min(size.rows - 1);
+    let side = if x - col as f32 * cw > cw / 2.0 {
         Side::Right
     } else {
         Side::Left
@@ -454,11 +456,13 @@ pub fn show(
         ))
     });
     let ppp = ui.ctx().pixels_per_point();
-    let cell = style.cell;
+    let cell = vec2(style.cell.x.max(1.0), style.cell.y.max(1.0));
     let origin = (rect.min + vec2(PAD, PAD)).round_to_pixels(ppp);
     let size = GridSize {
-        cols: (((rect.width() - 2.0 * PAD) / cell.x).floor() as usize).max(tcore::MIN_COLS),
-        rows: (((rect.height() - 2.0 * PAD) / cell.y).floor() as usize).max(tcore::MIN_ROWS),
+        cols: (((rect.width() - 2.0 * PAD).max(0.0) / cell.x).floor() as usize)
+            .max(tcore::MIN_COLS),
+        rows: (((rect.height() - 2.0 * PAD).max(0.0) / cell.y).floor() as usize)
+            .max(tcore::MIN_ROWS),
     };
     // Pixel sizes go out in physical pixels everywhere (pty request, window-change, CSI 14 t),
     // and are re-sent when only the font changes.
@@ -704,64 +708,68 @@ pub fn show(
                 _ => {}
             }
         }
-    } else if input_enabled {
-        let press_origin = ui.input(|i| i.pointer.press_origin());
-        if response.drag_started_by(PointerButton::Primary)
-            && let Some(p) = press_origin
-        {
-            let (col, row, side) = cell_at(p, origin, cell, size);
-            let ty = if ui.input(|i| i.modifiers.alt) {
-                SelectionType::Block
-            } else {
-                SelectionType::Simple
-            };
-            term.selection = Some(Selection::new(ty, grid_point(offset, col, row), side));
-        }
-        if response.dragged_by(PointerButton::Primary)
-            && let Some(p) = response.interact_pointer_pos()
-        {
-            // Auto-scroll while dragging past the edges.
-            if p.y < rect.top() {
-                term.scroll_display(Scroll::Delta(1));
-                ui.ctx().request_repaint_after(Duration::from_millis(30));
-            } else if p.y > rect.bottom() {
-                term.scroll_display(Scroll::Delta(-1));
-                ui.ctx().request_repaint_after(Duration::from_millis(30));
+    } else {
+        view.reported_button = None;
+        view.last_report_cell = None;
+        if input_enabled {
+            let press_origin = ui.input(|i| i.pointer.press_origin());
+            if response.drag_started_by(PointerButton::Primary)
+                && let Some(p) = press_origin
+            {
+                let (col, row, side) = cell_at(p, origin, cell, size);
+                let ty = if ui.input(|i| i.modifiers.alt) {
+                    SelectionType::Block
+                } else {
+                    SelectionType::Simple
+                };
+                term.selection = Some(Selection::new(ty, grid_point(offset, col, row), side));
             }
-            let offset = term.grid().display_offset();
-            let (col, row, side) = cell_at(p, origin, cell, size);
-            if let Some(sel) = term.selection.as_mut() {
-                sel.update(grid_point(offset, col, row), side);
+            if response.dragged_by(PointerButton::Primary)
+                && let Some(p) = response.interact_pointer_pos()
+            {
+                // Auto-scroll while dragging past the edges.
+                if p.y < rect.top() {
+                    term.scroll_display(Scroll::Delta(1));
+                    ui.ctx().request_repaint_after(Duration::from_millis(30));
+                } else if p.y > rect.bottom() {
+                    term.scroll_display(Scroll::Delta(-1));
+                    ui.ctx().request_repaint_after(Duration::from_millis(30));
+                }
+                let offset = term.grid().display_offset();
+                let (col, row, side) = cell_at(p, origin, cell, size);
+                if let Some(sel) = term.selection.as_mut() {
+                    sel.update(grid_point(offset, col, row), side);
+                }
             }
-        }
-        if response.drag_stopped()
-            && style.copy_on_select
-            && let Some(text) = term.selection_to_string()
-        {
-            ui.ctx().copy_text(text);
-        }
-        if let Some(p) = hover {
-            let (col, row, side) = cell_at(p, origin, cell, size);
-            if response.triple_clicked() {
-                term.selection = Some(Selection::new(
-                    SelectionType::Lines,
-                    grid_point(offset, col, row),
-                    side,
-                ));
-            } else if response.double_clicked() {
-                term.selection = Some(Selection::new(
-                    SelectionType::Semantic,
-                    grid_point(offset, col, row),
-                    side,
-                ));
-            } else if response.clicked_by(PointerButton::Primary) {
-                term.selection = None;
-            }
-            if (response.double_clicked() || response.triple_clicked())
+            if response.drag_stopped()
                 && style.copy_on_select
                 && let Some(text) = term.selection_to_string()
             {
                 ui.ctx().copy_text(text);
+            }
+            if let Some(p) = hover {
+                let (col, row, side) = cell_at(p, origin, cell, size);
+                if response.triple_clicked() {
+                    term.selection = Some(Selection::new(
+                        SelectionType::Lines,
+                        grid_point(offset, col, row),
+                        side,
+                    ));
+                } else if response.double_clicked() {
+                    term.selection = Some(Selection::new(
+                        SelectionType::Semantic,
+                        grid_point(offset, col, row),
+                        side,
+                    ));
+                } else if response.clicked_by(PointerButton::Primary) {
+                    term.selection = None;
+                }
+                if (response.double_clicked() || response.triple_clicked())
+                    && style.copy_on_select
+                    && let Some(text) = term.selection_to_string()
+                {
+                    ui.ctx().copy_text(text);
+                }
             }
         }
     }
@@ -792,7 +800,7 @@ pub fn show(
                 } else {
                     MouseButton::WheelDown
                 };
-                for _ in 0..lines.abs().min(10) {
+                for _ in 0..lines.unsigned_abs().min(10) {
                     if let Some(bytes) =
                         input::encode_mouse(b, MouseAction::Press, Mods::default(), col, row, sgr)
                     {
@@ -801,7 +809,7 @@ pub fn show(
                 }
             } else if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) && alive {
                 let seq: &[u8] = if lines > 0 { b"\x1bOA" } else { b"\x1bOB" };
-                for _ in 0..lines.abs().min(10) {
+                for _ in 0..lines.unsigned_abs().min(10) {
                     out.input.extend_from_slice(seq);
                 }
             } else {
@@ -846,6 +854,8 @@ pub fn show(
                     row_plain[col] = is_plain;
                     row_bytes[col] = if c.c.is_ascii() && !c.c.is_ascii_control() {
                         c.c as u8
+                    } else if !c.c.is_control() && !c.c.is_whitespace() {
+                        0x80
                     } else {
                         b' '
                     };
@@ -1253,6 +1263,7 @@ pub fn show(
             .inner
             .clicked()
         {
+            request_paste();
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
             ui.memory_mut(|m| m.request_focus(id));

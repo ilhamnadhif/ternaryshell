@@ -14,6 +14,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -105,13 +108,25 @@ jobs:
         shell: pwsh
         run: |
           $setup = (Get-ChildItem dist/TernaryShell-*-windows-x64-setup.exe).FullName
-          Start-Process -Wait -FilePath $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER'
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $inst = Start-Process -Wait -PassThru -FilePath $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER'
+          if ($inst.ExitCode -ne 0) { throw "installer exited with $($inst.ExitCode)" }
           $dir = "$env:LOCALAPPDATA\Programs\TernaryShell"
           if (-not (Test-Path "$dir\ternaryshell.exe") -or -not (Test-Path "$dir\unins000.exe")) { throw "not installed" }
           $out = Join-Path $env:TEMP 'ternaryshell-version.txt'
-          Start-Process -Wait -NoNewWindow -FilePath "$dir\ternaryshell.exe" -ArgumentList '--version' -RedirectStandardOutput $out
-          Get-Content $out
-          Start-Process -Wait -FilePath "$dir\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+          try {
+            $run = Start-Process -Wait -PassThru -NoNewWindow -FilePath "$dir\ternaryshell.exe" -ArgumentList '--version' -RedirectStandardOutput $out
+            $said = ([string](Get-Content $out -Raw)).Trim()
+            Write-Host $said
+            if ($run.ExitCode -ne 0 -or $said -ne "TernaryShell $version") {
+              throw "ternaryshell.exe --version said '$said' (exit $($run.ExitCode)), expected TernaryShell $version"
+            }
+          } finally {
+            Remove-Item -ErrorAction SilentlyContinue $out
+          }
+          $uninst = Start-Process -Wait -PassThru -FilePath "$dir\unins000.exe" -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+          if ($uninst.ExitCode -ne 0) { throw "uninstaller exited with $($uninst.ExitCode)" }
+          if (Test-Path "$dir\ternaryshell.exe") { throw "ternaryshell.exe still exists after uninstall" }
       - uses: actions/upload-artifact@v4
         with:
           name: windows

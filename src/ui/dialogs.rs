@@ -341,40 +341,6 @@ fn build_sections(query: &str, scope: Scope, data: &PaletteData) -> Vec<Section>
 impl Palette {
     pub fn show(&mut self, ctx: &egui::Context, data: &PaletteData) -> PaletteResult {
         let mut result = PaletteResult::Open;
-        // `>` first switches to the actions, as in other editors.
-        if let Some(rest) = self.query.strip_prefix('>') {
-            self.query = rest.trim_start().to_string();
-            self.scope = Scope::Actions;
-            self.index = 0;
-        }
-        let query = self.query.trim().to_string();
-        let key = CacheKey {
-            query: query.clone(),
-            scope: self.scope,
-            sizes: [
-                data.store.bookmarks.len(),
-                data.commands.len(),
-                data.tabs.len(),
-                data.recent.len(),
-            ],
-        };
-        if self.cache.as_ref().is_none_or(|(k, _)| *k != key) {
-            let sections = build_sections(&query, self.scope, data);
-            self.cache = Some((key, sections));
-        }
-        let sections = &self.cache.as_ref().expect("built").1;
-        let flat: Vec<(&Row, Option<usize>)> = sections
-            .iter()
-            .flat_map(|s| {
-                s.rows
-                    .iter()
-                    .enumerate()
-                    .map(move |(i, r)| (r, (s.numbered && i < 9).then_some(i + 1)))
-            })
-            .collect();
-        let total = flat.len();
-        self.index = self.index.min(total.saturating_sub(1));
-        let address = address_query(&query);
 
         let area = egui::Area::new(egui::Id::new("palette-area"))
             .anchor(Align2::CENTER_TOP, vec2(0.0, 86.0));
@@ -424,12 +390,6 @@ impl Palette {
                     self.scope = Scope::ALL[if tab { (i + 1) % n } else { (i + n - 1) % n }];
                     self.index = 0;
                 }
-                if down {
-                    self.index = (self.index + 1).min(total.saturating_sub(1));
-                }
-                if up {
-                    self.index = self.index.saturating_sub(1);
-                }
 
                 // The query: 54 px, a magnifier, the text (mono when it is an address).
                 let (row, _) = ui.allocate_exact_size(vec2(PALETTE_W, 54.0), Sense::hover());
@@ -446,7 +406,7 @@ impl Palette {
                         pos2(row.left() + 16.0 + 19.0 + 14.0, row.top()),
                         pos2(row.right() - right_pad, row.bottom()),
                     )));
-                let font = if address.is_some() {
+                let font = if address_query(self.query.trim()).is_some() {
                     style::mono(15.0)
                 } else {
                     style::regular(16.0)
@@ -467,6 +427,12 @@ impl Palette {
                     row.bottom() - 0.5,
                     Stroke::new(1.0, p.border),
                 );
+                // `>` first switches to the actions, as in other editors.
+                if let Some(rest) = self.query.strip_prefix('>') {
+                    self.query = rest.trim_start().to_string();
+                    self.scope = Scope::Actions;
+                    self.index = 0;
+                }
                 // The field keeps the keyboard: Tab switches the scope instead of moving focus.
                 let nothing_focused = ui.memory(|m| m.focused().is_none());
                 if !self.focused || tab || back_tab || (!r.has_focus() && nothing_focused) {
@@ -488,6 +454,9 @@ impl Palette {
                         )
                     });
                 }
+
+                let query = self.query.trim().to_string();
+                let address = address_query(&query);
 
                 // The scopes: plain text, the selected one underlined (not while a typed address
                 // is offered: Tab still moves through them).
@@ -512,6 +481,41 @@ impl Palette {
                         r.request_focus();
                     }
                     x += w.0 + 14.0;
+                }
+
+                // Build or reuse sections AFTER handling query edits, Tab, and scope clicks so
+                // Enter and row rendering always use the current frame's query and scope.
+                let key = CacheKey {
+                    query: query.clone(),
+                    scope: self.scope,
+                    sizes: [
+                        data.store.bookmarks.len(),
+                        data.commands.len(),
+                        data.tabs.len(),
+                        data.recent.len(),
+                    ],
+                };
+                if self.cache.as_ref().is_none_or(|(k, _)| *k != key) {
+                    let sections = build_sections(&query, self.scope, data);
+                    self.cache = Some((key, sections));
+                }
+                let sections = &self.cache.as_ref().expect("built").1;
+                let flat: Vec<(&Row, Option<usize>)> = sections
+                    .iter()
+                    .flat_map(|s| {
+                        s.rows
+                            .iter()
+                            .enumerate()
+                            .map(move |(i, r)| (r, (s.numbered && i < 9).then_some(i + 1)))
+                    })
+                    .collect();
+                let total = flat.len();
+                self.index = self.index.min(total.saturating_sub(1));
+                if down {
+                    self.index = (self.index + 1).min(total.saturating_sub(1));
+                }
+                if up {
+                    self.index = self.index.saturating_sub(1);
                 }
 
                 // The list and the preview beside it.
@@ -1450,7 +1454,11 @@ impl Dialog {
                             r.request_focus();
                         }
                         if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                            submit = true;
+                            if !name.trim().is_empty() {
+                                submit = true;
+                            } else {
+                                r.request_focus();
+                            }
                         }
                     });
                     kit::dialog_footer(
@@ -1565,8 +1573,24 @@ impl ExportDialog {
             self.secrets_rx = None;
         }
         let mut result = DialogResult::Open;
-        let enter = ctx.input(|i| i.key_pressed(Key::Enter));
-        let modal = style::modal(ctx, egui::Id::new("export")).show(ctx, |ui| {
+        let modal_id = egui::Id::new("export");
+        let enter = ctx.memory(|m| m.top_modal_layer().is_none_or(|l| l.id == modal_id))
+            && !egui::Popup::is_any_open(ctx)
+            && ctx.input(|i| {
+                i.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        egui::Event::Key {
+                            key: Key::Enter,
+                            pressed: true,
+                            repeat: false,
+                            modifiers,
+                            ..
+                        } if modifiers.is_none()
+                    )
+                })
+            });
+        let modal = style::modal(ctx, modal_id).show(ctx, |ui| {
             ui.set_width(600.0);
             ui.spacing_mut().item_spacing.y = 0.0;
             let p = style::pal(ui);
@@ -1582,6 +1606,7 @@ impl ExportDialog {
                 let groups_used = store.groups.len();
                 if scope_option(ui, self.scope == ExportScope::All, t("All connections"), &tf("{} connections in {} groups", &[&store.bookmarks.len().to_string(), &groups_used.to_string()]), |_| {}).clicked() {
                     self.scope = ExportScope::All;
+                    self.error = None;
                 }
                 ui.add_space(2.0);
                 // One group.
@@ -1614,9 +1639,11 @@ impl ExportDialog {
                 });
                 if let Some(g) = pick_group {
                     self.scope = ExportScope::Group(g);
+                    self.error = None;
                 }
                 if one.clicked() && group.is_none() && let Some(g) = store.groups.first() {
                     self.scope = ExportScope::Group(g.id);
+                    self.error = None;
                 }
                 ui.add_space(2.0);
                 // Selected.
@@ -1628,6 +1655,7 @@ impl ExportDialog {
                     ui.label(RichText::new(if n == 0 { t("none selected").to_string() } else { tf("{} selected", &[&n.to_string()]) }).font(style::regular(style::SMALL)).color(p.text_faint));
                 });
                 if sel.clicked() {
+                    self.error = None;
                     if !selected_mode {
                         self.scope = ExportScope::Selected(self.picked.iter().copied().collect());
                         self.show_list = true;
@@ -1643,6 +1671,7 @@ impl ExportDialog {
                             let mut on = self.picked.contains(&b.id);
                             let label = RichText::new(format!("{}  ", b.display_name())).color(p.text);
                             if style::checkbox(ui, &mut on, label).changed() {
+                                self.error = None;
                                 if on {
                                     self.picked.insert(b.id);
                                 } else {
@@ -1869,6 +1898,7 @@ fn scope_option(
 // ----- import ---------------------------------------------------------------------------------
 
 pub struct ImportDialog {
+    session_id: Uuid,
     pub plan: ImportPlan,
     pub source: String,
     passphrase: String,
@@ -1886,6 +1916,7 @@ impl ImportDialog {
     pub fn new(plan: ImportPlan, source: String) -> Self {
         let asking = plan.encrypted_credentials.is_some();
         Self {
+            session_id: Uuid::new_v4(),
             plan,
             source,
             passphrase: String::new(),
@@ -1958,11 +1989,23 @@ impl ImportDialog {
                 crate::bookmarks::Auth::Agent { .. } => t("SSH agent").into(),
             }
         };
-        let jump = |b: &crate::bookmarks::Bookmark, s: &BookmarkStore| -> String {
-            b.jump
-                .and_then(|j| s.bookmark(j))
-                .map_or_else(|| t("none").to_string(), |j| j.display_name())
-        };
+        let jump =
+            |b: &crate::bookmarks::Bookmark, s: &BookmarkStore, check_plan: bool| -> String {
+                b.jump
+                    .and_then(|j| {
+                        let from_plan = check_plan
+                            .then(|| {
+                                self.plan
+                                    .items
+                                    .iter()
+                                    .find(|it| it.incoming.id == j)
+                                    .map(|it| it.incoming.display_name())
+                            })
+                            .flatten();
+                        from_plan.or_else(|| s.bookmark(j).map(|x| x.display_name()))
+                    })
+                    .unwrap_or_else(|| t("none").to_string())
+            };
         let mut all = Vec::new();
         for item in &self.plan.items {
             let mut d = Vec::new();
@@ -1976,11 +2019,7 @@ impl ImportDialog {
                 if login(old) != login(new) {
                     d.push((t("login").to_string(), login(old), login(new)));
                 }
-                let (oj, nj) = (
-                    jump(old, store),
-                    new.jump
-                        .map_or_else(|| t("none").to_string(), |_| jump(new, store)),
-                );
+                let (oj, nj) = (jump(old, store, false), jump(new, store, true));
                 if old.jump != new.jump && oj != nj {
                     d.push((t("jump").to_string(), oj, nj));
                 }
@@ -2197,8 +2236,24 @@ impl ImportDialog {
     /// without the secrets.
     fn show_unlock(&mut self, ctx: &egui::Context) -> DialogResult {
         let mut result = DialogResult::Open;
-        let enter = ctx.input(|i| i.key_pressed(Key::Enter));
-        let modal = style::modal(ctx, egui::Id::new("import-unlock")).show(ctx, |ui| {
+        let modal_id = egui::Id::new(("import-unlock", self.session_id));
+        let field_id = egui::Id::new(("import-passphrase", self.session_id));
+        let enter = ctx.memory(|m| m.top_modal_layer().is_none_or(|l| l.id == modal_id))
+            && ctx.input(|i| {
+                i.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        egui::Event::Key {
+                            key: Key::Enter,
+                            pressed: true,
+                            repeat: false,
+                            modifiers,
+                            ..
+                        } if modifiers.is_none()
+                    )
+                })
+            });
+        let modal = style::modal(ctx, modal_id).show(ctx, |ui| {
             ui.set_width(460.0);
             ui.spacing_mut().item_spacing.y = 0.0;
             let p = style::pal(ui);
@@ -2228,6 +2283,7 @@ impl ImportDialog {
                     let field = ui.add_enabled(
                         !busy,
                         style::input(&mut self.passphrase)
+                            .id(field_id)
                             .password(!self.show_passphrase)
                             .margin(egui::Margin { left: 10, right: 30, top: 7, bottom: 7 })
                             .error(error),
@@ -2238,7 +2294,7 @@ impl ImportDialog {
                         self.unlock_message = None;
                     }
                     let eye = egui::Rect::from_center_size(pos2(field.rect.right() - 15.0, field.rect.center().y), vec2(20.0, 20.0));
-                    let er = ui.interact(eye, egui::Id::new("import-eye"), Sense::click());
+                    let er = ui.interact(eye, egui::Id::new(("import-eye", self.session_id)), Sense::click());
                     kit::paint_icon_button(ui, &er, eye, if self.show_passphrase { icons::EYE_SLASH } else { icons::EYE }, t("Show"), false, false);
                     if er.clicked() {
                         self.show_passphrase = !self.show_passphrase;
@@ -2262,7 +2318,11 @@ impl ImportDialog {
             });
             if skip {
                 self.asking = false;
+                self.unlocking = None;
+                self.passphrase.clear();
+                self.unlock_message = None;
                 self.plan.encrypted_credentials = None;
+                ctx.data_mut(|d| d.remove::<egui::text_edit::TextEditState>(field_id));
             }
             if go && !busy {
                 self.start_unlock(ui.ctx());
@@ -2273,6 +2333,10 @@ impl ImportDialog {
         });
         if escape_only(ctx, &modal) && matches!(result, DialogResult::Open) {
             result = DialogResult::Close;
+        }
+        if !matches!(result, DialogResult::Open) {
+            self.passphrase.clear();
+            ctx.data_mut(|d| d.remove::<egui::text_edit::TextEditState>(field_id));
         }
         result
     }
@@ -2790,14 +2854,6 @@ impl SettingsDialog {
                 if r.clicked() {
                     self.tab = tab;
                 }
-            }
-            // A search that has nothing on this page moves to the first page that has.
-            if searching
-                && counts[self.tab as usize] == 0
-                && let Some(first) = SettingsTab::ALL.iter().find(|t| counts[**t as usize] > 0)
-                && ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Text(_))))
-            {
-                self.tab = *first;
             }
             // Version and the update check, at the bottom of the navigation.
             let foot_x = nav.left() + 10.0 + 10.0;
@@ -3816,7 +3872,10 @@ fn terminal(ui: &mut Ui, s: &mut Settings, q: Search) {
                             for preset in fonts::PRESETS {
                                 if fonts::is_available(preset)
                                     && ui
-                                        .selectable_label(current.name == preset.name, preset.name)
+                                        .selectable_label(
+                                            current.path.is_none() && current.name == preset.name,
+                                            preset.name,
+                                        )
                                         .clicked()
                                 {
                                     s.font = FontChoice {
@@ -4066,11 +4125,7 @@ fn quick_commands(ui: &mut Ui, s: &mut Settings) {
     let mut add = false;
     let width = ui.available_width();
     let focused = ui.memory(|m| m.focused());
-    let mod_key = if cfg!(target_os = "macos") {
-        "⌃"
-    } else {
-        "Ctrl+"
-    };
+    let mod_key = cfg!(target_os = "macos").then_some("⌃");
     egui::Frame::NONE
         .stroke(Stroke::new(1.0, p.border))
         .corner_radius(CornerRadius::same(10))
@@ -4164,7 +4219,9 @@ fn quick_commands(ui: &mut Ui, s: &mut Settings) {
                 quiet_field(ui, name_r, &mut qc.name, name_id, t("Name"), false, editing);
                 quiet_field(ui, cmd_r, &mut qc.command, cmd_id, "df -h", true, editing);
                 run_paste(ui, mode_r, &mut qc.run, qc.id);
-                if i < 9 {
+                if i < 9
+                    && let Some(mod_key) = mod_key
+                {
                     let painter = ui.painter();
                     let label = format!("{mod_key}{}", i + 1);
                     let g =
@@ -4227,18 +4284,15 @@ fn quick_commands(ui: &mut Ui, s: &mut Settings) {
                     0.0,
                     egui::TextFormat::simple(style::icon_font(12.0), p.text_faint),
                 );
-                job.append(
-                    &tf(
-                        "to reorder · the first nine get {}",
-                        &[if cfg!(target_os = "macos") {
-                            "⌃1–⌃9"
-                        } else {
-                            "Ctrl+1–Ctrl+9"
-                        }],
-                    ),
-                    0.0,
-                    fmt,
-                );
+                if cfg!(target_os = "macos") {
+                    job.append(
+                        &tf("to reorder · the first nine get {}", &["⌃1–⌃9"]),
+                        0.0,
+                        fmt,
+                    );
+                } else {
+                    job.append(t("to reorder"), 0.0, fmt);
+                }
                 ui.label(job);
             });
         });
@@ -4468,7 +4522,6 @@ fn shortcuts(ui: &mut Ui, filter: &mut String, mac: &mut Option<bool>) {
     ui.add_space(16.0);
     let k = |sc: S| shortcut_label(sc, on_mac);
     let tab_keys = if on_mac { "⌘ 1…9" } else { "Alt+1…9" };
-    let qc_keys = if on_mac { "⌃ 1…9" } else { "Ctrl+1…9" };
     type Rows<'a> = Vec<(&'a str, Vec<String>)>;
     let left: Vec<(&str, Rows)> = vec![
         (
@@ -4498,20 +4551,20 @@ fn shortcuts(ui: &mut Ui, filter: &mut String, mac: &mut Option<bool>) {
             ],
         ),
     ];
-    let right: Vec<(&str, Rows)> = vec![
+    let mut term_rows: Rows = vec![
+        (t("Copy / paste"), vec![k(S::Copy), k(S::Paste)]),
+        (t("Clear scrollback"), vec![k(S::ClearScrollback)]),
+        (t("Scroll history"), vec!["⇧ PgUp".into(), "⇧ PgDn".into()]),
         (
-            t("Terminal"),
-            vec![
-                (t("Copy / paste"), vec![k(S::Copy), k(S::Paste)]),
-                (t("Clear scrollback"), vec![k(S::ClearScrollback)]),
-                (t("Scroll history"), vec!["⇧ PgUp".into(), "⇧ PgDn".into()]),
-                (
-                    t("Text size"),
-                    vec![k(S::Bigger), k(S::Smaller), k(S::ActualSize)],
-                ),
-                (t("Quick command 1–9"), vec![qc_keys.to_string()]),
-            ],
+            t("Text size"),
+            vec![k(S::Bigger), k(S::Smaller), k(S::ActualSize)],
         ),
+    ];
+    if on_mac {
+        term_rows.push((t("Quick command 1–9"), vec!["⌃ 1…9".to_string()]));
+    }
+    let right: Vec<(&str, Rows)> = vec![
+        (t("Terminal"), term_rows),
         (
             t("Files & view"),
             vec![

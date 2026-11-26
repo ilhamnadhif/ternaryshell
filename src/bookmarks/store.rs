@@ -180,7 +180,20 @@ impl BookmarkStore {
 
     /// Depth of a group (top level = 0).
     pub fn group_depth(&self, id: Uuid) -> usize {
-        self.group_path(Some(id)).matches(" / ").count()
+        let mut depth = 0;
+        let mut seen = HashSet::from([id]);
+        let mut cur = self.group(id).and_then(|g| g.parent);
+        while let Some(p) = cur {
+            if !seen.insert(p) {
+                break;
+            }
+            let Some(parent) = self.group(p) else {
+                break;
+            };
+            depth += 1;
+            cur = parent.parent;
+        }
+        depth
     }
 
     // ----- bookmarks ----------------------------------------------------------------------
@@ -195,7 +208,13 @@ impl BookmarkStore {
 
     pub fn remove_bookmark(&mut self, id: Uuid) -> Option<Bookmark> {
         let idx = self.bookmarks.iter().position(|b| b.id == id)?;
-        Some(self.bookmarks.remove(idx))
+        let removed = self.bookmarks.remove(idx);
+        for b in &mut self.bookmarks {
+            if b.jump == Some(id) {
+                b.jump = None;
+            }
+        }
+        Some(removed)
     }
 
     /// Duplicates a bookmark, placing the copy right after the original. Returns the new id.
@@ -216,9 +235,10 @@ impl BookmarkStore {
         if group.is_some_and(|g| self.group(g).is_none()) {
             return;
         }
-        let Some(mut b) = self.remove_bookmark(id) else {
+        let Some(pos) = self.bookmarks.iter().position(|b| b.id == id) else {
             return;
         };
+        let mut b = self.bookmarks.remove(pos);
         b.group = group;
         let idx = before
             .and_then(|bid| self.bookmarks.iter().position(|x| x.id == bid))
@@ -306,27 +326,48 @@ impl BookmarkStore {
                 g.parent = None;
             }
         }
-        // Break cycles: walk up from each group; if we revisit a node, detach it.
-        for i in 0..self.groups.len() {
-            let mut visited = HashSet::new();
-            let mut cur = self.groups[i].parent;
-            visited.insert(self.groups[i].id);
-            while let Some(p) = cur {
-                if !visited.insert(p) {
-                    self.groups[i].parent = None;
-                    break;
+        // Break cycles in O(G) using 3-color traversal (0 = unvisited, 1 = on stack, 2 = done).
+        let idx_by_id: std::collections::HashMap<Uuid, usize> = self
+            .groups
+            .iter()
+            .enumerate()
+            .map(|(i, g)| (g.id, i))
+            .collect();
+        let mut color = vec![0u8; self.groups.len()];
+        let mut path: Vec<usize> = Vec::new();
+        for start in 0..self.groups.len() {
+            if color[start] != 0 {
+                continue;
+            }
+            path.clear();
+            let mut cur = Some(start);
+            while let Some(idx) = cur {
+                match color[idx] {
+                    2 => break,
+                    1 => {
+                        if let Some(&prev) = path.last() {
+                            self.groups[prev].parent = None;
+                        }
+                        break;
+                    }
+                    _ => {}
                 }
-                cur = self
-                    .groups
-                    .iter()
-                    .find(|g| g.id == p)
-                    .and_then(|g| g.parent);
+                color[idx] = 1;
+                path.push(idx);
+                cur = self.groups[idx]
+                    .parent
+                    .and_then(|p| idx_by_id.get(&p).copied());
+            }
+            for &idx in &path {
+                color[idx] = 2;
             }
         }
         for b in &mut self.bookmarks {
             if b.group.is_some_and(|g| !ids.contains(&g)) {
                 b.group = None;
             }
+            b.start_dir.retain(|c| !c.is_control());
+            b.local_start_dir.retain(|c| !c.is_control());
         }
         // A jump host must be another saved connection, without going round in circles.
         let bookmark_ids: HashSet<Uuid> = self.bookmarks.iter().map(|b| b.id).collect();

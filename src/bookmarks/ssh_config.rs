@@ -139,15 +139,31 @@ fn parse_text(text: &str, blocks: &mut Vec<Block>, depth: usize, budget: &mut Op
                 ..Default::default()
             }),
             "include" if depth < 8 && budget.is_some() => {
-                for arg in args {
+                // Skip Include directives inside unsupported Match blocks.
+                if blocks.last().is_some_and(|b| b.is_match) {
+                    continue;
+                }
+                let enclosing = blocks.last().map(|b| (b.patterns.clone(), b.is_match));
+                let before = blocks.len();
+                'inc: for arg in args {
                     for file in expand_include(&arg) {
                         match budget {
                             Some(n) if *n > 0 => *n -= 1,
-                            _ => return,
+                            _ => break 'inc,
                         }
                         // Included files start in the context of the current block, as in ssh.
                         let _ = read_into(&file, blocks, depth + 1, budget);
                     }
+                }
+                // Restore the enclosing Host block for options that follow Include in this file.
+                if blocks.len() > before
+                    && let Some((patterns, is_match)) = enclosing
+                {
+                    blocks.push(Block {
+                        patterns,
+                        is_match,
+                        options: Vec::new(),
+                    });
                 }
             }
             "include" => {}
@@ -235,6 +251,8 @@ fn resolve(blocks: &[Block]) -> Vec<SshConfigHost> {
                 ..Default::default()
             };
             let mut jump_seen = false;
+            let mut agent_seen = false;
+            let mut identity_seen = false;
             for block in blocks.iter().filter(|b| block_matches(b, &alias)) {
                 for (key, args) in &block.options {
                     let value = &args[0];
@@ -242,12 +260,17 @@ fn resolve(blocks: &[Block]) -> Vec<SshConfigHost> {
                         "hostname" if h.hostname.is_none() => {
                             h.hostname = Some(value.replace("%h", &alias))
                         }
-                        "port" if h.port.is_none() => h.port = value.parse().ok(),
+                        "port" if h.port.is_none() => {
+                            h.port = value.parse::<u16>().ok().filter(|&p| p > 0);
+                        }
                         "user" if h.user.is_none() => h.user = Some(value.clone()),
-                        "identityfile" if h.identity_file.is_none() => {
-                            let home = paths::home_dir();
-                            let v = value.replace("%d", &home.to_string_lossy());
-                            h.identity_file = Some(v);
+                        "identityfile" if !identity_seen => {
+                            identity_seen = true;
+                            if !value.eq_ignore_ascii_case("none") {
+                                let home = paths::home_dir();
+                                let v = value.replace("%d", &home.to_string_lossy());
+                                h.identity_file = Some(v);
+                            }
                         }
                         "proxyjump" if !jump_seen => {
                             jump_seen = true;
@@ -259,12 +282,14 @@ fn resolve(blocks: &[Block]) -> Vec<SshConfigHost> {
                                     .collect();
                             }
                         }
-                        "identityagent" if h.identity_agent.is_none() => {
-                            h.identity_agent = Some(match value.as_str() {
-                                "none" => continue,
-                                "SSH_AUTH_SOCK" => String::new(),
-                                v => v.replace("%d", &paths::home_dir().to_string_lossy()),
-                            });
+                        "identityagent" if !agent_seen => {
+                            agent_seen = true;
+                            if !value.eq_ignore_ascii_case("none") {
+                                h.identity_agent = Some(match value.as_str() {
+                                    "SSH_AUTH_SOCK" => String::new(),
+                                    v => v.replace("%d", &paths::home_dir().to_string_lossy()),
+                                });
+                            }
                         }
                         "localforward" | "remoteforward" | "dynamicforward" => {
                             if let Some(f) = forward(key, args) {
@@ -283,7 +308,8 @@ fn resolve(blocks: &[Block]) -> Vec<SshConfigHost> {
 /// A `LocalForward`/`RemoteForward` (`[bind:]port host:port`) or `DynamicForward`
 /// (`[bind:]port`). Unix socket forwards are not supported (`None`).
 fn forward(key: &str, args: &[String]) -> Option<Forward> {
-    let port_of = |s: &str| -> Option<u16> { s.rsplit(':').next()?.parse().ok() };
+    let port_of =
+        |s: &str| -> Option<u16> { s.rsplit(':').next()?.parse::<u16>().ok().filter(|&p| p > 0) };
     let listen_port = port_of(args.first()?)?;
     if key == "dynamicforward" {
         return Some(Forward {
@@ -296,6 +322,10 @@ fn forward(key: &str, args: &[String]) -> Option<Forward> {
     let target = args.get(1)?;
     let (host, port) = target.rsplit_once(':')?;
     let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.is_empty() {
+        return None;
+    }
+    let target_port = port.parse::<u16>().ok().filter(|&p| p > 0)?;
     Some(Forward {
         kind: if key == "localforward" {
             ForwardKind::Local
@@ -304,7 +334,7 @@ fn forward(key: &str, args: &[String]) -> Option<Forward> {
         },
         listen_port,
         host: host.to_string(),
-        port: port.parse().ok()?,
+        port: target_port,
     })
 }
 

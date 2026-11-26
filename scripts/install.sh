@@ -21,8 +21,8 @@ say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 # HTTPS only, redirects included.
 fetch() { curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fL "$@"; }
-plist() { plutil -extract "$2" raw -o - "$1/Contents/Info.plist" 2>/dev/null || true; }
-team() { codesign -dv "$1" 2>&1 | sed -n 's/^TeamIdentifier=//p' | grep -v '^not set$' || true; }
+plist() { ${SUDO:-} plutil -extract "$2" raw -o - "$1/Contents/Info.plist" 2>/dev/null || true; }
+team() { ${SUDO:-} codesign -dv "$1" 2>&1 | sed -n 's/^TeamIdentifier=//p' | grep -v '^not set$' || true; }
 
 [ "$(uname -s)" = "Darwin" ] || die "TernaryShell is a macOS app."
 case "$TAG" in

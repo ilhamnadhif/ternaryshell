@@ -154,12 +154,34 @@ impl TernaryShellApp {
             ),
             Auth::Agent { .. } => tf("The connection is removed from {}.", &[here]),
         };
+        let mut body = format!(
+            "{goes} {}",
+            t("The server and your keys in `~/.ssh` are not touched.")
+        );
+        let dependents: Vec<String> = self
+            .store
+            .bookmarks
+            .iter()
+            .filter(|other| other.jump == Some(id))
+            .map(|other| other.display_name())
+            .collect();
+        if !dependents.is_empty() {
+            let note = if dependents.len() == 1 {
+                tf(
+                    "{} uses this connection as a jump host and will connect directly instead.",
+                    &[&dependents[0]],
+                )
+            } else {
+                tf(
+                    "{} connections use this as a jump host and will connect directly instead.",
+                    &[&dependents.len().to_string()],
+                )
+            };
+            body = format!("{body} {note}");
+        }
         Some(dialogs::confirm_rows(
             &tf("Delete “{}”?", &[&b.display_name()]),
-            format!(
-                "{goes} {}",
-                t("The server and your keys in `~/.ssh` are not touched.")
-            ),
+            body,
             Vec::new(),
             t("Delete"),
             ConfirmAction::DeleteBookmark(id),
@@ -291,6 +313,12 @@ impl TernaryShellApp {
         let transfers = tab.running_transfers();
         if transfers > 0 {
             message = format!("{message} {}.", self.transfers_clause(tab, transfers));
+        }
+        if let Some(file) = tab.unsaved_file() {
+            message = format!(
+                "{message} {}.",
+                tf("{} has unsaved changes that will be lost", &[&file])
+            );
         }
         dialogs::confirm_rows(
             &tf("Reconnect {}?", &[&tab.title()]),

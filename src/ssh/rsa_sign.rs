@@ -28,7 +28,7 @@ impl RingRsa {
     /// `None` when the key is not RSA, or one `ring` doesn't take (under 2048 bits).
     pub fn new(key: &PrivateKey) -> Option<Self> {
         let rsa = key.key_data().rsa()?;
-        let private = rsa::RsaPrivateKey::try_from(rsa).ok()?;
+        let private = rsa::PrivateKey::try_from(rsa).ok()?;
         let der = private.to_pkcs1_der().ok()?;
         let key = ring::signature::RsaKeyPair::from_der(der.as_bytes()).ok()?;
         Some(Self { key })

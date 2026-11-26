@@ -210,8 +210,8 @@
       const md = k === "d" ? "Today 09:02" : name === S.uploaded ? "Today 09:16" : "Today 08:41";
       return `<div class="fr${sel}${nw}" data-side="${side}" data-name="${esc(name)}">${ic}<span class="nm">${esc(name)}${extra ? `<em>${esc(extra)}</em>` : ""}</span><span class="sz">${size}</span><span class="md">${md}</span>${side === "r" ? `<span class="pm">${perm}</span>` : ""}</div>`;
     };
-    const remote = REMOTE.slice();
-    if (S.uploaded) remote.push(["zip", S.uploaded, S.uploadedSize || "212 MB", "rw-r--r--"]);
+    const remote = REMOTE.filter((r) => !S.uploaded || r[1] !== S.uploaded);
+    if (S.uploaded) remote.push([S.uploadedKind || "f", S.uploaded, S.uploadedSize || "212 MB", "rw-r--r--"]);
     remote.sort((a, b) => ((a[0] === "d" || a[0] === "lnk") === (b[0] === "d" || b[0] === "lnk") ? a[1].localeCompare(b[1]) : (a[0] === "d" || a[0] === "lnk") ? -1 : 1));
     const tools = `<span class="grp"><i>${icon("arrow-up")}</i><i>${icon("house")}</i><i>${icon("refresh")}</i></span><span class="grp"><i>${icon("folder-plus")}</i><i>${icon("eye-slash")}</i></span>`;
     const xfer = S.xfer ? `<div class="xfer"><h5>Uploading 1 file<span>Cancel all</span></h5><div class="meta">${Math.floor(S.xfer.p)}% · ${S.xfer.done} of ${S.xfer.size} · ${S.xfer.speed} · about ${S.xfer.left} s left</div><div class="bar" style="--p:${S.xfer.p}"><i></i></div><div class="row"><span class="ic">${icon("upload")}</span>${esc(S.xfer.name)}<span class="m">to ${esc(x.cwd || "~")}</span></div></div>` : "";
@@ -400,11 +400,12 @@
     setTimeout(() => { if (S.toast === mine) { S.toast = null; renderOver(); } }, 3600);
   }
 
-  function upload(name, sizeLabel) {
+  function upload(name, sizeLabel, kind) {
     if (S.xfer) return Promise.resolve();
     const t = tab();
+    const localRow = LOCAL.find((x) => x[1] === name);
     const total = parseFloat(sizeLabel) || 0.6;
-    const unit = /MB/.test(sizeLabel) ? "MB" : "KB";
+    const unit = /\bMB\b/.test(sizeLabel) ? "MB" : /\bKB\b/.test(sizeLabel) ? "KB" : "B";
     S.xfer = { name, size: sizeLabel, p: 0, done: `0 ${unit}`, speed: "84 MB/s", left: 3 };
     renderTabs(); renderCanvas();
     const dur = reduce ? 300 : unit === "MB" ? 2600 : 700;
@@ -414,12 +415,13 @@
         if (!S.xfer) return ok();
         const p = Math.min(100, ((now() - start) / dur) * 100);
         S.xfer.p = p;
-        S.xfer.done = `${(total * p / 100).toFixed(unit === "MB" ? 0 : 1)} ${unit}`;
+        const decimals = unit === "KB" ? 1 : 0;
+        S.xfer.done = `${(total * p / 100).toFixed(decimals)} ${unit}`;
         S.xfer.left = Math.max(1, Math.ceil((dur - (now() - start)) / 1000));
         if (tab() === t) { renderTabs(); patchXfer(); }
         if (p >= 100) {
           S.xfer = null;
-          S.uploaded = name; S.uploadedSize = sizeLabel;
+          S.uploaded = name; S.uploadedSize = sizeLabel; S.uploadedKind = kind || (localRow && localRow[0]) || "f";
           renderTabs(); if (tab() === t) renderCanvas();
           toast("Uploaded 1 file.", `To ${(HOSTS[t.host] && HOSTS[t.host].cwd) || "~"} on ${t.title}`);
           return ok();
@@ -675,7 +677,7 @@
     }
   });
 
-  const isPal = (e) => (MAC ? e.metaKey && !e.shiftKey : e.ctrlKey) && e.key.toLowerCase() === "k";
+  const isPal = (e) => (MAC ? e.metaKey && !e.shiftKey : e.ctrlKey && e.shiftKey) && e.key.toLowerCase() === "k";
   document.addEventListener("keydown", (e) => {
     const inDemo = document.activeElement === root;
     const typingElsewhere = /^(INPUT|TEXTAREA|SELECT)$/.test((document.activeElement || {}).tagName || "");

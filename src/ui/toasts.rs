@@ -4,6 +4,7 @@
 //! bar shows the time left, and hovering pauses it), errors stay until closed.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Align2, CornerRadius, Id, Rect, RichText, Sense, Ui, pos2, vec2};
@@ -52,9 +53,12 @@ struct Button {
     quiet: bool,
 }
 
+static NEXT_TOAST_ID: AtomicU64 = AtomicU64::new(1);
+
 /// One toast; build it with [`Toast::new`] and give it to [`Toasts::add`].
 #[derive(Clone, Debug)]
 pub struct Toast {
+    id: u64,
     kind: Kind,
     title: String,
     detail: Option<String>,
@@ -69,6 +73,7 @@ pub struct Toast {
 impl Toast {
     pub fn new(kind: Kind, title: impl Into<String>) -> Self {
         Self {
+            id: NEXT_TOAST_ID.fetch_add(1, Ordering::Relaxed),
             kind,
             title: title.into(),
             detail: None,
@@ -333,7 +338,7 @@ fn toast_ui(ui: &mut Ui, toast: &Toast, now: Instant) -> (egui::Response, Option
         fill.set_width(bar.width() * left.clamp(0.0, 1.0));
         painter.rect_filled(fill, CornerRadius::same(1), p.text_ghost);
     }
-    let resp = ui.interact(rect, ui.id().with(("toast", toast.at)), Sense::hover());
+    let resp = ui.interact(rect, ui.id().with(("toast", toast.id)), Sense::hover());
     (resp, clicked, closed)
 }
 

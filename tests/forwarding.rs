@@ -197,10 +197,20 @@ fn local_remote_and_socks_forwards() {
     echo_through(TcpStream::connect(("127.0.0.1", remote)).unwrap());
 
     // A port already in use is reported, and the others keep working.
-    let error = wait_for(10, "error", || conn.shared.lock().forwards[3].error.clone());
+    let error = wait_for(10, "error", || {
+        conn.shared.lock().forwards.get(3)?.error.clone()
+    });
     assert!(error.contains(&taken_port.to_string()), "{error}");
     assert!(!conn.shared.lock().forwards[3].listening);
     drop(taken);
+
+    // Retrying once the port is free binds and forwards traffic.
+    conn.retry_forward(3);
+    wait_for(10, "retried forward listening", || {
+        conn.shared.lock().forwards.get(3)?.listening.then_some(())
+    });
+    assert!(conn.shared.lock().forwards[3].error.is_none());
+    echo_through(TcpStream::connect(("127.0.0.1", taken_port)).unwrap());
 
     // The forwards close with the connection.
     conn.disconnect();
@@ -212,9 +222,33 @@ fn local_remote_and_socks_forwards() {
     });
 }
 
+#[test]
+fn jump_host_remote_forwards_are_not_started_on_jump() {
+    let rt = runtime();
+    let server = TestServer::start();
+    let echo = echo_server();
+    let jump_remote = free_port();
+    let mut jump = bookmark(&server, "bastion");
+    jump.forwards = vec![Forward {
+        kind: ForwardKind::Remote,
+        listen_port: jump_remote,
+        host: "127.0.0.1".into(),
+        port: echo,
+    }];
+    let conn = connect(&rt, &server, bookmark(&server, "target"), vec![jump]);
+    assert!(conn.state().is_connected());
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        TcpStream::connect(("127.0.0.1", jump_remote)).is_err(),
+        "remote forward configured on jump host must not bind during jump-only connection"
+    );
+    conn.disconnect();
+}
+
 struct Agent {
     child: Child,
     socket: std::path::PathBuf,
+    _dir: tempfile::TempDir,
 }
 
 impl Drop for Agent {
@@ -224,8 +258,13 @@ impl Drop for Agent {
     }
 }
 
-fn start_agent(dir: &std::path::Path, key: &std::path::Path) -> Agent {
-    let socket = dir.join("agent.sock");
+fn start_agent(key: &std::path::Path) -> Agent {
+    // Keep socket path short (<104 bytes on macOS sun_path).
+    let dir = tempfile::Builder::new()
+        .prefix("ts-ag-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let socket = dir.path().join("a.sock");
     let child = Command::new("ssh-agent")
         .args(["-D", "-a"])
         .arg(&socket)
@@ -233,7 +272,11 @@ fn start_agent(dir: &std::path::Path, key: &std::path::Path) -> Agent {
         .stderr(Stdio::null())
         .spawn()
         .expect("ssh-agent");
-    let agent = Agent { child, socket };
+    let agent = Agent {
+        child,
+        socket,
+        _dir: dir,
+    };
     wait_for(10, "agent socket", || agent.socket.exists().then_some(()));
     let ok = Command::new("ssh-add")
         .arg(key)
@@ -251,7 +294,7 @@ fn start_agent(dir: &std::path::Path, key: &std::path::Path) -> Agent {
 fn logs_in_with_an_agent() {
     let rt = runtime();
     let server = TestServer::start();
-    let agent = start_agent(server.dir.path(), &server.key);
+    let agent = start_agent(&server.key);
     let mut target = bookmark(&server, "agent");
     target.auth = Auth::Agent {
         socket: agent.socket.display().to_string(),
@@ -260,8 +303,7 @@ fn logs_in_with_an_agent() {
     assert!(conn.state().is_connected());
 
     // An RSA key in the agent, signed with SHA-2 by the agent.
-    let rsa_agent_dir = tempfile::tempdir().unwrap();
-    let rsa_agent = start_agent(rsa_agent_dir.path(), &server.rsa_key);
+    let rsa_agent = start_agent(&server.rsa_key);
     let mut target = bookmark(&server, "agent-rsa");
     target.auth = Auth::Agent {
         socket: rsa_agent.socket.display().to_string(),

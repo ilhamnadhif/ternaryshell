@@ -199,6 +199,10 @@ pub struct SftpPanel {
     remote_seq: u64,
     pub transfers: Transfers,
     dialog: Option<Dialog>,
+    /// Dialogs triggered by background completions (Overwrite, Sudo) wait here until the panel is
+    /// visible, so a hidden Files panel never freezes the terminal or FileEditor with an invisible
+    /// modal flag.
+    pending_dialogs: std::collections::VecDeque<Dialog>,
     focus_dialog: bool,
     /// Finder drops waiting for the session (or for an open dialog to close).
     pending_uploads: Vec<PathBuf>,
@@ -335,6 +339,7 @@ impl SftpPanel {
             remote_seq: 0,
             transfers: Transfers::default(),
             dialog: None,
+            pending_dialogs: std::collections::VecDeque::new(),
             focus_dialog: false,
             pending_uploads: Vec::new(),
             pending_remote: None,
@@ -408,21 +413,24 @@ impl SftpPanel {
                     remote: true,
                     text: "/var/log/".into(),
                     pick: None,
-                })
+                });
+                self.focus_dialog = true;
             }
             "sudo" => {
                 self.dialog = Some(Dialog::Sudo {
                     password: String::new(),
                     note: None,
                     show: false,
-                })
+                });
+                self.focus_dialog = true;
             }
             "sudo-wrong" => {
                 self.dialog = Some(Dialog::Sudo {
                     password: String::new(),
                     note: Some(t("Wrong password, try again.").into()),
                     show: false,
-                })
+                });
+                self.focus_dialog = true;
             }
             "activity" => self.show_activity = true,
             "hover" => {
@@ -467,6 +475,7 @@ impl SftpPanel {
                         }
                     }
                 });
+                self.focus_dialog = true;
             }
             "replace" => {
                 let mut names: Vec<String> = self.local.selected.iter().cloned().collect();
@@ -513,6 +522,11 @@ impl SftpPanel {
 
     pub fn local_cwd(&self) -> &str {
         &self.local.cwd
+    }
+
+    /// Whether a modal SFTP dialog (blocking the whole window) is currently open.
+    pub fn modal_dialog_open(&self) -> bool {
+        self.dialog.is_some() || self.editor.as_ref().is_some_and(FileEditor::modal_open)
     }
 
     pub fn dialog_open(&self) -> bool {
@@ -639,20 +653,32 @@ impl SftpPanel {
         sources: Vec<String>,
         dest: String,
     ) {
-        let conflicts: Vec<String> = sources
+        let mut safe_sources = Vec::with_capacity(sources.len());
+        for s in sources {
+            let name = entry::remote_name(&s);
+            if remote::is_safe_entry_name(name) {
+                safe_sources.push(s);
+            } else {
+                self.error(tf("Skipped unsafe remote file name: {}", &[name]));
+            }
+        }
+        if safe_sources.is_empty() {
+            return;
+        }
+        let conflicts: Vec<String> = safe_sources
             .iter()
             .map(|s| entry::remote_name(s).to_string())
-            .filter(|n| Path::new(&dest).join(n).exists())
+            .filter(|n| std::fs::symlink_metadata(Path::new(&dest).join(n)).is_ok())
             .collect();
         if conflicts.is_empty() {
-            for src in sources {
+            for src in safe_sources {
                 self.start_download(rt, ctx, src, Path::new(&dest));
             }
         } else {
-            let items = self.replace_items(false, &sources, &dest, &conflicts, None);
+            let items = self.replace_items(false, &safe_sources, &dest, &conflicts, None);
             self.dialog = Some(Dialog::Overwrite {
                 upload: false,
-                sources,
+                sources: safe_sources,
                 dest,
                 conflicts,
                 items,
@@ -661,7 +687,7 @@ impl SftpPanel {
     }
 
     fn local_cd(&mut self, path: &str) {
-        let path = paths::expand_tilde(path.trim());
+        let path = normalize_local_path(&paths::expand_tilde(path.trim()));
         match entry::list_local(&path) {
             Ok(mut entries) => {
                 entry::sort_entries(&mut entries, self.local.sort, self.local.descending);
@@ -731,25 +757,16 @@ impl SftpPanel {
             Some(login) => Reopen::ToRoot(self.opener.open_root(login), dir),
             None => Reopen::ToUser(self.opener.open(), dir),
         });
-        self.remote.loading = true;
     }
 
-    /// Asks for the sudo password (`note`: why it is asked). With another dialog open, says so
-    /// instead of replacing it.
+    /// Asks for the sudo password (`note`: why it is asked). Queued so it never opens
+    /// invisibly behind a hidden panel or an open editor/dialog.
     fn ask_sudo_password(&mut self, note: Option<&str>) {
-        if self.dialog_open() {
-            self.error(tf(
-                "Could not switch to root: {}",
-                &[note.unwrap_or(t("sudo needs a password."))],
-            ));
-            return;
-        }
-        self.dialog = Some(Dialog::Sudo {
+        self.pending_dialogs.push_back(Dialog::Sudo {
             password: String::new(),
             note: note.map(str::to_string),
             show: false,
         });
-        self.focus_dialog = true;
     }
 
     fn run_op(
@@ -795,6 +812,7 @@ impl SftpPanel {
         });
         match started {
             Ok(_) => self.show_activity = true,
+            Err(err) if err.starts_with("unsafe file name:") => self.error(err),
             Err(dest) => self.error(tf("{} is already being transferred.", &[&dest])),
         }
     }
@@ -820,6 +838,7 @@ impl SftpPanel {
             });
         match started {
             Ok(_) => self.show_activity = true,
+            Err(err) if err.starts_with("unsafe file name:") => self.error(err),
             Err(dest) => self.error(tf("{} is already being transferred.", &[&dest])),
         }
     }
@@ -927,16 +946,21 @@ impl SftpPanel {
             },
         };
         if let Some((to_root, result)) = reopened {
-            let dir = match self.reopening.take() {
+            let saved_dir = match self.reopening.take() {
                 Some(Reopen::ToRoot(_, dir) | Reopen::ToUser(_, dir)) => dir,
                 None => String::new(),
             };
-            self.remote.loading = false;
             match result {
                 Ok(sftp) => {
                     self.session = Session::Ready(Arc::new(sftp));
                     self.is_root = to_root;
-                    let dir = if dir.is_empty() { ".".to_string() } else { dir };
+                    let dir = if !self.remote.cwd.is_empty() {
+                        self.remote.cwd.clone()
+                    } else if !saved_dir.is_empty() {
+                        saved_dir
+                    } else {
+                        ".".to_string()
+                    };
                     self.remote_cd(rt, ctx, dir);
                 }
                 Err(RootError::NeedsPassword) => self.ask_sudo_password(None),
@@ -970,6 +994,7 @@ impl SftpPanel {
                             );
                             if path != self.remote.cwd {
                                 // A menu opened on the old listing must not act on the new one.
+                                self.menu_target = None;
                                 egui::Popup::close_all(ctx);
                             }
                             self.remote.set_listing(path, entries);
@@ -1000,33 +1025,42 @@ impl SftpPanel {
                     sources,
                     dest,
                     result,
-                } => {
-                    let existing = result.unwrap_or_default();
-                    let conflicts: Vec<String> = sources
-                        .iter()
-                        .filter_map(|s| {
-                            Path::new(s)
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                        })
-                        .filter(|n| existing.iter().any(|e| &e.name == n))
-                        .collect();
-                    if conflicts.is_empty() || self.dialog.is_some() {
-                        for src in sources {
-                            self.start_upload(rt, ctx, PathBuf::from(src), &dest);
-                        }
-                    } else {
-                        let items =
-                            self.replace_items(true, &sources, &dest, &conflicts, Some(&existing));
-                        self.dialog = Some(Dialog::Overwrite {
-                            upload: true,
-                            sources,
-                            dest,
-                            conflicts,
-                            items,
-                        });
+                } => match result {
+                    Err(e) => {
+                        self.error(tf("Could not check {}: {}", &[&dest, &e]));
                     }
-                }
+                    Ok(existing) => {
+                        let conflicts: Vec<String> = sources
+                            .iter()
+                            .filter_map(|s| {
+                                Path::new(s)
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                            })
+                            .filter(|n| existing.iter().any(|e| &e.name == n))
+                            .collect();
+                        if conflicts.is_empty() {
+                            for src in sources {
+                                self.start_upload(rt, ctx, PathBuf::from(src), &dest);
+                            }
+                        } else {
+                            let items = self.replace_items(
+                                true,
+                                &sources,
+                                &dest,
+                                &conflicts,
+                                Some(&existing),
+                            );
+                            self.pending_dialogs.push_back(Dialog::Overwrite {
+                                upload: true,
+                                sources,
+                                dest,
+                                conflicts,
+                                items,
+                            });
+                        }
+                    }
+                },
                 Event::OpDone {
                     result,
                     refresh_remote,
@@ -1039,12 +1073,10 @@ impl SftpPanel {
                 }
             }
         }
-        // One refresh per frame however many operations finished. A navigation in flight
-        // already brings a fresh listing, so it is not interrupted.
-        if std::mem::take(&mut self.refresh_remote_pending)
-            && !self.remote.loading
-            && !self.remote.cwd.is_empty()
-        {
+        // One refresh per frame however many operations finished. Keep `refresh_remote_pending`
+        // set while a navigation is still in flight so the refresh runs once it finishes.
+        if self.refresh_remote_pending && !self.remote.loading && !self.remote.cwd.is_empty() {
+            self.refresh_remote_pending = false;
             let cwd = self.remote.cwd.clone();
             self.remote_cd(rt, ctx, cwd);
         }
@@ -1178,6 +1210,16 @@ impl SftpPanel {
         if self.show_activity && !self.transfers.items.is_empty() {
             self.activity_popup(&ctx, rt, panel);
         }
+        if !egui::Popup::is_any_open(&ctx) {
+            self.menu_target = None;
+        }
+        if self.dialog.is_none()
+            && self.editor.is_none()
+            && let Some(d) = self.pending_dialogs.pop_front()
+        {
+            self.dialog = Some(d);
+            self.focus_dialog = true;
+        }
         self.dialog_ui(&ctx, rt);
         output
     }
@@ -1189,6 +1231,7 @@ impl SftpPanel {
         ui: &mut Ui,
         rect: egui::Rect,
         rt: &tokio::runtime::Handle,
+        overlay_open: bool,
     ) -> bool {
         let ctx = ui.ctx().clone();
         self.poll(rt, &ctx);
@@ -1196,7 +1239,7 @@ impl SftpPanel {
         let Some(editor) = self.editor.as_mut() else {
             return true;
         };
-        let out = editor.show_in(ui, rect, rt, sftp);
+        let out = editor.show_in(ui, rect, rt, sftp, overlay_open);
         let path = editor.path.clone();
         match out {
             EditorOutput::Close { saved } => {
@@ -2212,25 +2255,30 @@ impl SftpPanel {
                                     mods.1,
                                 ));
                             }
-                            if resp.secondary_clicked() {
-                                actions.push(SideAction::MenuOpened(MenuTarget {
-                                    remote: is_remote,
-                                    dir: side.cwd.clone(),
-                                    names: names_here(),
-                                    entry: e.clone(),
-                                }));
+                            let fresh_target = resp.secondary_clicked().then(|| MenuTarget {
+                                remote: is_remote,
+                                dir: side.cwd.clone(),
+                                names: names_here(),
+                                entry: e.clone(),
+                            });
+                            if let Some(t) = &fresh_target {
+                                actions.push(SideAction::MenuOpened(t.clone()));
+                                ui.ctx().request_repaint();
                             }
                             resp.context_menu(|ui| {
                                 kit::menu_body(ui);
                                 ui.set_min_width(226.0);
                                 // Act on what was right-clicked, even if the listing changed
                                 // since.
-                                let target = menu_target.clone().unwrap_or_else(|| MenuTarget {
-                                    remote: is_remote,
-                                    dir: side.cwd.clone(),
-                                    names: names_here(),
-                                    entry: e.clone(),
-                                });
+                                let target = fresh_target
+                                    .clone()
+                                    .or_else(|| menu_target.clone())
+                                    .unwrap_or_else(|| MenuTarget {
+                                        remote: is_remote,
+                                        dir: side.cwd.clone(),
+                                        names: names_here(),
+                                        entry: e.clone(),
+                                    });
                                 file_menu(ui, &target, is_remote, &mut actions);
                             });
                         }
@@ -2349,8 +2397,9 @@ impl SftpPanel {
                 ui.memory_mut(|m| m.surrender_focus(list_id));
             }
         }
-        // ⌘A over the list (or in it) selects everything shown.
-        if (over_list || list_focused)
+        // ⌘A when the list has focus selects everything shown.
+        if list_focused
+            && keys_enabled
             && !side.editing
             && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::A))
         {
@@ -2853,14 +2902,25 @@ impl SftpPanel {
                 style::progress_ring(&painter, lead, 7.0, s.fraction(), dark);
                 (summary_title(s), summary_meta(s))
             }
+            (None, _, Some((msg, true))) => {
+                icons::paint_badge_circle(&painter, lead, 16.0, "!", p.err, p.canvas);
+                (msg.clone(), String::new())
+            }
             (None, Some(_), _) if has_items => {
                 let o = self.outcome();
-                let (glyph, color) = if o.failed > 0 {
-                    ("!", p.err)
+                if o.failed > 0 {
+                    icons::paint_badge_circle(&painter, lead, 16.0, "!", p.err, p.canvas);
+                } else if o.done == 0 && o.cancelled > 0 {
+                    painter.text(
+                        lead,
+                        Align2::CENTER_CENTER,
+                        icons::INFO,
+                        style::icon_font(15.0),
+                        p.text_muted,
+                    );
                 } else {
-                    (icons::CHECK, p.ok)
-                };
-                icons::paint_badge_circle(&painter, lead, 16.0, glyph, color, p.canvas);
+                    icons::paint_badge_circle(&painter, lead, 16.0, icons::CHECK, p.ok, p.canvas);
+                }
                 (o.title(), self.finished_meta())
             }
             (_, _, Some((msg, err))) => {
@@ -3324,7 +3384,7 @@ impl SftpPanel {
         }
         // "Go to folder…" suggestions follow the folder typed so far.
         if let Some(Dialog::GoTo { remote, text, .. }) = &self.dialog {
-            let (remote, parent) = (*remote, goto_parent(text));
+            let (remote, parent) = (*remote, goto_parent(text, *remote));
             if self.goto_dirs.0 != parent {
                 self.goto_dirs = (parent.clone(), Vec::new());
                 if remote {
@@ -3382,14 +3442,15 @@ impl SftpPanel {
         // Whether a name is taken in a folder (renaming onto another file, a new folder).
         let taken = |remote: bool, dir: &str, from: Option<&str>, name: &str| -> bool {
             let name = name.trim();
-            if name.is_empty() || Some(name) == from {
+            if name.is_empty() || Some(name) == from || !valid_entry_name(name, remote) {
                 return false;
             }
             if remote {
                 self.remote.cwd == dir && self.remote.entries.iter().any(|e| e.name == name)
             } else {
                 let to = Path::new(dir).join(name);
-                to.exists() && !from.is_some_and(|f| same_local_file(&Path::new(dir).join(f), &to))
+                std::fs::symlink_metadata(&to).is_ok()
+                    && !from.is_some_and(|f| same_local_file(&Path::new(dir).join(f), &to))
             }
         };
         let modal = style::modal(ctx, egui::Id::new("sftp-dialog")).show(ctx, |ui| {
@@ -3404,22 +3465,29 @@ impl SftpPanel {
                     ui.set_width(380.0);
                     let sub = tf("in {} on {}", &[&short_dir(dir, *remote), &where_(*remote)]);
                     dialog_head(ui, t("New folder"), Some(&sub));
-                    let bad = taken(*remote, dir, None, name);
-                    ok_enabled = !name.trim().is_empty() && !bad;
+                    let invalid = !name.trim().is_empty() && !valid_entry_name(name.trim(), *remote);
+                    let bad = !invalid && taken(*remote, dir, None, name);
+                    ok_enabled = !name.trim().is_empty() && !invalid && !bad;
                     dialog_body(ui, |ui| {
                         let r = ui.add(
                             style::input(name)
                                 .hint_text(t("Folder name"))
-                                .error(bad),
+                                .error(invalid || bad),
                         );
                         if focus {
                             r.request_focus();
                         }
-                        if bad {
+                        if invalid {
+                            error_line(ui, t("Invalid folder name."));
+                        } else if bad {
                             error_line(ui, &tf("{} already exists.", &[name.trim()]));
                         }
-                        if enter(ui, &r) && ok_enabled {
-                            confirmed = true;
+                        if enter(ui, &r) {
+                            if ok_enabled {
+                                confirmed = true;
+                            } else {
+                                r.request_focus();
+                            }
                         }
                     });
                 }
@@ -3427,11 +3495,12 @@ impl SftpPanel {
                     ui.set_width(380.0);
                     let sub = tf("in {} on {}", &[&short_dir(dir, *remote), &where_(*remote)]);
                     dialog_head(ui, t("Rename"), Some(&sub));
-                    let bad = taken(*remote, dir, Some(from), to);
-                    ok_enabled = !to.trim().is_empty() && !bad;
+                    let invalid = !to.trim().is_empty() && !valid_entry_name(to.trim(), *remote);
+                    let bad = !invalid && taken(*remote, dir, Some(from), to);
+                    ok_enabled = !to.trim().is_empty() && to.trim() != from && !invalid && !bad;
                     dialog_body(ui, |ui| {
                         let id = egui::Id::new(("sftp-rename", dir.as_str(), from.as_str()));
-                        let r = ui.add(style::input(to).id(id).error(bad));
+                        let r = ui.add(style::input(to).id(id).error(invalid || bad));
                         if focus {
                             r.request_focus();
                             // The name without its extension is selected, so typing keeps it.
@@ -3444,14 +3513,20 @@ impl SftpPanel {
                                 state.store(ui.ctx(), id);
                             }
                         }
-                        if bad {
+                        if invalid {
+                            error_line(ui, t("Invalid file name."));
+                        } else if bad {
                             error_line(ui, &tf("{} already exists.", &[to.trim()]));
                         } else {
                             ui.add_space(8.0);
                             style::hint(ui, t("The name is selected without its extension."));
                         }
-                        if enter(ui, &r) && ok_enabled {
-                            confirmed = true;
+                        if enter(ui, &r) {
+                            if ok_enabled {
+                                confirmed = true;
+                            } else {
+                                r.request_focus();
+                            }
                         }
                     });
                 }
@@ -3513,8 +3588,15 @@ impl SftpPanel {
                                 p.text_muted,
                             );
                             let r = ui.add(style::input(mode).desired_width(84.0).mono().error(bad));
-                            if enter(ui, &r) && !bad {
-                                confirmed = true;
+                            if focus {
+                                r.request_focus();
+                            }
+                            if enter(ui, &r) {
+                                if !bad {
+                                    confirmed = true;
+                                } else {
+                                    r.request_focus();
+                                }
                             }
                             ui.label(
                                 RichText::new(
@@ -3599,8 +3681,12 @@ impl SftpPanel {
                         if focus {
                             r.request_focus();
                         }
-                        if enter(ui, &r) && !password.is_empty() {
-                            confirmed = true;
+                        if enter(ui, &r) {
+                            if !password.is_empty() {
+                                confirmed = true;
+                            } else {
+                                r.request_focus();
+                            }
                         }
                         if let Some(n) = note.as_deref().filter(|_| password.is_empty()) {
                             error_line(ui, n);
@@ -3628,7 +3714,7 @@ impl SftpPanel {
                     dialog_head(ui, t("Go to folder…"),
                         Some(&sub),
                     );
-                    let parent = goto_parent(text);
+                    let parent = goto_parent(text, *remote);
                     let prefix = text[parent.len()..].to_lowercase();
                     let matches: Vec<String> = goto_dirs
                         .iter()
@@ -3639,9 +3725,11 @@ impl SftpPanel {
                         .take(6)
                         .map(|n| format!("{parent}{n}"))
                         .collect();
-                    if matches.is_empty() || prefix.is_empty() {
+                    if matches.is_empty() {
                         *pick = None;
-                    } else if pick.is_none_or(|i| i >= matches.len()) {
+                    } else if pick.is_some_and(|i| i >= matches.len()) {
+                        *pick = Some(matches.len() - 1);
+                    } else if !prefix.is_empty() && pick.is_none() {
                         *pick = Some(0);
                     }
                     let (down, up) = ui.input_mut(|i| {
@@ -3661,6 +3749,9 @@ impl SftpPanel {
                     dialog_body(ui, |ui| {
                         let id = egui::Id::new("sftp-goto");
                         let r = ui.add(style::input(text).id(id).mono());
+                        if r.changed() {
+                            *pick = None;
+                        }
                         if focus {
                             r.request_focus();
                             if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), id) {
@@ -3670,9 +3761,9 @@ impl SftpPanel {
                             }
                         }
                         if enter(ui, &r) {
-                            goto_open = Some(match pick {
-                                Some(i) => matches[*i].clone(),
-                                None => text.clone(),
+                            goto_open = Some(match *pick {
+                                Some(i) if i < matches.len() => matches[i].clone(),
+                                _ => text.clone(),
                             });
                         }
                         if !matches.is_empty() {
@@ -3724,6 +3815,8 @@ impl SftpPanel {
                             }
                         })
                         .inner;
+                    #[cfg(debug_assertions)]
+                    crate::devtest::record("sftp-dialog-ok", ok.rect);
                     if ok.clicked() {
                         match &goto_text {
                             Some(text) => goto_open = Some(text.clone()),
@@ -3790,7 +3883,7 @@ impl SftpPanel {
                 remote: true,
                 dir,
                 name,
-            } if !name.trim().is_empty() => {
+            } if valid_entry_name(name.trim(), true) => {
                 let path = remote_join(&dir, name.trim());
                 self.run_op(rt, ctx, move |s| {
                     Box::pin(async move { remote::mkdir(&s, &path).await })
@@ -3800,7 +3893,7 @@ impl SftpPanel {
                 remote: false,
                 dir,
                 name,
-            } if !name.trim().is_empty() => {
+            } if valid_entry_name(name.trim(), false) => {
                 let path = Path::new(&dir).join(name.trim());
                 if let Err(e) = std::fs::create_dir(&path) {
                     self.error(format!("{}: {e}", path.display()));
@@ -3813,7 +3906,7 @@ impl SftpPanel {
                 dir,
                 from,
                 to,
-            } if !to.trim().is_empty() && to != from => {
+            } if valid_entry_name(to.trim(), true) && to.trim() != from => {
                 let a = remote_join(&dir, &from);
                 let b = remote_join(&dir, to.trim());
                 self.run_op(rt, ctx, move |s| {
@@ -3825,12 +3918,12 @@ impl SftpPanel {
                 dir,
                 from,
                 to,
-            } if !to.trim().is_empty() && to != from => {
+            } if valid_entry_name(to.trim(), false) && to.trim() != from => {
                 let a = Path::new(&dir).join(&from);
                 let b = Path::new(&dir).join(to.trim());
                 // On a case-insensitive disk "readme" → "README" is the same file: allowed.
                 let same_file = same_local_file(&a, &b);
-                if b.exists() && !same_file {
+                if std::fs::symlink_metadata(&b).is_ok() && !same_file {
                     self.error(tf("{} already exists.", &[&b.display().to_string()]));
                 } else if let Err(e) = std::fs::rename(&a, &b) {
                     self.error(format!("{}: {e}", a.display()));
@@ -3863,10 +3956,23 @@ impl SftpPanel {
             } => {
                 for n in names {
                     let p = Path::new(&dir).join(&n);
-                    let r = if p.is_dir() && !p.is_symlink() {
-                        std::fs::remove_dir_all(&p)
-                    } else {
-                        std::fs::remove_file(&p)
+                    let r = match std::fs::symlink_metadata(&p) {
+                        Ok(m) if m.file_type().is_symlink() => {
+                            #[cfg(windows)]
+                            {
+                                if p.is_dir() {
+                                    std::fs::remove_dir(&p)
+                                } else {
+                                    std::fs::remove_file(&p)
+                                }
+                            }
+                            #[cfg(not(windows))]
+                            {
+                                std::fs::remove_file(&p)
+                            }
+                        }
+                        Ok(m) if m.is_dir() => std::fs::remove_dir_all(&p),
+                        _ => std::fs::remove_file(&p),
                     };
                     if let Err(e) = r {
                         self.error(format!("{}: {e}", p.display()));
@@ -3938,6 +4044,9 @@ struct Outcome {
 impl Outcome {
     /// "Uploaded 2 files." or, with failures, "Uploaded 1 file. 1 transfer failed."
     fn title(&self) -> String {
+        if self.done == 0 && self.failed == 0 && self.cancelled > 0 {
+            return t("Cancelled").to_string();
+        }
         done_text(
             self.uploads,
             self.downloads,
@@ -4465,10 +4574,48 @@ fn suggestion_list(ui: &mut Ui, matches: &[String], pick: Option<usize>) -> Opti
 }
 
 /// The folder part of a typed path, with its trailing slash ("/var/log/" of "/var/log/ng").
-fn goto_parent(text: &str) -> String {
-    match text.rfind('/') {
+fn goto_parent(text: &str, remote: bool) -> String {
+    let pos = if remote {
+        text.rfind('/')
+    } else {
+        text.rfind(['/', '\\'])
+    };
+    match pos {
         Some(i) => text[..=i].to_string(),
         None => String::new(),
+    }
+}
+
+/// Whether `name` is a single safe directory/file entry name (no path separators or traversal).
+fn valid_entry_name(name: &str, remote: bool) -> bool {
+    if name.is_empty() || name == "." || name == ".." || name.contains('\0') {
+        return false;
+    }
+    if remote {
+        !name.contains('/')
+    } else {
+        !name.contains('/') && !name.contains('\\') && !(cfg!(windows) && name.contains(':'))
+    }
+}
+
+/// Lexically resolves `.` and `..` components in a local path without touching the filesystem.
+fn normalize_local_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    out.push(comp.as_os_str());
+                }
+            }
+            c => out.push(c.as_os_str()),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        path.to_path_buf()
+    } else {
+        out
     }
 }
 
@@ -4555,14 +4702,34 @@ fn crumb_segments(cwd: &str, remote: bool) -> Vec<(String, String)> {
     } else {
         let mut acc = PathBuf::new();
         for comp in Path::new(cwd).components() {
-            acc.push(comp.as_os_str());
-            let name = comp
-                .as_os_str()
-                .to_string_lossy()
-                .trim_end_matches(['\\', '/'])
-                .to_string();
-            if !name.is_empty() {
-                out.push((name, acc.display().to_string()));
+            match comp {
+                std::path::Component::Prefix(p) => {
+                    acc.push(p.as_os_str());
+                    let name = p.as_os_str().to_string_lossy().into_owned();
+                    out.push((name, acc.display().to_string()));
+                }
+                std::path::Component::RootDir => {
+                    acc.push(comp.as_os_str());
+                    if let Some(last) = out.last_mut() {
+                        last.1 = acc.display().to_string();
+                    } else {
+                        out.push((
+                            comp.as_os_str().to_string_lossy().into_owned(),
+                            acc.display().to_string(),
+                        ));
+                    }
+                }
+                _ => {
+                    acc.push(comp.as_os_str());
+                    let name = comp
+                        .as_os_str()
+                        .to_string_lossy()
+                        .trim_end_matches(['\\', '/'])
+                        .to_string();
+                    if !name.is_empty() {
+                        out.push((name, acc.display().to_string()));
+                    }
+                }
             }
         }
     }
@@ -5359,7 +5526,7 @@ fn same_local_file(a: &Path, b: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        match (std::fs::metadata(a), std::fs::metadata(b)) {
+        match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
             (Ok(ma), Ok(mb)) => ma.dev() == mb.dev() && ma.ino() == mb.ino(),
             _ => false,
         }
@@ -5405,11 +5572,19 @@ pub fn files_layout(
         return (body, None, None);
     }
     if maximized {
-        let line = egui::Rect::from_min_size(body.min, vec2(body.width(), TERM_LINE_H));
+        let line_h = TERM_LINE_H.min(body.height().max(0.0));
+        let line = egui::Rect::from_min_size(body.min, vec2(body.width(), line_h));
         let panel = egui::Rect::from_min_max(pos2(body.left(), line.bottom()), body.max);
         return (line, Some(panel), Some(line));
     }
-    let split_y = (body.top() + body.height() * (1.0 - split)).round();
+    let split = if split.is_finite() {
+        split.clamp(0.15, 0.85)
+    } else {
+        0.5
+    };
+    let split_y = (body.top() + body.height() * (1.0 - split))
+        .round()
+        .clamp(body.top(), body.bottom());
     (
         egui::Rect::from_min_max(body.min, pos2(body.right(), split_y)),
         Some(egui::Rect::from_min_max(
